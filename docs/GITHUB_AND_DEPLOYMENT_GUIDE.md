@@ -436,7 +436,7 @@ After confirming the new system works:
 When you push new code to GitHub:
 
 ```bash
-cd /var/www/convixx-backend
+cd /var/www/main_module
 sudo git pull origin main
 
 cd apps/api

@@ -1,6 +1,9 @@
 # Convixx API Documentation
 
-Base URL: `http://localhost:8080`
+**Base URL (Production):** `https://www.convixx.in`  
+**Base URL (Local):** `http://localhost:8080`
+
+Use the production URL for all API calls when the app is deployed. Replace the base in examples below with the appropriate URL.
 
 ---
 
@@ -33,7 +36,7 @@ List all chat sessions for the authenticated customer, ordered by most recently 
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/chat/sessions \
+curl https://www.convixx.in/chat/sessions \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -86,7 +89,7 @@ Get all messages for a specific chat session. Messages are decrypted and returne
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/messages \
+curl https://www.convixx.in/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/messages \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -136,7 +139,7 @@ curl http://localhost:8080/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/me
 | id | UUID | Message ID |
 | role | string | `"user"` or `"assistant"` |
 | content | string | Decrypted message text |
-| source | string or null | `"self-hosted"`, `"openai"`, or null (for user messages) |
+| source | string or null | `"self-hosted"`, `"openai"`, `"kb-direct"`, `"none"`, or null (for user messages) |
 | openai_cost_usd | number or null | Cost if OpenAI was used for this response |
 | created_at | timestamp | When the message was created |
 
@@ -152,8 +155,9 @@ curl http://localhost:8080/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/me
 
 ## 7. Authentication
 
-All KB and Ask endpoints require an API key passed via the `x-api-key` header.
-The key is generated per customer and scopes all data access to that customer only.
+These endpoints require an API key passed via the `x-api-key` header: `/agents`, `/kb/*`, `/ask`, `/chat/*`.  
+The key is generated per customer and scopes all data access to that customer only.  
+Customer endpoints (`/customers`, `/customers/:id/api-key`) do not require authentication.
 
 ```
 x-api-key: cvx_abc123...
@@ -294,7 +298,7 @@ Create a new customer.
 **Example Request:**
 
 ```bash
-curl -X POST http://localhost:8080/customers \
+curl -X POST https://www.convixx.in/customers \
   -H "Content-Type: application/json" \
   -d '{
     "name": "MarriageWale",
@@ -335,7 +339,7 @@ List all customers.
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/customers
+curl https://www.convixx.in/customers
 ```
 
 **Response 200:**
@@ -366,7 +370,7 @@ Get a single customer by ID.
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+curl https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
 **Response 200:**
@@ -412,7 +416,7 @@ At least one field must be provided.
 **Example Request (update system prompt):**
 
 ```bash
-curl -X PUT http://localhost:8080/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -d '{
     "system_prompt": "You are a premium support agent. Be professional and helpful."
@@ -422,7 +426,7 @@ curl -X PUT http://localhost:8080/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890
 **Example Request (update both):**
 
 ```bash
-curl -X PUT http://localhost:8080/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -d '{
     "name": "MarriageWale Premium",
@@ -472,7 +476,7 @@ Generate a new API key for a customer. This key is used to authenticate all KB a
 **Example Request:**
 
 ```bash
-curl -X POST http://localhost:8080/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890/api-key
+curl -X POST https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890/api-key
 ```
 
 **Response 201:**
@@ -520,7 +524,7 @@ Create a new agent for the authenticated customer.
 **Example Request:**
 
 ```bash
-curl -X POST http://localhost:8080/agents \
+curl -X POST https://www.convixx.in/agents \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -560,7 +564,7 @@ List all agents for the authenticated customer.
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/agents \
+curl https://www.convixx.in/agents \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -610,7 +614,7 @@ Get a single agent by its ID.
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -668,7 +672,7 @@ At least one field must be provided.
 **Example Request (update system prompt only):**
 
 ```bash
-curl -X PUT http://localhost:8080/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl -X PUT https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -679,7 +683,7 @@ curl -X PUT http://localhost:8080/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
 **Example Request (update all fields):**
 
 ```bash
-curl -X PUT http://localhost:8080/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl -X PUT https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -740,7 +744,7 @@ Delete an agent.
 **Example Request:**
 
 ```bash
-curl -X DELETE http://localhost:8080/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl -X DELETE https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -787,7 +791,7 @@ Upload one or more Q&A pairs to the customer's knowledgebase. Each question is e
 **Example Request:**
 
 ```bash
-curl -X POST http://localhost:8080/kb/upload \
+curl -X POST https://www.convixx.in/kb/upload \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -857,7 +861,7 @@ List all KB entries for the authenticated customer.
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/kb/entries \
+curl https://www.convixx.in/kb/entries \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -901,7 +905,7 @@ Get a single KB entry by its ID.
 **Example Request:**
 
 ```bash
-curl http://localhost:8080/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -955,7 +959,7 @@ At least one of `question` or `answer` must be provided.
 **Example Request (update answer only):**
 
 ```bash
-curl -X PUT http://localhost:8080/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl -X PUT https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -966,7 +970,7 @@ curl -X PUT http://localhost:8080/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef123456789
 **Example Request (update both):**
 
 ```bash
-curl -X PUT http://localhost:8080/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl -X PUT https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1023,7 +1027,7 @@ Delete a KB entry.
 **Example Request:**
 
 ```bash
-curl -X DELETE http://localhost:8080/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl -X DELETE https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -1088,7 +1092,7 @@ All chat messages (user and assistant) are encrypted with AES-256-GCM before sto
 **Example Request (new session, auto-route agent):**
 
 ```bash
-curl -X POST http://localhost:8080/ask \
+curl -X POST https://www.convixx.in/ask \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1099,7 +1103,7 @@ curl -X POST http://localhost:8080/ask \
 **Example Request (explicit agent):**
 
 ```bash
-curl -X POST http://localhost:8080/ask \
+curl -X POST https://www.convixx.in/ask \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1111,7 +1115,7 @@ curl -X POST http://localhost:8080/ask \
 **Example Request (continue session):**
 
 ```bash
-curl -X POST http://localhost:8080/ask \
+curl -X POST https://www.convixx.in/ask \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1318,4 +1322,4 @@ All chat messages (both user questions and assistant answers) are encrypted at t
 | DELETE | /kb/entries/:id | Yes | Delete KB entry |
 | POST | /ask | Yes | Ask a question (RAG + agent + session + encrypted chat) |
 | GET | /chat/sessions | Yes | List chat sessions for customer |
-| GET | /chat/sessions/:id/messages | Yes | Get decrypted messages for a session |
+| GET | /chat/sessions/:session_id/messages | Yes | Get decrypted messages for a session |
