@@ -6,6 +6,7 @@
     "version": "1.0.0"
   },
   "servers": [
+    { "url": "/", "description": "Current host (recommended for Try it out)" },
     { "url": "https://www.convixx.in", "description": "Production" },
     { "url": "http://localhost:8080", "description": "Local" }
   ],

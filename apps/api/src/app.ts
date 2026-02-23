@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { healthRoutes } from "./routes/health";
 import { customerRoutes } from "./routes/customers";
 import { kbRoutes } from "./routes/kb";
@@ -12,6 +13,7 @@ export async function buildApp() {
     logger: true,
   });
 
+  await app.register(cors, { origin: true }); // Allow all origins (required for Swagger UI Try it out)
   await registerSwagger(app);
 
   app.register(healthRoutes);

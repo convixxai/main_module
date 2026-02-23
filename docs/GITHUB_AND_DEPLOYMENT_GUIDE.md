@@ -444,6 +444,20 @@ pm2 restart convixx-api
 | "502 Bad Gateway"          | Is Node.js listening on 8080? `pm2 logs convixx-api`       |
 | "Database connection" error | Is PostgreSQL reachable? Check PG_HOST, firewall, pg_hba.conf |
 | Old Python still responding| Ensure old service is stopped and Nginx serves only new config |
+| **EACCES on npm install**  | Files owned by root after `sudo git pull`. Run: `sudo chown -R ubuntu:ubuntu /var/www/main_module` |
+
+### EACCES: permission denied on package-lock.json
+
+If `npm install` fails with `EACCES: permission denied` on `package-lock.json`, the directory was likely updated with `sudo git pull`, so root owns the files and the `ubuntu` user cannot write. Fix ownership, then retry:
+
+```bash
+sudo chown -R ubuntu:ubuntu /var/www/main_module
+cd /var/www/main_module/apps/api
+npm install
+npm run build
+```
+
+To avoid this after future updates, either run `git pull` without sudo (if the repo is owned by ubuntu), or run the chown command after every `sudo git pull`.
 
 ---
 

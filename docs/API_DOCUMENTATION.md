@@ -14,6 +14,8 @@ Interactive API documentation is available at a separate path from the API:
 
 Use the **Authorize** button in Swagger UI to set `x-admin-token` (for customer/admin endpoints) or `x-api-key` (for KB, agents, ask, chat). You can try out endpoints directly from the browser.
 
+**Tip:** If "Try it out" shows "Failed to fetch", ensure the server dropdown at the top is set to **"Current host"** so requests go to the same host as the docs. CORS is enabled to allow browser requests.
+
 ---
 
 ## Table of Contents
