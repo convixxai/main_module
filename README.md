@@ -200,30 +200,6 @@ npm install -D typescript ts-node-dev @types/node
 npx tsc --init
 ```
 
-### Environment Variables
-
-Create `apps/api/.env`:
-
-```
-PORT=8080
-
-# PostgreSQL (Server 2)
-PG_HOST=15.207.255.114
-PG_PORT=5432
-PG_USER=convixx_user
-PG_PASS=P@ssw0rd#2026
-PG_DB=convixx_kb
-
-# Self-hosted LLM (Server 1) - OpenAI-compatible API
-LLM_BASE_URL=https://ai.convixx.in/v1
-LLM_API_KEY=849f49126fb69331fe5bd0326f171560757db80ea86de567ca4dcc060432499d
-LLM_MODEL=qwen2.5:1.5b
-
-# OpenAI (fallback only)
-OPENAI_API_KEY=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
-OPENAI_MODEL=gpt-4o-mini
-```
-
 ### Run backend (local development)
 
 ```bash
@@ -245,7 +221,7 @@ servers using the URLs/IPs in `.env`.
 
 ### Create Customer
 
-POST `/customers`
+POST `/customers` (requires `x-admin-token` header)
 
 ```json
 {
@@ -271,7 +247,7 @@ PUT `/customers/:id` -- Update name, system_prompt, or both.
 
 ### Generate API Key
 
-POST `/customers/:id/api-key`
+POST `/customers/:id/api-key` (requires `x-admin-token` header)
 
 Generates a unique API key for the customer. This key is used in all subsequent
 requests to identify the customer and scope KB access.
@@ -403,13 +379,15 @@ curl http://localhost:8080/health/llm
 ```bash
 curl -X POST http://localhost:8080/customers \
   -H "Content-Type: application/json" \
+  -H "x-admin-token: <your-admin-token>" \
   -d '{"name":"DemoCustomer","system_prompt":"Answer short and polite."}'
 ```
 
 ### Step 4: Generate API key
 
 ```bash
-curl -X POST http://localhost:8080/customers/<customer-uuid>/api-key
+curl -X POST http://localhost:8080/customers/<customer-uuid>/api-key \
+  -H "x-admin-token: <your-admin-token>"
 ```
 
 Save the returned `api_key` -- it is used for all subsequent requests.

@@ -5,6 +5,15 @@
 
 Use the production URL for all API calls when the app is deployed. Replace the base in examples below with the appropriate URL.
 
+### Swagger UI
+
+Interactive API documentation is available at a separate path from the API:
+
+- **Production:** `https://www.convixx.in/docs`
+- **Local:** `http://localhost:8080/docs`
+
+Use the **Authorize** button in Swagger UI to set `x-admin-token` (for customer/admin endpoints) or `x-api-key` (for KB, agents, ask, chat). You can try out endpoints directly from the browser.
+
 ---
 
 ## Table of Contents
@@ -155,9 +164,19 @@ curl https://www.convixx.in/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/m
 
 ## 7. Authentication
 
-These endpoints require an API key passed via the `x-api-key` header: `/agents`, `/kb/*`, `/ask`, `/chat/*`.  
-The key is generated per customer and scopes all data access to that customer only.  
-Customer endpoints (`/customers`, `/customers/:id/api-key`) do not require authentication.
+### Customer APIs (Admin Token)
+
+All customer endpoints require a fixed admin token passed via the `x-admin-token` header.  
+Without this token, no one can create customers, list them, update them, or generate API keys.
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| x-admin-token | Yes | Fixed admin token (set in server `.env` as `ADMIN_TOKEN`) |
+
+### KB / Ask / Agents / Chat APIs (API Key)
+
+These endpoints require a customer API key passed via the `x-api-key` header: `/agents`, `/kb/*`, `/ask`, `/chat/*`.  
+The key is generated per customer (via POST `/customers/:id/api-key`) and scopes all data access to that customer only.
 
 ```
 x-api-key: cvx_abc123...
@@ -284,9 +303,18 @@ Checks embedding generation via self-hosted model.
 
 ## 2. Customer Endpoints
 
-### POST /customers
+All customer endpoints require the `x-admin-token` header. Without it, requests return 401.
+
+### POST /customers (requires `x-admin-token`)
 
 Create a new customer.
+
+**Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| Content-Type | Yes | application/json |
+| x-admin-token | Yes | Admin token (from server `ADMIN_TOKEN`) |
 
 **Request Body:**
 
@@ -300,6 +328,7 @@ Create a new customer.
 ```bash
 curl -X POST https://www.convixx.in/customers \
   -H "Content-Type: application/json" \
+  -H "x-admin-token: your_admin_token_here" \
   -d '{
     "name": "MarriageWale",
     "system_prompt": "You are MarriageWale support agent. Answer in short and polite manner."
@@ -330,16 +359,31 @@ curl -X POST https://www.convixx.in/customers \
 }
 ```
 
+**Response 401:**
+
+```json
+{
+  "error": "Missing or invalid x-admin-token"
+}
+```
+
 ---
 
-### GET /customers
+### GET /customers (requires `x-admin-token`)
 
 List all customers.
+
+**Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| x-admin-token | Yes | Admin token |
 
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/customers
+curl https://www.convixx.in/customers \
+  -H "x-admin-token: your_admin_token_here"
 ```
 
 **Response 200:**
@@ -357,9 +401,15 @@ curl https://www.convixx.in/customers
 
 ---
 
-### GET /customers/:id
+### GET /customers/:id (requires `x-admin-token`)
 
 Get a single customer by ID.
+
+**Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| x-admin-token | Yes | Admin token |
 
 **URL Parameters:**
 
@@ -370,7 +420,8 @@ Get a single customer by ID.
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+curl https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  -H "x-admin-token: your_admin_token_here"
 ```
 
 **Response 200:**
@@ -394,9 +445,16 @@ curl https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 ---
 
-### PUT /customers/:id
+### PUT /customers/:id (requires `x-admin-token`)
 
 Update a customer. You can update name, system_prompt, or both.
+
+**Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| Content-Type | Yes | application/json |
+| x-admin-token | Yes | Admin token |
 
 **URL Parameters:**
 
@@ -418,6 +476,7 @@ At least one field must be provided.
 ```bash
 curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
+  -H "x-admin-token: your_admin_token_here" \
   -d '{
     "system_prompt": "You are a premium support agent. Be professional and helpful."
   }'
@@ -428,6 +487,7 @@ curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef123456789
 ```bash
 curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
+  -H "x-admin-token: your_admin_token_here" \
   -d '{
     "name": "MarriageWale Premium",
     "system_prompt": "You are a premium support agent. Be professional and helpful."
@@ -463,9 +523,15 @@ curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef123456789
 
 ---
 
-### POST /customers/:id/api-key
+### POST /customers/:id/api-key (requires `x-admin-token`)
 
-Generate a new API key for a customer. This key is used to authenticate all KB and Ask requests.
+Generate a new API key for a customer. This key is used to authenticate all KB, Ask, Agents, and Chat requests.
+
+**Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| x-admin-token | Yes | Admin token |
 
 **URL Parameters:**
 
@@ -476,7 +542,8 @@ Generate a new API key for a customer. This key is used to authenticate all KB a
 **Example Request:**
 
 ```bash
-curl -X POST https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890/api-key
+curl -X POST https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890/api-key \
+  -H "x-admin-token: your_admin_token_here"
 ```
 
 **Response 201:**
@@ -1211,7 +1278,15 @@ All endpoints may return these common errors:
 
 ### 401 Unauthorized
 
-Returned when `x-api-key` header is missing or the key is invalid/inactive.
+**Customer endpoints** – when `x-admin-token` is missing or invalid:
+
+```json
+{
+  "error": "Missing or invalid x-admin-token"
+}
+```
+
+**KB / Ask / Agents / Chat endpoints** – when `x-api-key` is missing or invalid:
 
 ```json
 {
@@ -1305,11 +1380,11 @@ All chat messages (both user questions and assistant answers) are encrypted at t
 | GET | /health/vector | No | pgvector extension check |
 | GET | /health/llm | No | Self-hosted LLM check |
 | GET | /health/embedding | No | Embedding model check |
-| POST | /customers | No | Create customer |
-| GET | /customers | No | List customers |
-| GET | /customers/:id | No | Get single customer |
-| PUT | /customers/:id | No | Update customer (name, system_prompt) |
-| POST | /customers/:id/api-key | No | Generate API key |
+| POST | /customers | Yes (x-admin-token) | Create customer |
+| GET | /customers | Yes (x-admin-token) | List customers |
+| GET | /customers/:id | Yes (x-admin-token) | Get single customer |
+| PUT | /customers/:id | Yes (x-admin-token) | Update customer (name, system_prompt) |
+| POST | /customers/:id/api-key | Yes (x-admin-token) | Generate API key |
 | POST | /agents | Yes | Create agent |
 | GET | /agents | Yes | List agents for customer |
 | GET | /agents/:id | Yes | Get single agent |

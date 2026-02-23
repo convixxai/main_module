@@ -1,5 +1,6 @@
 import { FastifyRequest, FastifyReply } from "fastify";
 import { pool } from "../config/db";
+import { env } from "../config/env";
 
 export interface AuthenticatedRequest extends FastifyRequest {
   customerId?: string;
@@ -30,4 +31,19 @@ export async function apiKeyAuth(
 
   request.customerId = result.rows[0].customer_id;
   request.customerPrompt = result.rows[0].system_prompt;
+}
+
+export async function adminAuth(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const token = request.headers["x-admin-token"] as string | undefined;
+
+  if (!env.adminToken) {
+    return reply.status(503).send({ error: "Admin token not configured" });
+  }
+
+  if (!token || token !== env.adminToken) {
+    return reply.status(401).send({ error: "Missing or invalid x-admin-token" });
+  }
 }

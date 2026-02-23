@@ -259,31 +259,6 @@ cd /var/www/convixx-backend/apps/api
 sudo nano .env
 ```
 
-Paste the following and **replace values** with your actual credentials:
-
-```
-PORT=8080
-
-# PostgreSQL (on your AWS server or external)
-PG_HOST=15.207.255.114
-PG_PORT=5432
-PG_USER=convixx_user
-PG_PASS=P@ssw0rd#2026
-PG_DB=convixx_kb
-
-# Self-hosted LLM
-LLM_BASE_URL=https://ai.convixx.in/v1
-LLM_API_KEY=849f49126fb69331fe5bd0326f171560757db80ea86de567ca4dcc060432499d
-LLM_MODEL=qwen2.5:1.5b
-
-# OpenAI (fallback)
-OPENAI_API_KEY=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
-OPENAI_MODEL=gpt-4o-mini
-
-# Chat encryption (generate a new 64-char hex key for production)
-ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-```
-
 **Generate a secure encryption key:**
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"

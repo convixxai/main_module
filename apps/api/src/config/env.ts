@@ -26,4 +26,6 @@ export const env = {
   },
 
   encryptionKey: process.env.ENCRYPTION_KEY!,
+
+  adminToken: process.env.ADMIN_TOKEN || "",
 };

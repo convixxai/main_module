@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import crypto from "crypto";
 import { pool } from "../config/db";
+import { adminAuth } from "../middleware/auth";
 
 const createCustomerSchema = z.object({
   name: z.string().min(1),
@@ -14,8 +15,7 @@ const updateCustomerSchema = z.object({
 });
 
 export async function customerRoutes(app: FastifyInstance) {
-  // Create customer
-  app.post("/customers", async (request, reply) => {
+  app.post("/customers", { preHandler: adminAuth }, async (request, reply) => {
     const body = createCustomerSchema.safeParse(request.body);
     if (!body.success) {
       return reply.status(400).send({ error: body.error.flatten() });
@@ -32,8 +32,7 @@ export async function customerRoutes(app: FastifyInstance) {
     return reply.status(201).send(result.rows[0]);
   });
 
-  // List customers
-  app.get("/customers", async () => {
+  app.get("/customers", { preHandler: adminAuth }, async () => {
     const result = await pool.query(
       "SELECT id, name, system_prompt, created_at FROM customers ORDER BY created_at DESC"
     );
@@ -42,6 +41,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { id: string } }>(
     "/customers/:id",
+    { preHandler: adminAuth },
     async (request, reply) => {
       const { id } = request.params;
 
@@ -60,6 +60,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.put<{ Params: { id: string } }>(
     "/customers/:id",
+    { preHandler: adminAuth },
     async (request, reply) => {
       const body = updateCustomerSchema.safeParse(request.body);
       if (!body.success) {
@@ -111,6 +112,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string } }>(
     "/customers/:id/api-key",
+    { preHandler: adminAuth },
     async (request, reply) => {
       const { id } = request.params;
 

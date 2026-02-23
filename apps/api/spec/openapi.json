@@ -1,0 +1,763 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Convixx API",
+    "description": "Multi-tenant AI Voice Calling Platform backend. RAG-based question answering with self-hosted LLM and OpenAI fallback.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "https://www.convixx.in", "description": "Production" },
+    { "url": "http://localhost:8080", "description": "Local" }
+  ],
+  "tags": [
+    { "name": "Health" },
+    { "name": "Customers" },
+    { "name": "Agents" },
+    { "name": "Knowledgebase" },
+    { "name": "Ask" },
+    { "name": "Chat" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "AdminToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-admin-token",
+        "description": "Admin token for customer APIs. Set in .env as ADMIN_TOKEN."
+      },
+      "ApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "Customer API key. Scopes KB, agents, ask, chat to that customer."
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "API status",
+        "description": "Returns basic API health and timestamp.\nNo authentication required.",
+        "responses": {
+          "200": {
+            "description": "API is running",
+            "content": {
+              "application/json": {
+                "example": { "status": "ok", "timestamp": "2026-02-23T10:00:00.000Z" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/db": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "PostgreSQL check",
+        "description": "Verifies connection to PostgreSQL database.\nReturns 503 if connection fails.",
+        "responses": {
+          "200": {
+            "description": "Database connected",
+            "content": {
+              "application/json": {
+                "example": { "status": "ok", "time": "2026-02-23T10:00:00.000Z" }
+              }
+            }
+          },
+          "503": {
+            "description": "Database unavailable",
+            "content": {
+              "application/json": {
+                "example": { "status": "error", "message": "connection refused" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/vector": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "pgvector extension",
+        "description": "Checks if pgvector extension is installed.\nRequired for embeddings and vector search.",
+        "responses": {
+          "200": {
+            "description": "pgvector available",
+            "content": {
+              "application/json": {
+                "example": { "status": "ok", "pgvector_version": "0.8.1" }
+              }
+            }
+          },
+          "503": {
+            "description": "pgvector not found",
+            "content": {
+              "application/json": {
+                "example": { "status": "error", "message": "pgvector extension not found" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/llm": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Self-hosted LLM check",
+        "description": "Tests connection to self-hosted LLM at ai.convixx.in.\nSends a simple prompt and returns response.",
+        "responses": {
+          "200": {
+            "description": "LLM responding",
+            "content": {
+              "application/json": {
+                "example": { "status": "ok", "response": "Hello!" }
+              }
+            }
+          },
+          "503": {
+            "description": "LLM unavailable",
+            "content": {
+              "application/json": {
+                "example": { "status": "error", "message": "connect ECONNREFUSED" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/embedding": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Embedding model check",
+        "description": "Verifies embedding generation works.\nReturns vector dimensions (384 for nomic-embed-text).",
+        "responses": {
+          "200": {
+            "description": "Embedding OK",
+            "content": {
+              "application/json": {
+                "example": { "status": "ok", "dimensions": 384 }
+              }
+            }
+          },
+          "503": {
+            "description": "Embedding failed",
+            "content": {
+              "application/json": {
+                "example": { "status": "error", "message": "model not found" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers": {
+      "post": {
+        "tags": ["Customers"],
+        "summary": "Create customer",
+        "description": "Creates a new customer with optional system prompt.\nRequires x-admin-token. Returns customer with UUID.",
+        "security": [{ "AdminToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "system_prompt": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Customer created",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "name": "MarriageWale",
+                  "system_prompt": "You are MarriageWale support agent.",
+                  "created_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "example": { "error": "Missing or invalid x-admin-token" }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": ["Customers"],
+        "summary": "List customers",
+        "description": "Returns all customers ordered by creation date.\nRequires x-admin-token.",
+        "security": [{ "AdminToken": [] }],
+        "responses": {
+          "200": {
+            "description": "List of customers",
+            "content": {
+              "application/json": {
+                "example": [
+                  {
+                    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    "name": "MarriageWale",
+                    "system_prompt": "You are MarriageWale support agent.",
+                    "created_at": "2026-02-23T10:00:00.000Z"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{id}": {
+      "get": {
+        "tags": ["Customers"],
+        "summary": "Get customer",
+        "description": "Returns a single customer by ID.\nRequires x-admin-token.",
+        "security": [{ "AdminToken": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "name": "MarriageWale",
+                  "system_prompt": "You are MarriageWale support agent.",
+                  "created_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found",
+            "content": {
+              "application/json": {
+                "example": { "error": "Customer not found" }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["Customers"],
+        "summary": "Update customer",
+        "description": "Updates customer name and/or system_prompt.\nRequires x-admin-token. At least one field must be provided.",
+        "security": [{ "AdminToken": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "system_prompt": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Customer updated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "name": "MarriageWale Premium",
+                  "system_prompt": "You are a premium support agent.",
+                  "created_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{id}/api-key": {
+      "post": {
+        "tags": ["Customers"],
+        "summary": "Generate API key",
+        "description": "Generates a new API key for the customer.\nRequires x-admin-token. Key is used for KB, ask, agents, chat.",
+        "security": [{ "AdminToken": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "201": {
+            "description": "API key generated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "api_key": "cvx_8f3a1b2c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890",
+                  "created_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found",
+            "content": {
+              "application/json": {
+                "example": { "error": "Customer not found" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agents": {
+      "post": {
+        "tags": ["Agents"],
+        "summary": "Create agent",
+        "description": "Creates an agent with name, description, system prompt.\nRequires x-api-key. Each agent has its own system prompt.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "description": { "type": "string" },
+                  "system_prompt": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Agent created",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "name": "Sales Agent",
+                  "description": "Handles pricing queries",
+                  "system_prompt": "You are a sales agent.",
+                  "is_active": true,
+                  "created_at": "2026-02-23T10:00:00.000Z",
+                  "updated_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": ["Agents"],
+        "summary": "List agents",
+        "description": "Returns all agents for the authenticated customer.\nRequires x-api-key.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "List of agents",
+            "content": {
+              "application/json": {
+                "example": [
+                  {
+                    "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                    "name": "Sales Agent",
+                    "description": "Handles pricing",
+                    "system_prompt": "You are a sales agent.",
+                    "is_active": true,
+                    "created_at": "2026-02-23T10:00:00.000Z",
+                    "updated_at": "2026-02-23T10:00:00.000Z"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agents/{id}": {
+      "get": {
+        "tags": ["Agents"],
+        "summary": "Get agent",
+        "description": "Returns a single agent by ID.\nRequires x-api-key. Agent must belong to customer.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "name": "Sales Agent",
+                  "description": "Handles pricing",
+                  "system_prompt": "You are a sales agent.",
+                  "is_active": true,
+                  "created_at": "2026-02-23T10:00:00.000Z",
+                  "updated_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "example": { "error": "Agent not found" }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["Agents"],
+        "summary": "Update agent",
+        "description": "Updates agent name, description, or system_prompt.\nRequires x-api-key. At least one field required.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "description": { "type": "string" },
+                  "system_prompt": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent updated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "name": "Premium Sales Agent",
+                  "description": "Handles VIP pricing",
+                  "system_prompt": "You are a premium sales agent.",
+                  "is_active": true,
+                  "created_at": "2026-02-23T10:00:00.000Z",
+                  "updated_at": "2026-02-23T10:05:00.000Z"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Agents"],
+        "summary": "Delete agent",
+        "description": "Deletes an agent permanently.\nRequires x-api-key.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Agent deleted",
+                  "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/kb/upload": {
+      "post": {
+        "tags": ["Knowledgebase"],
+        "summary": "Upload KB entries",
+        "description": "Uploads Q&A pairs to the customer knowledgebase.\nRequires x-api-key. Each question is embedded and stored for vector search.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["entries"],
+                "properties": {
+                  "entries": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["question", "answer"],
+                      "properties": {
+                        "question": { "type": "string" },
+                        "answer": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Entries uploaded",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "4 Q&A entries uploaded",
+                  "customer_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/kb/entries": {
+      "get": {
+        "tags": ["Knowledgebase"],
+        "summary": "List KB entries",
+        "description": "Returns all KB entries for the authenticated customer.\nRequires x-api-key.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "List of KB entries",
+            "content": {
+              "application/json": {
+                "example": [
+                  {
+                    "id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890",
+                    "question": "What is MarriageWale?",
+                    "answer": "MarriageWale is a matrimonial app.",
+                    "created_at": "2026-02-23T10:00:00.000Z"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/kb/entries/{id}": {
+      "get": {
+        "tags": ["Knowledgebase"],
+        "summary": "Get KB entry",
+        "description": "Returns a single KB entry by ID.\nRequires x-api-key.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "KB entry found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890",
+                  "question": "What is MarriageWale?",
+                  "answer": "MarriageWale is a matrimonial app.",
+                  "created_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["Knowledgebase"],
+        "summary": "Update KB entry",
+        "description": "Updates question and/or answer. Re-embeds if question changes.\nRequires x-api-key. At least one field required.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "question": { "type": "string" },
+                  "answer": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "KB entry updated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890",
+                  "question": "What exactly is MarriageWale?",
+                  "answer": "MarriageWale is a premium matrimonial app.",
+                  "created_at": "2026-02-23T10:00:00.000Z"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Knowledgebase"],
+        "summary": "Delete KB entry",
+        "description": "Deletes a KB entry permanently.\nRequires x-api-key.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "KB entry deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "KB entry deleted",
+                  "id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ask": {
+      "post": {
+        "tags": ["Ask"],
+        "summary": "Ask a question",
+        "description": "RAG-based question answering. Uses vector search + LLM.\nRequires x-api-key. Optional agent_id and session_id for multi-agent and chat threads.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["question"],
+                "properties": {
+                  "question": { "type": "string" },
+                  "session_id": { "type": "string", "format": "uuid" },
+                  "agent_id": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Answer with metadata",
+            "content": {
+              "application/json": {
+                "example": {
+                  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "agent_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "agent_name": "Sales Agent",
+                  "answer": "MarriageWale is located in Kolhapur, Maharashtra.",
+                  "source": "self-hosted",
+                  "openai_cost_usd": null,
+                  "response_time_ms": 5200
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chat/sessions": {
+      "get": {
+        "tags": ["Chat"],
+        "summary": "List chat sessions",
+        "description": "Returns all chat sessions for the customer, newest first.\nRequires x-api-key. Includes message count per session.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "List of chat sessions",
+            "content": {
+              "application/json": {
+                "example": [
+                  {
+                    "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    "created_at": "2026-02-23T10:00:00.000Z",
+                    "updated_at": "2026-02-23T10:05:30.000Z",
+                    "message_count": 6
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chat/sessions/{session_id}/messages": {
+      "get": {
+        "tags": ["Chat"],
+        "summary": "Get chat messages",
+        "description": "Returns decrypted messages for a session in chronological order.\nRequires x-api-key. Session must belong to customer.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of messages",
+            "content": {
+              "application/json": {
+                "example": [
+                  {
+                    "id": "msg-uuid-1",
+                    "role": "user",
+                    "content": "What rooms are available?",
+                    "source": null,
+                    "openai_cost_usd": null,
+                    "created_at": "2026-02-23T10:00:00.000Z"
+                  },
+                  {
+                    "id": "msg-uuid-2",
+                    "role": "assistant",
+                    "content": "We offer Sarja Raja Mini Carts and Yashwantrao Wada with pool.",
+                    "source": "self-hosted",
+                    "openai_cost_usd": null,
+                    "created_at": "2026-02-23T10:00:05.000Z"
+                  }
+                ]
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "example": { "error": "Session not found or does not belong to this customer" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

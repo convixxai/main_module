@@ -5,11 +5,14 @@ import { kbRoutes } from "./routes/kb";
 import { askRoutes } from "./routes/ask";
 import { chatRoutes } from "./routes/chat";
 import { agentRoutes } from "./routes/agents";
+import { registerSwagger } from "./plugins/swagger";
 
-export function buildApp() {
+export async function buildApp() {
   const app = Fastify({
     logger: true,
   });
+
+  await registerSwagger(app);
 
   app.register(healthRoutes);
   app.register(customerRoutes);
