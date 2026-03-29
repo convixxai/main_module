@@ -5,6 +5,8 @@ import { env } from "../config/env";
 export interface AuthenticatedRequest extends FastifyRequest {
   customerId?: string;
   customerPrompt?: string;
+  /** When true, RAG uses OpenAI only (no self-hosted LLM). From `customers.rag_use_openai_only`. */
+  ragUseOpenaiOnly?: boolean;
 }
 
 export async function apiKeyAuth(
@@ -18,7 +20,7 @@ export async function apiKeyAuth(
   }
 
   const result = await pool.query(
-    `SELECT ak.customer_id, c.system_prompt
+    `SELECT ak.customer_id, c.system_prompt, c.rag_use_openai_only
      FROM api_keys ak
      JOIN customers c ON c.id = ak.customer_id
      WHERE ak.key = $1 AND ak.is_active = TRUE`,
@@ -31,6 +33,8 @@ export async function apiKeyAuth(
 
   request.customerId = result.rows[0].customer_id;
   request.customerPrompt = result.rows[0].system_prompt;
+  request.ragUseOpenaiOnly =
+    result.rows[0].rag_use_openai_only === true;
 }
 
 export async function adminAuth(

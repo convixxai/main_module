@@ -7,6 +7,7 @@ import { askRoutes } from "./routes/ask";
 import { chatRoutes } from "./routes/chat";
 import { agentRoutes } from "./routes/agents";
 import { voiceRoutes } from "./routes/voice";
+import { settingsRoutes } from "./routes/settings";
 import { registerSwagger } from "./plugins/swagger";
 
 export async function buildApp() {
@@ -19,6 +20,7 @@ export async function buildApp() {
 
   app.register(healthRoutes);
   app.register(customerRoutes);
+  app.register(settingsRoutes);
   app.register(agentRoutes);
   app.register(kbRoutes);
   app.register(askRoutes);

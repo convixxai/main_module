@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   system_prompt TEXT NOT NULL DEFAULT 'You are a helpful assistant.',
+  rag_use_openai_only BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT NOW()
 );
 

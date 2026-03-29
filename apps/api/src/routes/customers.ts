@@ -12,6 +12,7 @@ const createCustomerSchema = z.object({
 const updateCustomerSchema = z.object({
   name: z.string().min(1).optional(),
   system_prompt: z.string().optional(),
+  rag_use_openai_only: z.boolean().optional(),
 });
 
 export async function customerRoutes(app: FastifyInstance) {
@@ -68,12 +69,17 @@ export async function customerRoutes(app: FastifyInstance) {
       }
 
       const { id } = request.params;
-      const { name, system_prompt } = body.data;
+      const { name, system_prompt, rag_use_openai_only } = body.data;
 
-      if (!name && system_prompt === undefined) {
-        return reply
-          .status(400)
-          .send({ error: "Provide at least name or system_prompt to update" });
+      if (
+        !name &&
+        system_prompt === undefined &&
+        rag_use_openai_only === undefined
+      ) {
+        return reply.status(400).send({
+          error:
+            "Provide at least name, system_prompt, or rag_use_openai_only to update",
+        });
       }
 
       const existing = await pool.query(
@@ -96,13 +102,17 @@ export async function customerRoutes(app: FastifyInstance) {
         sets.push(`system_prompt = $${idx++}`);
         values.push(system_prompt);
       }
+      if (rag_use_openai_only !== undefined) {
+        sets.push(`rag_use_openai_only = $${idx++}`);
+        values.push(rag_use_openai_only);
+      }
 
       values.push(id);
 
       const result = await pool.query(
         `UPDATE customers SET ${sets.join(", ")}
          WHERE id = $${idx}
-         RETURNING id, name, system_prompt, created_at`,
+         RETURNING id, name, system_prompt, rag_use_openai_only, created_at`,
         values
       );
 

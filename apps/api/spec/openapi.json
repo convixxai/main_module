@@ -15,6 +15,7 @@
     { "name": "Customers", "description": "Admin-only customer CRUD and API key issuance (`x-admin-token`)." },
     { "name": "Agents", "description": "Per-customer agents (`x-api-key`)." },
     { "name": "Knowledgebase", "description": "Q&A upload and CRUD with embeddings (`x-api-key`)." },
+    { "name": "Settings", "description": "Customer preferences such as RAG mode (`x-api-key`)." },
     { "name": "Ask", "description": "RAG question answering (`x-api-key`)." },
     { "name": "Chat", "description": "Session and message listing (`x-api-key`)." },
     { "name": "Voice", "description": "Sarvam speech-to-text and text-to-speech (`x-api-key`)." }
@@ -648,11 +649,59 @@
         }
       }
     },
+    "/settings/rag": {
+      "get": {
+        "tags": ["Settings"],
+        "summary": "Get RAG LLM mode",
+        "description": "Returns `rag_use_openai_only`: when true, RAG uses OpenAI only (self-hosted LLM is not called). Stored per customer. Requires x-api-key.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Current setting",
+            "content": {
+              "application/json": {
+                "example": { "rag_use_openai_only": false }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": ["Settings"],
+        "summary": "Set RAG LLM mode (OpenAI-only toggle)",
+        "description": "Set `rag_use_openai_only`. When true, `/ask` and `/ask/voice` use OpenAI for RAG answers only (same KB context and prompts; self-hosted is skipped). When false, default pipeline (self-hosted with OpenAI fallback) applies. Requires x-api-key.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["rag_use_openai_only"],
+                "properties": {
+                  "rag_use_openai_only": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated setting",
+            "content": {
+              "application/json": {
+                "example": { "rag_use_openai_only": true }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ask": {
       "post": {
         "tags": ["Ask"],
         "summary": "Ask a question",
-        "description": "RAG-based question answering. Uses vector search + LLM.\nRequires x-api-key. Optional agent_id and session_id for multi-agent and chat threads.",
+        "description": "RAG-based question answering. Uses vector search + LLM.\nRequires x-api-key. Optional agent_id and session_id for multi-agent and chat threads.\nIf the customer has `rag_use_openai_only` enabled (see GET `/settings/rag`), RAG uses OpenAI only.",
         "security": [{ "ApiKey": [] }],
         "requestBody": {
           "required": true,

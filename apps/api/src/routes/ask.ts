@@ -319,6 +319,8 @@ async function runAskPipeline(params: {
    * When false (default): run both in parallel — lower latency if OpenAI is faster fallback.
    */
   sequentialLlm?: boolean;
+  /** When true (customer setting): RAG uses OpenAI only; self-hosted is skipped. */
+  ragOpenaiOnly?: boolean;
 }): Promise<AskPipelineResult> {
   const {
     customerId,
@@ -328,6 +330,7 @@ async function runAskPipeline(params: {
     inputAgentId,
     includeTimings,
     sequentialLlm,
+    ragOpenaiOnly,
   } = params;
   const start = Date.now();
 
@@ -425,7 +428,9 @@ async function runAskPipeline(params: {
   let selfHostedAnswer = "";
   let openaiResult: Awaited<ReturnType<typeof chatOpenAI>> | null = null;
 
-  if (sequentialLlm) {
+  if (ragOpenaiOnly) {
+    openaiResult = await chatOpenAI(ragMessages, 150).catch(() => null);
+  } else if (sequentialLlm) {
     selfHostedAnswer = await chatSelfHosted(ragMessages, 150).catch(() => "");
     const shFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
     if (shFailed) {
@@ -441,8 +446,6 @@ async function runAskPipeline(params: {
   }
   const ragLlmParallelMs = Date.now() - tRag0;
 
-  const selfHostedFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
-
   const ragTimings = (
     branch: AskPipelineTimings["branch"]
   ): AskPipelineTimings => ({
@@ -452,6 +455,62 @@ async function runAskPipeline(params: {
     rag_llm_parallel_ms: ragLlmParallelMs,
     branch,
   });
+
+  if (ragOpenaiOnly) {
+    if (openaiResult) {
+      logOpenAIUsage(customerId, question, {
+        promptTokens: openaiResult.promptTokens,
+        completionTokens: openaiResult.completionTokens,
+        totalTokens: openaiResult.totalTokens,
+        model: openaiResult.model,
+        costUsd: openaiResult.costUsd,
+      });
+    }
+    const oa = openaiResult?.answer?.trim() || "";
+    if (openaiResult && oa && !isNotFound(oa)) {
+      saveMessage(
+        sessionId,
+        "assistant",
+        oa,
+        "openai",
+        openaiResult.costUsd
+      );
+      return {
+        session_id: sessionId,
+        agent_id: agentId,
+        agent_name: agentName,
+        answer: oa,
+        source: "openai",
+        openai_cost_usd: openaiResult.costUsd,
+        response_time_ms: Date.now() - start,
+        ...(includeTimings ? { pipeline_timings: ragTimings("rag_openai") } : {}),
+      };
+    }
+    const lastResortOpenai =
+      oa || "Unable to generate an answer at this time.";
+    saveMessage(
+      sessionId,
+      "assistant",
+      lastResortOpenai,
+      "openai",
+      openaiResult?.costUsd
+    );
+    return {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_name: agentName,
+      answer: lastResortOpenai,
+      source: "openai",
+      openai_cost_usd: openaiResult?.costUsd ?? null,
+      fallback_reason: openaiResult
+        ? "OpenAI could not produce a valid answer from the knowledgebase (rag_openai_only)"
+        : "OpenAI request failed (rag_openai_only)",
+      response_time_ms: Date.now() - start,
+      ...(includeTimings ? { pipeline_timings: ragTimings("rag_last_resort") } : {}),
+    };
+  }
+
+  const selfHostedFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
 
   if (!selfHostedFailed) {
     saveMessage(sessionId, "assistant", selfHostedAnswer, "self-hosted");
@@ -567,6 +626,7 @@ export async function askRoutes(app: FastifyInstance) {
         question,
         inputSessionId: inputSessionId ?? null,
         inputAgentId: inputAgentId ?? null,
+        ragOpenaiOnly: request.ragUseOpenaiOnly === true,
       });
     }
   );
@@ -736,7 +796,8 @@ export async function askRoutes(app: FastifyInstance) {
           inputSessionId,
           inputAgentId,
           includeTimings: true,
-          sequentialLlm: voiceFastLlm,
+          sequentialLlm: voiceFastLlm && !request.ragUseOpenaiOnly,
+          ragOpenaiOnly: request.ragUseOpenaiOnly === true,
         });
 
         const ttsLimit = voiceTtsCap ?? TTS_MAX_CHARS;
