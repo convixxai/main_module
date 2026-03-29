@@ -1,11 +1,17 @@
 import { FastifyInstance } from "fastify";
+import multipart from "@fastify/multipart";
 import { z } from "zod";
 import { pool } from "../config/db";
+import { env } from "../config/env";
 import {
   generateEmbedding,
   chatSelfHosted,
   chatOpenAI,
 } from "../services/llm";
+import {
+  sarvamSpeechToText,
+  sarvamTextToSpeech,
+} from "../services/sarvam";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
 
@@ -273,6 +279,273 @@ function logOpenAIUsage(
   ).catch(() => {});
 }
 
+export type AskPipelineResult = {
+  session_id: string;
+  agent_id: string | null;
+  agent_name: string | null;
+  answer: string;
+  source: string;
+  openai_cost_usd: number | null;
+  response_time_ms: number;
+  self_hosted_answer?: string | null;
+  fallback_reason?: string;
+  /** Present when `runAskPipeline` was called with `includeTimings: true` */
+  pipeline_timings?: AskPipelineTimings;
+};
+
+/** Per-step latency inside the RAG pipeline (voice/debug). */
+export type AskPipelineTimings = {
+  parallel_init_ms: number;
+  resolve_agent_ms: number;
+  vector_history_ms: number;
+  rag_llm_parallel_ms: number;
+  branch:
+    | "no_kb"
+    | "kb_direct"
+    | "rag_self_hosted"
+    | "rag_openai"
+    | "rag_last_resort";
+};
+
+async function runAskPipeline(params: {
+  customerId: string;
+  customerPrompt: string;
+  question: string;
+  inputSessionId: string | null;
+  inputAgentId: string | null;
+  includeTimings?: boolean;
+  /**
+   * When true (e.g. voice): run self-hosted first; call OpenAI only if self-hosted fails.
+   * When false (default): run both in parallel — lower latency if OpenAI is faster fallback.
+   */
+  sequentialLlm?: boolean;
+}): Promise<AskPipelineResult> {
+  const {
+    customerId,
+    customerPrompt,
+    question,
+    inputSessionId,
+    inputAgentId,
+    includeTimings,
+    sequentialLlm,
+  } = params;
+  const start = Date.now();
+
+  const tParallel0 = Date.now();
+  const [sessionId, embedding, sessionAgent] = await Promise.all([
+    getOrCreateSession(customerId, inputSessionId),
+    generateEmbedding(question),
+    resolveAgentFromSession(inputSessionId),
+  ]);
+  const parallelInitMs = Date.now() - tParallel0;
+
+  const tAgent0 = Date.now();
+  let agent: ResolvedAgent | null = null;
+  if (inputAgentId) {
+    agent = await resolveAgent(customerId, inputAgentId, question);
+  } else if (sessionAgent) {
+    agent = sessionAgent;
+  } else {
+    agent = await resolveAgent(customerId, null, question);
+  }
+  const resolveAgentMs = Date.now() - tAgent0;
+
+  const systemPrompt = agent?.systemPrompt || customerPrompt;
+  const agentId = agent?.id || null;
+  const agentName = agent?.name || null;
+
+  if (agentId) {
+    pool.query(
+      "UPDATE chat_sessions SET agent_id = COALESCE(agent_id, $1) WHERE id = $2",
+      [agentId, sessionId]
+    ).catch(() => {});
+  }
+
+  const tVec0 = Date.now();
+  const [matches, history] = await Promise.all([
+    vectorSearchWithDistance(customerId, embedding),
+    getChatHistory(sessionId),
+  ]);
+  const vectorHistoryMs = Date.now() - tVec0;
+
+  saveMessage(sessionId, "user", question);
+
+  const baseTimings = (): AskPipelineTimings => ({
+    parallel_init_ms: parallelInitMs,
+    resolve_agent_ms: resolveAgentMs,
+    vector_history_ms: vectorHistoryMs,
+    rag_llm_parallel_ms: 0,
+    branch: "no_kb",
+  });
+
+  if (matches.length === 0) {
+    const noKbAnswer = "No knowledgebase entries found for this customer.";
+    saveMessage(sessionId, "assistant", noKbAnswer, "none");
+    const timings = baseTimings();
+    timings.branch = "no_kb";
+    return {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_name: agentName,
+      answer: noKbAnswer,
+      source: "none",
+      openai_cost_usd: null,
+      response_time_ms: Date.now() - start,
+      ...(includeTimings ? { pipeline_timings: timings } : {}),
+    };
+  }
+
+  const topMatch = matches[0];
+
+  if (topMatch.distance < DIRECT_MATCH_THRESHOLD && history.length === 0) {
+    saveMessage(sessionId, "assistant", topMatch.answer, "kb-direct");
+    const timings = baseTimings();
+    timings.branch = "kb_direct";
+    return {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_name: agentName,
+      answer: topMatch.answer,
+      source: "kb-direct",
+      openai_cost_usd: null,
+      response_time_ms: Date.now() - start,
+      ...(includeTimings ? { pipeline_timings: timings } : {}),
+    };
+  }
+
+  const context = buildContext(matches);
+  const ragMessages = buildRAGMessages(
+    systemPrompt,
+    context,
+    history,
+    question
+  );
+
+  const tRag0 = Date.now();
+  let selfHostedAnswer = "";
+  let openaiResult: Awaited<ReturnType<typeof chatOpenAI>> | null = null;
+
+  if (sequentialLlm) {
+    selfHostedAnswer = await chatSelfHosted(ragMessages, 150).catch(() => "");
+    const shFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
+    if (shFailed) {
+      openaiResult = await chatOpenAI(ragMessages, 150).catch(() => null);
+    }
+  } else {
+    const pair = await Promise.all([
+      chatSelfHosted(ragMessages, 150).catch(() => ""),
+      chatOpenAI(ragMessages, 150).catch(() => null),
+    ]);
+    selfHostedAnswer = pair[0];
+    openaiResult = pair[1];
+  }
+  const ragLlmParallelMs = Date.now() - tRag0;
+
+  const selfHostedFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
+
+  const ragTimings = (
+    branch: AskPipelineTimings["branch"]
+  ): AskPipelineTimings => ({
+    parallel_init_ms: parallelInitMs,
+    resolve_agent_ms: resolveAgentMs,
+    vector_history_ms: vectorHistoryMs,
+    rag_llm_parallel_ms: ragLlmParallelMs,
+    branch,
+  });
+
+  if (!selfHostedFailed) {
+    saveMessage(sessionId, "assistant", selfHostedAnswer, "self-hosted");
+    return {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_name: agentName,
+      answer: selfHostedAnswer,
+      source: "self-hosted",
+      openai_cost_usd: null,
+      response_time_ms: Date.now() - start,
+      ...(includeTimings ? { pipeline_timings: ragTimings("rag_self_hosted") } : {}),
+    };
+  }
+
+  const fallbackResult = openaiResult;
+
+  if (fallbackResult) {
+    logOpenAIUsage(customerId, question, {
+      promptTokens: fallbackResult.promptTokens,
+      completionTokens: fallbackResult.completionTokens,
+      totalTokens: fallbackResult.totalTokens,
+      model: fallbackResult.model,
+      costUsd: fallbackResult.costUsd,
+    });
+
+    saveMessage(
+      sessionId,
+      "assistant",
+      fallbackResult.answer,
+      "openai",
+      fallbackResult.costUsd
+    );
+
+    return {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_name: agentName,
+      answer: fallbackResult.answer,
+      source: "openai",
+      self_hosted_answer: selfHostedAnswer || null,
+      fallback_reason: "Self-hosted LLM could not answer from knowledgebase",
+      openai_cost_usd: fallbackResult.costUsd,
+      response_time_ms: Date.now() - start,
+      ...(includeTimings ? { pipeline_timings: ragTimings("rag_openai") } : {}),
+    };
+  }
+
+  const lastResort =
+    selfHostedAnswer || "Unable to generate an answer at this time.";
+  saveMessage(sessionId, "assistant", lastResort, "self-hosted");
+
+  return {
+    session_id: sessionId,
+    agent_id: agentId,
+    agent_name: agentName,
+    answer: lastResort,
+    source: "self-hosted",
+    openai_cost_usd: null,
+    fallback_reason: "Both self-hosted and OpenAI failed",
+    response_time_ms: Date.now() - start,
+    ...(includeTimings ? { pipeline_timings: ragTimings("rag_last_resort") } : {}),
+  };
+}
+
+const TTS_MAX_CHARS = 2500;
+
+const ttsLanguageSchema = z.enum([
+  "bn-IN",
+  "en-IN",
+  "gu-IN",
+  "hi-IN",
+  "kn-IN",
+  "ml-IN",
+  "mr-IN",
+  "od-IN",
+  "pa-IN",
+  "ta-IN",
+  "te-IN",
+]);
+
+function parseSttBody(body: unknown): { transcript: string; language_code: string | null } {
+  if (!body || typeof body !== "object") {
+    return { transcript: "", language_code: null };
+  }
+  const o = body as Record<string, unknown>;
+  const t = o.transcript;
+  return {
+    transcript: typeof t === "string" ? t : "",
+    language_code:
+      typeof o.language_code === "string" ? o.language_code : null,
+  };
+}
+
 export async function askRoutes(app: FastifyInstance) {
   app.post(
     "/ask",
@@ -285,156 +558,298 @@ export async function askRoutes(app: FastifyInstance) {
 
       const customerId = request.customerId!;
       const customerDefaultPrompt = request.customerPrompt!;
-      const { question, session_id: inputSessionId, agent_id: inputAgentId } = body.data;
-      const start = Date.now();
+      const { question, session_id: inputSessionId, agent_id: inputAgentId } =
+        body.data;
 
-      // Step 1: Session + embedding + session-agent lookup ALL in parallel
-      const [sessionId, embedding, sessionAgent] = await Promise.all([
-        getOrCreateSession(customerId, inputSessionId || null),
-        generateEmbedding(question),
-        resolveAgentFromSession(inputSessionId || null),
-      ]);
-
-      // Step 2: Resolve agent (fast paths first, LLM routing only if needed)
-      let agent: ResolvedAgent | null = null;
-      if (inputAgentId) {
-        agent = await resolveAgent(customerId, inputAgentId, question);
-      } else if (sessionAgent) {
-        agent = sessionAgent;
-      } else {
-        agent = await resolveAgent(customerId, null, question);
-      }
-
-      const systemPrompt = agent?.systemPrompt || customerDefaultPrompt;
-      const agentId = agent?.id || null;
-      const agentName = agent?.name || null;
-
-      if (agentId) {
-        pool.query(
-          "UPDATE chat_sessions SET agent_id = COALESCE(agent_id, $1) WHERE id = $2",
-          [agentId, sessionId]
-        ).catch(() => {});
-      }
-
-      // Step 3: Vector search with distance + chat history in parallel
-      const [matches, history] = await Promise.all([
-        vectorSearchWithDistance(customerId, embedding),
-        getChatHistory(sessionId),
-      ]);
-
-      saveMessage(sessionId, "user", question);
-
-      if (matches.length === 0) {
-        const noKbAnswer =
-          "No knowledgebase entries found for this customer.";
-        saveMessage(sessionId, "assistant", noKbAnswer, "none");
-        return {
-          session_id: sessionId,
-          agent_id: agentId,
-          agent_name: agentName,
-          answer: noKbAnswer,
-          source: "none",
-          openai_cost_usd: null,
-          response_time_ms: Date.now() - start,
-        };
-      }
-
-      const topMatch = matches[0];
-
-      // FAST PATH: Direct KB match — skip LLM entirely
-      // If the user's question is very close to a KB question, return the
-      // KB answer directly. This handles ~70% of FAQ queries in <1 second.
-      if (topMatch.distance < DIRECT_MATCH_THRESHOLD && history.length === 0) {
-        saveMessage(sessionId, "assistant", topMatch.answer, "kb-direct");
-        return {
-          session_id: sessionId,
-          agent_id: agentId,
-          agent_name: agentName,
-          answer: topMatch.answer,
-          source: "kb-direct",
-          openai_cost_usd: null,
-          response_time_ms: Date.now() - start,
-        };
-      }
-
-      // LLM PATH: Always fire both in parallel -- no extra wait on fallback
-      const context = buildContext(matches);
-      const ragMessages = buildRAGMessages(
-        systemPrompt,
-        context,
-        history,
-        question
-      );
-
-      const [selfHostedAnswer, openaiResult] = await Promise.all([
-        chatSelfHosted(ragMessages, 150).catch(() => ""),
-        chatOpenAI(ragMessages, 150).catch(() => null),
-      ]);
-
-      const selfHostedFailed =
-        !selfHostedAnswer || isNotFound(selfHostedAnswer);
-
-      if (!selfHostedFailed) {
-        saveMessage(sessionId, "assistant", selfHostedAnswer, "self-hosted");
-        return {
-          session_id: sessionId,
-          agent_id: agentId,
-          agent_name: agentName,
-          answer: selfHostedAnswer,
-          source: "self-hosted",
-          openai_cost_usd: null,
-          response_time_ms: Date.now() - start,
-        };
-      }
-
-      // Fallback: self-hosted failed, OpenAI result already ready
-      const fallbackResult = openaiResult;
-
-      if (fallbackResult) {
-        logOpenAIUsage(customerId, question, {
-          promptTokens: fallbackResult.promptTokens,
-          completionTokens: fallbackResult.completionTokens,
-          totalTokens: fallbackResult.totalTokens,
-          model: fallbackResult.model,
-          costUsd: fallbackResult.costUsd,
-        });
-
-        saveMessage(
-          sessionId,
-          "assistant",
-          fallbackResult.answer,
-          "openai",
-          fallbackResult.costUsd
-        );
-
-        return {
-          session_id: sessionId,
-          agent_id: agentId,
-          agent_name: agentName,
-          answer: fallbackResult.answer,
-          source: "openai",
-          self_hosted_answer: selfHostedAnswer || null,
-          fallback_reason:
-            "Self-hosted LLM could not answer from knowledgebase",
-          openai_cost_usd: fallbackResult.costUsd,
-          response_time_ms: Date.now() - start,
-        };
-      }
-
-      const lastResort =
-        selfHostedAnswer || "Unable to generate an answer at this time.";
-      saveMessage(sessionId, "assistant", lastResort, "self-hosted");
-
-      return {
-        session_id: sessionId,
-        agent_id: agentId,
-        agent_name: agentName,
-        answer: lastResort,
-        source: "self-hosted",
-        openai_cost_usd: null,
-        fallback_reason: "Both self-hosted and OpenAI failed",
-        response_time_ms: Date.now() - start,
-      };
+      return await runAskPipeline({
+        customerId,
+        customerPrompt: customerDefaultPrompt,
+        question,
+        inputSessionId: inputSessionId ?? null,
+        inputAgentId: inputAgentId ?? null,
+      });
     }
   );
+
+  await app.register(async (scoped) => {
+    await scoped.register(multipart, {
+      limits: { fileSize: 15 * 1024 * 1024 },
+    });
+
+    scoped.post(
+      "/ask/voice",
+      { preHandler: apiKeyAuth },
+      async (request: AuthenticatedRequest, reply) => {
+        if (!env.sarvam.apiKey) {
+          return reply.status(503).send({
+            error: "Sarvam is not configured (SARVAM_API_KEY)",
+          });
+        }
+
+        const voiceRequestStarted = Date.now();
+        let fileBuffer: Buffer | null = null;
+        let filename = "audio.wav";
+        let mimeType = "audio/wav";
+        const fields: Record<string, string> = {};
+
+        const tMultipart0 = Date.now();
+        try {
+          for await (const part of request.parts()) {
+            if (part.type === "file") {
+              fileBuffer = await part.toBuffer();
+              filename = part.filename || filename;
+              mimeType = part.mimetype || mimeType;
+            } else {
+              fields[part.fieldname] = String(part.value ?? "");
+            }
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Invalid multipart";
+          return reply.status(400).send({ error: msg });
+        }
+        const multipart_ms = Date.now() - tMultipart0;
+
+        if (!fileBuffer || fileBuffer.length === 0) {
+          return reply.status(400).send({
+            error:
+              "Missing audio file. Send multipart field `file` with WAV/MP3/AAC/FLAC/OGG.",
+          });
+        }
+
+        const modeRaw = (fields.stt_mode || "transcribe").toLowerCase();
+        const sttModes = [
+          "transcribe",
+          "translate",
+          "verbatim",
+          "translit",
+          "codemix",
+        ] as const;
+        if (!sttModes.includes(modeRaw as (typeof sttModes)[number])) {
+          return reply.status(400).send({
+            error: `Invalid stt_mode. Use one of: ${sttModes.join(", ")}`,
+          });
+        }
+
+        let inputSessionId: string | null = null;
+        if (fields.session_id?.trim()) {
+          const p = z.string().uuid().safeParse(fields.session_id.trim());
+          if (!p.success) {
+            return reply.status(400).send({ error: "Invalid session_id" });
+          }
+          inputSessionId = p.data;
+        }
+
+        let inputAgentId: string | null = null;
+        if (fields.agent_id?.trim()) {
+          const p = z.string().uuid().safeParse(fields.agent_id.trim());
+          if (!p.success) {
+            return reply.status(400).send({ error: "Invalid agent_id" });
+          }
+          inputAgentId = p.data;
+        }
+
+        const targetLangRaw =
+          fields.target_language_code?.trim() || "en-IN";
+        const targetLang = ttsLanguageSchema.safeParse(targetLangRaw);
+        if (!targetLang.success) {
+          return reply.status(400).send({
+            error:
+              "Invalid target_language_code. Use an Indian locale e.g. en-IN, hi-IN.",
+          });
+        }
+
+        let stt: Awaited<ReturnType<typeof sarvamSpeechToText>>;
+        const tStt0 = Date.now();
+        try {
+          stt = await sarvamSpeechToText({
+            fileBuffer,
+            filename,
+            mimeType,
+            model: fields.stt_model?.trim() || "saaras:v3",
+            mode: modeRaw as (typeof sttModes)[number],
+            language_code: fields.language_code?.trim() || undefined,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Sarvam STT failed";
+          request.log.error({ err }, "ask/voice STT failed");
+          return reply.status(502).send({
+            error: msg,
+            voice_timings: {
+              multipart_ms,
+              stt_ms: Date.now() - tStt0,
+              server_total_ms: Date.now() - voiceRequestStarted,
+            },
+          });
+        }
+        const stt_ms = Date.now() - tStt0;
+
+        if (stt.status !== 200) {
+          const sttPayload =
+            typeof stt.body === "object" && stt.body !== null
+              ? { ...(stt.body as Record<string, unknown>) }
+              : { error: stt.body };
+          return reply.status(stt.status).send({
+            ...sttPayload,
+            voice_timings: {
+              multipart_ms,
+              stt_ms,
+              server_total_ms: Date.now() - voiceRequestStarted,
+            },
+          });
+        }
+
+        const { transcript, language_code: sttLanguageCode } = parseSttBody(
+          stt.body
+        );
+        const question = transcript.trim();
+        if (!question) {
+          return reply.status(400).send({
+            error: "Could not transcribe speech (empty transcript).",
+            stt: stt.body,
+            voice_timings: {
+              multipart_ms,
+              stt_ms,
+              server_total_ms: Date.now() - voiceRequestStarted,
+            },
+          });
+        }
+
+        const customerId = request.customerId!;
+        const customerDefaultPrompt = request.customerPrompt!;
+
+        const voiceFastLlm = /^(1|true|yes|on)$/i.test(
+          (fields.voice_fast_llm || "").trim()
+        );
+        const voiceTtsMaxRaw = fields.voice_tts_max_chars?.trim();
+        let voiceTtsCap: number | null = null;
+        if (voiceTtsMaxRaw) {
+          const n = parseInt(voiceTtsMaxRaw, 10);
+          if (Number.isFinite(n)) {
+            voiceTtsCap = Math.min(TTS_MAX_CHARS, Math.max(200, n));
+          }
+        }
+
+        const askResult = await runAskPipeline({
+          customerId,
+          customerPrompt: customerDefaultPrompt,
+          question,
+          inputSessionId,
+          inputAgentId,
+          includeTimings: true,
+          sequentialLlm: voiceFastLlm,
+        });
+
+        const ttsLimit = voiceTtsCap ?? TTS_MAX_CHARS;
+        const ttsText =
+          askResult.answer.length > ttsLimit
+            ? askResult.answer.slice(0, ttsLimit)
+            : askResult.answer;
+
+        const codec =
+          fields.output_audio_codec === "mp3" ? "mp3" : "wav";
+        const sampleRate = fields.speech_sample_rate?.trim() || "24000";
+
+        const sttRequestId =
+          typeof (stt.body as { request_id?: unknown })?.request_id ===
+          "string"
+            ? (stt.body as { request_id: string }).request_id
+            : null;
+
+        const { pipeline_timings: pipeline_breakdown, ...askRest } = askResult;
+
+        const voiceTimingsBase = {
+          multipart_ms,
+          stt_ms,
+          ask_pipeline_ms: askResult.response_time_ms,
+          pipeline_breakdown,
+          server_total_ms: 0,
+        };
+
+        let tts: Awaited<ReturnType<typeof sarvamTextToSpeech>>;
+        const tTts0 = Date.now();
+        try {
+          tts = await sarvamTextToSpeech({
+            text: ttsText,
+            target_language_code: targetLang.data,
+            model: "bulbul:v3",
+            speaker: fields.speaker?.trim() || undefined,
+            speech_sample_rate: sampleRate,
+            output_audio_codec: codec,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Sarvam TTS failed";
+          const tts_ms = Date.now() - tTts0;
+          request.log.error({ err }, "ask/voice TTS failed");
+          return reply.status(200).send({
+            ...askRest,
+            transcript: question,
+            stt_language_code: sttLanguageCode,
+            stt_request_id: sttRequestId,
+            audio: null,
+            audio_error: msg,
+            voice_timings: {
+              ...voiceTimingsBase,
+              tts_ms,
+              server_total_ms: Date.now() - voiceRequestStarted,
+            },
+          });
+        }
+        const tts_ms = Date.now() - tTts0;
+
+        if (tts.status !== 200) {
+          return reply.status(200).send({
+            ...askRest,
+            transcript: question,
+            stt_language_code: sttLanguageCode,
+            stt_request_id: sttRequestId,
+            audio: null,
+            audio_error: tts.body,
+            voice_timings: {
+              ...voiceTimingsBase,
+              tts_ms,
+              server_total_ms: Date.now() - voiceRequestStarted,
+            },
+          });
+        }
+
+        const ttsData = tts.body as {
+          request_id?: string | null;
+          audios?: string[];
+        };
+        const b64 = ttsData.audios?.[0];
+        if (typeof b64 !== "string" || !b64.length) {
+          return reply.status(200).send({
+            ...askRest,
+            transcript: question,
+            stt_language_code: sttLanguageCode,
+            audio: null,
+            audio_error: "TTS returned no audio",
+            voice_timings: {
+              ...voiceTimingsBase,
+              tts_ms,
+              server_total_ms: Date.now() - voiceRequestStarted,
+            },
+          });
+        }
+
+        return {
+          ...askRest,
+          transcript: question,
+          stt_language_code: sttLanguageCode,
+          stt_request_id: sttRequestId,
+          audio: {
+            format: codec,
+            content_type: codec === "mp3" ? "audio/mpeg" : "audio/wav",
+            base64: b64,
+            request_id: ttsData.request_id ?? null,
+          },
+          voice_timings: {
+            ...voiceTimingsBase,
+            tts_ms,
+            server_total_ms: Date.now() - voiceRequestStarted,
+          },
+        };
+      }
+    );
+  });
 }

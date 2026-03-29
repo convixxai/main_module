@@ -292,8 +292,9 @@ Visit `http://YOUR_SERVER_IP:8080/health` in a browser. If you see `{"status":"o
 ```bash
 cd /var/www/convixx-backend/apps/api
 
-# Start with PM2
+# Start with PM2 (pick one)
 pm2 start dist/index.js --name convixx-api
+# or: pm2 start ecosystem.config.cjs
 
 # Save PM2 process list (so it survives reboot)
 pm2 save
@@ -302,9 +303,11 @@ pm2 startup   # Follow the command it prints to enable on boot
 # Useful commands
 pm2 status          # Check status
 pm2 logs convixx-api   # View logs
-pm2 restart convixx-api   # Restart
+pm2 restart convixx-api   # Restart (only works after the app was started once)
 pm2 stop convixx-api      # Stop
 ```
+
+**If you see `Process or Namespace convixx-api not found`:** PM2 has never registered that name on this machine (or PM2’s process list was cleared). Run **`pm2 start`** as above first, then `pm2 save`. After changing `.env`, use **`pm2 restart convixx-api --update-env`** so new variables load.
 
 ---
 

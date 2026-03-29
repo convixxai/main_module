@@ -690,6 +690,88 @@
         }
       }
     },
+    "/ask/voice": {
+      "post": {
+        "tags": ["Ask"],
+        "summary": "Ask via audio (STT + RAG + TTS)",
+        "description": "Upload an audio question: Sarvam STT → same pipeline as `POST /ask` → Sarvam TTS on the answer.\n\n**Requires:** `x-api-key` and `SARVAM_API_KEY`.\n\n**Multipart form fields:**\n- `file` (required) — audio (WAV, MP3, AAC, FLAC, OGG)\n- `session_id` (optional, uuid)\n- `agent_id` (optional, uuid)\n- `stt_mode` — transcribe | translate | verbatim | translit | codemix (default transcribe)\n- `language_code` — optional STT language hint (e.g. hi-IN)\n- `stt_model` — optional, default saaras:v3\n- `target_language_code` — TTS language (default en-IN): bn-IN, en-IN, gu-IN, hi-IN, kn-IN, ml-IN, mr-IN, od-IN, pa-IN, ta-IN, te-IN\n- `speaker` — optional Bulbul voice (e.g. ritu)\n- `speech_sample_rate` — optional, default 24000\n- `output_audio_codec` — wav or mp3 (default wav)\n\n**Response:** JSON with the same fields as `/ask` plus `transcript`, `stt_language_code`, `stt_request_id`, and `audio` `{ format, content_type, base64, request_id }`. On TTS failure, `audio` is null and `audio_error` explains.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Audio recording of the question"
+                  },
+                  "session_id": { "type": "string", "format": "uuid" },
+                  "agent_id": { "type": "string", "format": "uuid" },
+                  "stt_mode": {
+                    "type": "string",
+                    "enum": ["transcribe", "translate", "verbatim", "translit", "codemix"],
+                    "default": "transcribe"
+                  },
+                  "language_code": { "type": "string", "example": "hi-IN" },
+                  "stt_model": { "type": "string", "default": "saaras:v3" },
+                  "target_language_code": { "type": "string", "example": "en-IN" },
+                  "speaker": { "type": "string", "example": "ritu" },
+                  "speech_sample_rate": { "type": "string", "example": "24000" },
+                  "output_audio_codec": { "type": "string", "enum": ["wav", "mp3"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Answer with transcript and base64 audio",
+            "content": {
+              "application/json": {
+                "example": {
+                  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "agent_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "agent_name": "Sales Agent",
+                  "answer": "MarriageWale is located in Kolhapur, Maharashtra.",
+                  "source": "self-hosted",
+                  "openai_cost_usd": null,
+                  "response_time_ms": 6200,
+                  "transcript": "Where is MarriageWale located?",
+                  "stt_language_code": "en-IN",
+                  "stt_request_id": "20260329_abc",
+                  "audio": {
+                    "format": "wav",
+                    "content_type": "audio/wav",
+                    "base64": "UklGRiQAAABXQVZFZm10...",
+                    "request_id": "20260329_def"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad multipart or invalid fields",
+            "content": {
+              "application/json": {
+                "example": { "error": "Missing audio file. Send multipart field `file` with WAV/MP3/AAC/FLAC/OGG." }
+              }
+            }
+          },
+          "503": {
+            "description": "Sarvam not configured",
+            "content": {
+              "application/json": {
+                "example": { "error": "Sarvam is not configured (SARVAM_API_KEY)" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/chat/sessions": {
       "get": {
         "tags": ["Chat"],
@@ -755,6 +837,23 @@
             "content": {
               "application/json": {
                 "example": { "error": "Session not found or does not belong to this customer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/stream": {
+      "get": {
+        "tags": ["Voice"],
+        "summary": "Voice stream demo (HTML)",
+        "description": "Temporary browser page: real-time mic → silence detection → `POST /ask/voice`. No auth to open; you still need `x-api-key` on the form for API calls.\n\nOpen in browser: `/voice/stream`",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {
+                "schema": { "type": "string" }
               }
             }
           }

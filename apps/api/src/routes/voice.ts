@@ -9,6 +9,7 @@ import {
   type SarvamSttMode,
 } from "../services/sarvam";
 import { VOICE_TEST_PAGE_HTML } from "./voice-test-page";
+import { VOICE_STREAM_PAGE_HTML } from "./voice-stream-page";
 
 const STT_MODES: SarvamSttMode[] = [
   "transcribe",
@@ -225,6 +226,10 @@ export async function voiceRoutes(app: FastifyInstance) {
   /** Temporary browser UI for STT/TTS — no auth (API calls still need x-api-key). */
   app.get("/voice/test-ui", async (_req, reply) => {
     return reply.type("text/html; charset=utf-8").send(VOICE_TEST_PAGE_HTML);
+  });
+
+  app.get("/voice/stream", async (_req, reply) => {
+    return reply.type("text/html; charset=utf-8").send(VOICE_STREAM_PAGE_HTML);
   });
 
   app.get(
