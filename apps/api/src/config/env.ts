@@ -28,4 +28,9 @@ export const env = {
   encryptionKey: process.env.ENCRYPTION_KEY!,
 
   adminToken: process.env.ADMIN_TOKEN || "",
+
+  /** Sarvam AI (speech-to-text / text-to-speech). Get key from https://dashboard.sarvam.ai/ */
+  sarvam: {
+    apiKey: process.env.SARVAM_API_KEY || "",
+  },
 };

@@ -6,6 +6,7 @@ import { kbRoutes } from "./routes/kb";
 import { askRoutes } from "./routes/ask";
 import { chatRoutes } from "./routes/chat";
 import { agentRoutes } from "./routes/agents";
+import { voiceRoutes } from "./routes/voice";
 import { registerSwagger } from "./plugins/swagger";
 
 export async function buildApp() {
@@ -22,6 +23,7 @@ export async function buildApp() {
   app.register(kbRoutes);
   app.register(askRoutes);
   app.register(chatRoutes);
+  app.register(voiceRoutes);
 
   return app;
 }

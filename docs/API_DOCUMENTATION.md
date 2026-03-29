@@ -26,9 +26,10 @@ Use the **Authorize** button in Swagger UI to set `x-admin-token` (for customer/
 4. [Knowledgebase Endpoints](#4-knowledgebase-endpoints)
 5. [Ask Endpoint](#5-ask-endpoint)
 6. [Chat Endpoints](#6-chat-endpoints)
-7. [Authentication](#7-authentication)
-8. [Error Responses](#8-error-responses)
-9. [Security - Chat Encryption](#9-security---chat-encryption)
+7. [Voice Endpoints (Sarvam AI)](#7-voice-endpoints-sarvam-ai)
+8. [Authentication](#8-authentication)
+9. [Error Responses](#9-error-responses)
+10. [Security - Chat Encryption](#10-security---chat-encryption)
 
 ---
 
@@ -164,7 +165,100 @@ curl https://www.convixx.in/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/m
 
 ---
 
-## 7. Authentication
+## 7. Voice Endpoints (Sarvam AI)
+
+Speech-to-text and text-to-speech are powered by [Sarvam AI](https://www.sarvam.ai/) (Saaras STT, Bulbul TTS).  
+The server must have `SARVAM_API_KEY` set in `apps/api/.env` (from the [Sarvam dashboard](https://dashboard.sarvam.ai/)).
+
+All voice routes require the same `x-api-key` header as KB, ask, agents, and chat.
+
+### GET /voice/test-ui (no auth)
+
+Temporary page for manual STT/TTS checks: upload audio for transcription, synthesize text and play audio from Sarvam’s JSON `audios[0]` (base64) or from `?response_format=binary`. Paste your `x-api-key` in the page. Open `http://localhost:<PORT>/voice/test-ui` (use your server port, default `8080`).
+
+### GET /voice/capabilities (requires `x-api-key`)
+
+Returns supported STT modes, TTS language codes, speaker lists, pace/sample-rate limits, and codec options.  
+Does not call Sarvam; safe for clients to cache.
+
+**Response 200:** JSON object with `speech_to_text` and `text_to_speech` metadata (see route implementation or Swagger `/docs`).
+
+---
+
+### POST /voice/speech-to-text (requires `x-api-key`)
+
+Transcribes short audio (~30 seconds max for the REST API). Send **multipart/form-data** with:
+
+| Field | Required | Description |
+|--------|----------|-------------|
+| file | Yes | Audio file (WAV, MP3, AAC, FLAC, OGG) |
+| mode | No | `transcribe` (default), `translate`, `verbatim`, `translit`, `codemix` |
+| language_code | No | BCP-47 hint, e.g. `hi-IN` |
+| model | No | Default `saaras:v3` |
+
+**Example (curl):**
+
+```bash
+curl -X POST https://www.convixx.in/voice/speech-to-text \
+  -H "x-api-key: cvx_your_key" \
+  -F "file=@recording.wav;type=audio/wav" \
+  -F "mode=transcribe"
+```
+
+**Response 200:** Sarvam shape: `request_id`, `transcript`, `language_code`.
+
+**Response 503:** `{ "error": "Sarvam is not configured (SARVAM_API_KEY)" }`
+
+---
+
+### POST /voice/text-to-speech (requires `x-api-key`)
+
+Synthesizes natural speech (Bulbul v3 by default). JSON body:
+
+| Field | Required | Description |
+|--------|----------|-------------|
+| text | Yes | Up to 2500 characters (1500 for `bulbul:v2`) |
+| target_language_code | Yes | One of: `bn-IN`, `en-IN`, `gu-IN`, `hi-IN`, `kn-IN`, `ml-IN`, `mr-IN`, `od-IN`, `pa-IN`, `ta-IN`, `te-IN` |
+| speaker | No | Lowercase voice id (e.g. `shubh`, `ritu`, `priya`). Defaults per Sarvam model. |
+| model | No | `bulbul:v3` (default) or `bulbul:v2` |
+| pace | No | Speed: **v3** 0.5–2.0, **v2** 0.3–3.0 (default 1.0) |
+| speech_sample_rate | No | `8000`, `16000`, `22050`, `24000`, `32000`, `44100`, `48000` (Hz as string) |
+| output_audio_codec | No | `wav`, `mp3`, `linear16`, `mulaw`, `alaw`, `opus`, `flac`, `aac` |
+| temperature | No | **v3 only** expressiveness 0.01–2.0 (default ~0.6) |
+| pitch, loudness | No | **v2 only** |
+| enable_preprocessing | No | **v2** normalization |
+| dict_id | No | **v3** pronunciation dictionary id |
+
+**Example request:**
+
+```json
+{
+  "text": "नमस्ते, आप कैसे हैं?",
+  "target_language_code": "hi-IN",
+  "speaker": "ritu",
+  "model": "bulbul:v3",
+  "pace": 1.0,
+  "speech_sample_rate": "24000",
+  "output_audio_codec": "wav",
+  "temperature": 0.65
+}
+```
+
+**Response 200:** `{ "request_id", "audios": ["<base64>"] }` — Sarvam returns WAV bytes as base64; the first string is often very long. That is normal, not an error.
+
+**Downloadable file (Postman / Swagger):** Same `POST`, with any of:
+
+- `response_format=binary` or `download=1` — raw audio bytes with `Content-Disposition: attachment` (choose filename in browser, or in Postman use **Save Response** / **Send and Download**).
+- Header **`Accept: audio/wav`** (or `audio/mpeg` when using `output_audio_codec: mp3`) — same as binary mode, without query params.
+- `response_format=json` — force JSON even if you send an `Accept: audio/*` header.
+
+Optional `filename=myclip` — safe basename for the file; extension matches `output_audio_codec` (e.g. `speech.wav` by default).
+
+Example: `POST /voice/text-to-speech?response_format=binary&filename=demo` with the same JSON body.
+
+---
+
+## 8. Authentication
 
 ### Customer APIs (Admin Token)
 
@@ -175,9 +269,9 @@ Without this token, no one can create customers, list them, update them, or gene
 |--------|----------|-------------|
 | x-admin-token | Yes | Fixed admin token (set in server `.env` as `ADMIN_TOKEN`) |
 
-### KB / Ask / Agents / Chat APIs (API Key)
+### KB / Ask / Agents / Chat / Voice APIs (API Key)
 
-These endpoints require a customer API key passed via the `x-api-key` header: `/agents`, `/kb/*`, `/ask`, `/chat/*`.  
+These endpoints require a customer API key passed via the `x-api-key` header: `/agents`, `/kb/*`, `/ask`, `/chat/*`, `/voice/*`.  
 The key is generated per customer (via POST `/customers/:id/api-key`) and scopes all data access to that customer only.
 
 ```
@@ -1274,7 +1368,7 @@ curl -X POST https://www.convixx.in/ask \
 
 ---
 
-## 8. Error Responses
+## 9. Error Responses
 
 All endpoints may return these common errors:
 
@@ -1340,7 +1434,7 @@ Returned by health endpoints when an external service is unreachable.
 
 ---
 
-## 9. Security - Chat Encryption
+## 10. Security - Chat Encryption
 
 All chat messages (both user questions and assistant answers) are encrypted at the application layer before being stored in the database.
 

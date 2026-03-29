@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Convixx API",
-    "description": "Multi-tenant AI Voice Calling Platform backend. RAG-based question answering with self-hosted LLM and OpenAI fallback.",
+    "description": "Multi-tenant AI Voice Calling Platform backend. RAG-based question answering with self-hosted LLM and OpenAI fallback.\n\n**Documentation:** Interactive UI at `/docs`. Raw OpenAPI JSON at `/docs/json` (same origin as this API).",
     "version": "1.0.0"
   },
   "servers": [
@@ -11,12 +11,13 @@
     { "url": "http://localhost:8080", "description": "Local" }
   ],
   "tags": [
-    { "name": "Health" },
-    { "name": "Customers" },
-    { "name": "Agents" },
-    { "name": "Knowledgebase" },
-    { "name": "Ask" },
-    { "name": "Chat" }
+    { "name": "Health", "description": "Liveness checks for API, Postgres, pgvector, LLM, and embeddings." },
+    { "name": "Customers", "description": "Admin-only customer CRUD and API key issuance (`x-admin-token`)." },
+    { "name": "Agents", "description": "Per-customer agents (`x-api-key`)." },
+    { "name": "Knowledgebase", "description": "Q&A upload and CRUD with embeddings (`x-api-key`)." },
+    { "name": "Ask", "description": "RAG question answering (`x-api-key`)." },
+    { "name": "Chat", "description": "Session and message listing (`x-api-key`)." },
+    { "name": "Voice", "description": "Sarvam speech-to-text and text-to-speech (`x-api-key`)." }
   ],
   "components": {
     "securitySchemes": {
@@ -30,7 +31,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "x-api-key",
-        "description": "Customer API key. Scopes KB, agents, ask, chat to that customer."
+        "description": "Customer API key. Scopes KB, agents, ask, chat, voice to that customer."
       }
     }
   },
@@ -296,7 +297,7 @@
       "post": {
         "tags": ["Customers"],
         "summary": "Generate API key",
-        "description": "Generates a new API key for the customer.\nRequires x-admin-token. Key is used for KB, ask, agents, chat.",
+        "description": "Generates a new API key for the customer.\nRequires x-admin-token. Key is used for KB, ask, agents, chat, and voice.",
         "security": [{ "AdminToken": [] }],
         "parameters": [
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
@@ -754,6 +755,171 @@
             "content": {
               "application/json": {
                 "example": { "error": "Session not found or does not belong to this customer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/capabilities": {
+      "get": {
+        "tags": ["Voice"],
+        "summary": "Voice API capabilities",
+        "description": "Lists Sarvam-backed STT/TTS languages, speakers, modes, and limits.\nRequires x-api-key. No Sarvam call.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Static capability metadata",
+            "content": {
+              "application/json": {
+                "example": {
+                  "speech_to_text": { "model_default": "saaras:v3", "modes": ["transcribe", "translate"] },
+                  "text_to_speech": { "model_default": "bulbul:v3", "languages": [{ "code": "hi-IN", "label": "Hindi" }] }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/speech-to-text": {
+      "post": {
+        "tags": ["Voice"],
+        "summary": "Speech to text (Sarvam)",
+        "description": "Upload audio (multipart field `file`). Optional fields: `mode` (transcribe|translate|verbatim|translit|codemix), `language_code` (e.g. hi-IN), `model` (default saaras:v3).\nMax ~30s audio. Server needs SARVAM_API_KEY.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "mode": { "type": "string", "default": "transcribe" },
+                  "language_code": { "type": "string" },
+                  "model": { "type": "string", "default": "saaras:v3" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transcription result",
+            "content": {
+              "application/json": {
+                "example": {
+                  "request_id": "20241115_12345678",
+                  "transcript": "नमस्ते",
+                  "language_code": "hi-IN"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Sarvam not configured",
+            "content": {
+              "application/json": {
+                "example": { "error": "Sarvam is not configured (SARVAM_API_KEY)" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/text-to-speech": {
+      "post": {
+        "tags": ["Voice"],
+        "summary": "Text to speech (Sarvam)",
+        "description": "Synthesize speech with Bulbul v3 (default). Use `speaker` (lowercase), `pace` 0.5–2.0, `speech_sample_rate`, `output_audio_codec` (wav|mp3|…), `temperature` (v3).\n\n**Response:** Default is JSON with base64 in `audios` (the string can be very long). For **raw audio** use query `?response_format=binary` or `?download=1`, or send header `Accept: audio/wav` (or `audio/mpeg` for mp3). Use `?response_format=json` to force JSON. Optional `filename=myclip` sets the download basename.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          {
+            "name": "Accept",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string", "example": "audio/wav" },
+            "description": "If this header includes an audio media type (e.g. `audio/wav`, `audio/mpeg`, `audio/*`), the response is raw bytes like `response_format=binary`. Use `?response_format=json` to force JSON."
+          },
+          {
+            "name": "response_format",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["json", "binary"], "default": "json" },
+            "description": "Use `binary` to return raw audio bytes with Content-Disposition: attachment (save in Postman / browser). Omit or `json` for Sarvam JSON with base64 `audios`."
+          },
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["0", "1"] },
+            "description": "Shortcut: `1` is the same as `response_format=binary`."
+          },
+          {
+            "name": "filename",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$" },
+            "description": "Download file basename without extension; extension matches `output_audio_codec` (e.g. wav). Default `speech`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text", "target_language_code"],
+                "properties": {
+                  "text": { "type": "string", "maxLength": 2500 },
+                  "target_language_code": { "type": "string", "example": "hi-IN" },
+                  "speaker": { "type": "string", "example": "shubh" },
+                  "model": { "type": "string", "enum": ["bulbul:v3", "bulbul:v2"], "default": "bulbul:v3" },
+                  "pace": { "type": "number" },
+                  "speech_sample_rate": { "type": "string", "example": "24000" },
+                  "output_audio_codec": { "type": "string", "example": "wav" },
+                  "temperature": { "type": "number" }
+                }
+              },
+              "example": {
+                "text": "नमस्ते, आप कैसे हैं?",
+                "target_language_code": "hi-IN",
+                "speaker": "ritu",
+                "model": "bulbul:v3",
+                "pace": 1.0,
+                "speech_sample_rate": "24000",
+                "output_audio_codec": "wav",
+                "temperature": 0.65
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON with base64 audios, or raw audio when `response_format=binary`, `download=1`, or `Accept` includes an audio type",
+            "content": {
+              "application/json": {
+                "example": {
+                  "request_id": "20241115_12345678",
+                  "audios": ["UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZGF0YQAAAAA..."]
+                }
+              },
+              "audio/wav": {
+                "schema": { "type": "string", "format": "binary" },
+                "example": "(raw WAV bytes — use Save Response in Postman)"
+              },
+              "audio/mpeg": {
+                "schema": { "type": "string", "format": "binary" },
+                "example": "(raw MP3 when output_audio_codec is mp3)"
+              }
+            }
+          },
+          "503": {
+            "description": "Sarvam not configured",
+            "content": {
+              "application/json": {
+                "example": { "error": "Sarvam is not configured (SARVAM_API_KEY)" }
               }
             }
           }
