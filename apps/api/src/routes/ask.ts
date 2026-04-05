@@ -7,7 +7,12 @@ import {
   generateEmbedding,
   chatSelfHosted,
   chatOpenAI,
+  formatOpenAIClientError,
 } from "../services/llm";
+import {
+  createRagTrace,
+  type RagTraceFn,
+} from "../services/rag-trace";
 import {
   sarvamSpeechToText,
   sarvamTextToSpeech,
@@ -215,6 +220,13 @@ function saveMessage(
   ).catch(() => {});
 }
 
+const RAG_RULES_SUFFIX = `--- RAG rules (apply on top of agent instructions above) ---
+- The KNOWLEDGEBASE block below was retrieved for this question; treat it as authoritative when it applies.
+- Map spelling variants, transliterations, and short forms to the same real-world entity (e.g. "Chhavani" vs "Chavni" vs "Chavni Lohagad" when the passages clearly refer to the same place or product).
+- Answer using ONLY information supported by the KNOWLEDGEBASE below. You may paraphrase or combine Q/A pairs; do not invent facts.
+- Use ANSWER_NOT_FOUND only when no passage reasonably answers the user's question (not merely because the user's wording differs from a KB heading).
+- Keep answers short unless the agent instructions above specify a stricter length.`;
+
 function buildRAGMessages(
   systemPrompt: string,
   context: string,
@@ -225,7 +237,7 @@ function buildRAGMessages(
     [
       {
         role: "system",
-        content: `${systemPrompt}\n\nRules:\n- Answer ONLY using the knowledgebase provided.\n- Keep answers short (1-3 sentences).\n- If the knowledgebase does NOT contain the answer, respond EXACTLY with: ANSWER_NOT_FOUND\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
+        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
       },
     ];
 
@@ -246,6 +258,10 @@ const NOT_FOUND_MARKERS = [
   "no information available",
   "don't have information",
 ];
+
+/** Shown to users when the model signals no KB match (instead of raw ANSWER_NOT_FOUND). */
+const RAG_NO_ANSWER_USER_MESSAGE =
+  "I couldn't find an answer to that in the knowledgebase.";
 
 function isNotFound(answer: string): boolean {
   const lower = answer.toLowerCase();
@@ -289,6 +305,8 @@ export type AskPipelineResult = {
   response_time_ms: number;
   self_hosted_answer?: string | null;
   fallback_reason?: string;
+  /** When the OpenAI API call failed or returned an unusable completion (SDK/HTTP error message). */
+  openai_error?: string | null;
   /** Present when `runAskPipeline` was called with `includeTimings: true` */
   pipeline_timings?: AskPipelineTimings;
 };
@@ -321,6 +339,8 @@ async function runAskPipeline(params: {
   sequentialLlm?: boolean;
   /** When true (customer setting): RAG uses OpenAI only; self-hosted is skipped. */
   ragOpenaiOnly?: boolean;
+  /** Pass `createRagTrace(request.log)` from `/ask` and `/ask/voice` for `[rag:*]` logs. */
+  trace?: RagTraceFn;
 }): Promise<AskPipelineResult> {
   const {
     customerId,
@@ -331,16 +351,33 @@ async function runAskPipeline(params: {
     includeTimings,
     sequentialLlm,
     ragOpenaiOnly,
+    trace,
   } = params;
   const start = Date.now();
+
+  trace?.("pipeline_start", {
+    customer_id: customerId,
+    input_session_id: inputSessionId,
+    input_agent_id: inputAgentId,
+    question,
+    sequential_llm: sequentialLlm === true,
+    rag_openai_only: ragOpenaiOnly === true,
+  });
 
   const tParallel0 = Date.now();
   const [sessionId, embedding, sessionAgent] = await Promise.all([
     getOrCreateSession(customerId, inputSessionId),
-    generateEmbedding(question),
+    generateEmbedding(question, trace),
     resolveAgentFromSession(inputSessionId),
   ]);
   const parallelInitMs = Date.now() - tParallel0;
+
+  trace?.("parallel_init_done", {
+    session_id: sessionId,
+    embedding_dim: embedding.length,
+    parallel_init_ms: parallelInitMs,
+    has_session_agent_from_db: sessionAgent != null,
+  });
 
   const tAgent0 = Date.now();
   let agent: ResolvedAgent | null = null;
@@ -357,6 +394,13 @@ async function runAskPipeline(params: {
   const agentId = agent?.id || null;
   const agentName = agent?.name || null;
 
+  trace?.("agent_resolved", {
+    agent_id: agentId,
+    agent_name: agentName,
+    resolve_agent_ms: resolveAgentMs,
+    system_prompt_len: systemPrompt.length,
+  });
+
   if (agentId) {
     pool.query(
       "UPDATE chat_sessions SET agent_id = COALESCE(agent_id, $1) WHERE id = $2",
@@ -371,6 +415,23 @@ async function runAskPipeline(params: {
   ]);
   const vectorHistoryMs = Date.now() - tVec0;
 
+  trace?.("vector_search_and_history", {
+    match_count: matches.length,
+    matches: matches.map((m, i) => ({
+      rank: i + 1,
+      distance: m.distance,
+      kb_question_preview: m.question.slice(0, 300),
+      kb_answer_preview: m.answer.slice(0, 300),
+    })),
+    direct_match_threshold: DIRECT_MATCH_THRESHOLD,
+    history_message_count: history.length,
+    history_preview: history.map((h) => ({
+      role: h.role,
+      content_preview: h.content.slice(0, 400),
+    })),
+    vector_history_ms: vectorHistoryMs,
+  });
+
   saveMessage(sessionId, "user", question);
 
   const baseTimings = (): AskPipelineTimings => ({
@@ -383,6 +444,7 @@ async function runAskPipeline(params: {
 
   if (matches.length === 0) {
     const noKbAnswer = "No knowledgebase entries found for this customer.";
+    trace?.("pipeline_exit", { branch: "no_kb", reason: "zero_kb_matches" });
     saveMessage(sessionId, "assistant", noKbAnswer, "none");
     const timings = baseTimings();
     timings.branch = "no_kb";
@@ -401,6 +463,10 @@ async function runAskPipeline(params: {
   const topMatch = matches[0];
 
   if (topMatch.distance < DIRECT_MATCH_THRESHOLD && history.length === 0) {
+    trace?.("pipeline_exit", {
+      branch: "kb_direct",
+      distance: topMatch.distance,
+    });
     saveMessage(sessionId, "assistant", topMatch.answer, "kb-direct");
     const timings = baseTimings();
     timings.branch = "kb_direct";
@@ -424,22 +490,60 @@ async function runAskPipeline(params: {
     question
   );
 
+  trace?.("rag_prompt_built", {
+    context_chars: context.length,
+    context_full: context,
+    rag_messages_full: ragMessages,
+  });
+
   const tRag0 = Date.now();
   let selfHostedAnswer = "";
   let openaiResult: Awaited<ReturnType<typeof chatOpenAI>> | null = null;
+  let openaiCallError: string | null = null;
 
   if (ragOpenaiOnly) {
-    openaiResult = await chatOpenAI(ragMessages, 150).catch(() => null);
+    trace?.("rag_llm_mode", { mode: "openai_only" });
+    try {
+      openaiResult = await chatOpenAI(ragMessages, 150, trace);
+    } catch (e) {
+      openaiCallError = formatOpenAIClientError(e);
+      trace?.("openai_chat_exception", { error: openaiCallError });
+      openaiResult = null;
+    }
   } else if (sequentialLlm) {
-    selfHostedAnswer = await chatSelfHosted(ragMessages, 150).catch(() => "");
+    trace?.("rag_llm_mode", { mode: "sequential_self_hosted_then_openai" });
+    selfHostedAnswer = await chatSelfHosted(ragMessages, 150, trace).catch(
+      (e) => {
+        trace?.("self_hosted_llm_failed", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return "";
+      }
+    );
     const shFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
     if (shFailed) {
-      openaiResult = await chatOpenAI(ragMessages, 150).catch(() => null);
+      openaiResult = await chatOpenAI(ragMessages, 150, trace).catch((e) => {
+        trace?.("openai_chat_failed", {
+          error: formatOpenAIClientError(e),
+        });
+        return null;
+      });
     }
   } else {
+    trace?.("rag_llm_mode", { mode: "parallel_self_hosted_and_openai" });
     const pair = await Promise.all([
-      chatSelfHosted(ragMessages, 150).catch(() => ""),
-      chatOpenAI(ragMessages, 150).catch(() => null),
+      chatSelfHosted(ragMessages, 150, trace).catch((e) => {
+        trace?.("self_hosted_llm_failed", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return "";
+      }),
+      chatOpenAI(ragMessages, 150, trace).catch((e) => {
+        trace?.("openai_chat_failed", {
+          error: formatOpenAIClientError(e),
+        });
+        return null;
+      }),
     ]);
     selfHostedAnswer = pair[0];
     openaiResult = pair[1];
@@ -457,6 +561,28 @@ async function runAskPipeline(params: {
   });
 
   if (ragOpenaiOnly) {
+    if (openaiCallError && !openaiResult) {
+      trace?.("pipeline_exit", {
+        branch: "rag_last_resort",
+        answer_source: "openai_exception",
+        openai_error: openaiCallError,
+      });
+      const short =
+        "The OpenAI request failed. See openai_error for the provider message.";
+      saveMessage(sessionId, "assistant", short, "openai");
+      return {
+        session_id: sessionId,
+        agent_id: agentId,
+        agent_name: agentName,
+        answer: short,
+        source: "openai",
+        openai_cost_usd: null,
+        openai_error: openaiCallError,
+        response_time_ms: Date.now() - start,
+        ...(includeTimings ? { pipeline_timings: ragTimings("rag_last_resort") } : {}),
+      };
+    }
+
     if (openaiResult) {
       logOpenAIUsage(customerId, question, {
         promptTokens: openaiResult.promptTokens,
@@ -466,8 +592,15 @@ async function runAskPipeline(params: {
         costUsd: openaiResult.costUsd,
       });
     }
+
     const oa = openaiResult?.answer?.trim() || "";
+
     if (openaiResult && oa && !isNotFound(oa)) {
+      trace?.("pipeline_exit", {
+        branch: "rag_openai",
+        answer_source: "openai",
+        raw_model_reply_preview: oa.slice(0, 500),
+      });
       saveMessage(
         sessionId,
         "assistant",
@@ -486,25 +619,72 @@ async function runAskPipeline(params: {
         ...(includeTimings ? { pipeline_timings: ragTimings("rag_openai") } : {}),
       };
     }
-    const lastResortOpenai =
-      oa || "Unable to generate an answer at this time.";
+
+    if (openaiResult && oa && isNotFound(oa)) {
+      trace?.("openai_reply_kb_miss", {
+        raw_model_reply: oa,
+        user_facing_answer: RAG_NO_ANSWER_USER_MESSAGE,
+        note:
+          "Model followed RAG rules (e.g. ANSWER_NOT_FOUND); not an API error.",
+      });
+      trace?.("pipeline_exit", {
+        branch: "rag_openai",
+        answer_source: "openai_kb_miss",
+      });
+      saveMessage(
+        sessionId,
+        "assistant",
+        RAG_NO_ANSWER_USER_MESSAGE,
+        "openai",
+        openaiResult.costUsd
+      );
+      return {
+        session_id: sessionId,
+        agent_id: agentId,
+        agent_name: agentName,
+        answer: RAG_NO_ANSWER_USER_MESSAGE,
+        source: "openai",
+        openai_cost_usd: openaiResult.costUsd,
+        response_time_ms: Date.now() - start,
+        ...(includeTimings ? { pipeline_timings: ragTimings("rag_openai") } : {}),
+      };
+    }
+
+    if (openaiResult && !oa) {
+      saveMessage(
+        sessionId,
+        "assistant",
+        "OpenAI returned an empty reply.",
+        "openai",
+        openaiResult.costUsd
+      );
+      return {
+        session_id: sessionId,
+        agent_id: agentId,
+        agent_name: agentName,
+        answer: "OpenAI returned an empty reply.",
+        source: "openai",
+        openai_cost_usd: openaiResult.costUsd,
+        openai_error: "empty_completion",
+        response_time_ms: Date.now() - start,
+        ...(includeTimings ? { pipeline_timings: ragTimings("rag_last_resort") } : {}),
+      };
+    }
+
     saveMessage(
       sessionId,
       "assistant",
-      lastResortOpenai,
-      "openai",
-      openaiResult?.costUsd
+      "Unable to complete the OpenAI request.",
+      "openai"
     );
     return {
       session_id: sessionId,
       agent_id: agentId,
       agent_name: agentName,
-      answer: lastResortOpenai,
+      answer: "Unable to complete the OpenAI request.",
       source: "openai",
-      openai_cost_usd: openaiResult?.costUsd ?? null,
-      fallback_reason: openaiResult
-        ? "OpenAI could not produce a valid answer from the knowledgebase (rag_openai_only)"
-        : "OpenAI request failed (rag_openai_only)",
+      openai_cost_usd: null,
+      openai_error: openaiCallError || "unknown",
       response_time_ms: Date.now() - start,
       ...(includeTimings ? { pipeline_timings: ragTimings("rag_last_resort") } : {}),
     };
@@ -513,6 +693,11 @@ async function runAskPipeline(params: {
   const selfHostedFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
 
   if (!selfHostedFailed) {
+    trace?.("pipeline_exit", {
+      branch: "rag_self_hosted",
+      answer_source: "self-hosted",
+      raw_preview: selfHostedAnswer.slice(0, 500),
+    });
     saveMessage(sessionId, "assistant", selfHostedAnswer, "self-hosted");
     return {
       session_id: sessionId,
@@ -529,6 +714,12 @@ async function runAskPipeline(params: {
   const fallbackResult = openaiResult;
 
   if (fallbackResult) {
+    trace?.("pipeline_exit", {
+      branch: "rag_openai",
+      answer_source: "openai_fallback",
+      self_hosted_had_preview: (selfHostedAnswer || "").slice(0, 200),
+      openai_raw_preview: fallbackResult.answer.slice(0, 500),
+    });
     logOpenAIUsage(customerId, question, {
       promptTokens: fallbackResult.promptTokens,
       completionTokens: fallbackResult.completionTokens,
@@ -561,6 +752,10 @@ async function runAskPipeline(params: {
 
   const lastResort =
     selfHostedAnswer || "Unable to generate an answer at this time.";
+  trace?.("pipeline_exit", {
+    branch: "rag_last_resort",
+    self_hosted_preview: (selfHostedAnswer || "").slice(0, 300),
+  });
   saveMessage(sessionId, "assistant", lastResort, "self-hosted");
 
   return {
@@ -620,6 +815,7 @@ export async function askRoutes(app: FastifyInstance) {
       const { question, session_id: inputSessionId, agent_id: inputAgentId } =
         body.data;
 
+      const trace = createRagTrace(request.log);
       return await runAskPipeline({
         customerId,
         customerPrompt: customerDefaultPrompt,
@@ -627,6 +823,7 @@ export async function askRoutes(app: FastifyInstance) {
         inputSessionId: inputSessionId ?? null,
         inputAgentId: inputAgentId ?? null,
         ragOpenaiOnly: request.ragUseOpenaiOnly === true,
+        trace,
       });
     }
   );
@@ -789,6 +986,7 @@ export async function askRoutes(app: FastifyInstance) {
           }
         }
 
+        const trace = createRagTrace(request.log);
         const askResult = await runAskPipeline({
           customerId,
           customerPrompt: customerDefaultPrompt,
@@ -798,6 +996,7 @@ export async function askRoutes(app: FastifyInstance) {
           includeTimings: true,
           sequentialLlm: voiceFastLlm && !request.ragUseOpenaiOnly,
           ragOpenaiOnly: request.ragUseOpenaiOnly === true,
+          trace,
         });
 
         const ttsLimit = voiceTtsCap ?? TTS_MAX_CHARS;

@@ -23,6 +23,18 @@ export const env = {
   openai: {
     apiKey: process.env.OPENAI_API_KEY!,
     model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    /**
+     * Used only for RAG chat completions (`chatOpenAI` in ask pipeline).
+     * Slightly above 0 helps with transliteration/typo alignment (e.g. Chhavani vs Chavni).
+     * Set OPENAI_RAG_TEMPERATURE=0 for maximum determinism.
+     */
+    ragTemperature: parseFloat(
+      process.env.OPENAI_RAG_TEMPERATURE ?? "0.25"
+    ),
+    /** Optional; omit from request when unset (OpenAI default 1). */
+    ragTopP: process.env.OPENAI_RAG_TOP_P
+      ? parseFloat(process.env.OPENAI_RAG_TOP_P)
+      : undefined,
   },
 
   encryptionKey: process.env.ENCRYPTION_KEY!,
@@ -33,4 +45,8 @@ export const env = {
   sarvam: {
     apiKey: process.env.SARVAM_API_KEY || "",
   },
+
+  /** Set to `false` to disable verbose RAG pipeline logs (embeddings, OpenAI payloads). */
+  logRagTrace: process.env.LOG_RAG_TRACE !== "false",
 };
+
