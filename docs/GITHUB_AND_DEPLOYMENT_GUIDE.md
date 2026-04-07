@@ -424,6 +424,8 @@ npm run build
 pm2 restart convixx-api
 ```
 
+**If `pm2 restart convixx-api` says the process was not found:** run `pm2 status`. If `convixx-api` is missing, the app was never started under that name on this server (or PM2’s list was cleared). From `apps/api`, run **`pm2 start ecosystem.config.cjs`** or **`pm2 start dist/index.js --name convixx-api`**, then **`pm2 save`**. See Step 2.8. After that, future deploys can use `pm2 restart convixx-api` as usual.
+
 ---
 
 ## Part 4: Quick Reference Commands

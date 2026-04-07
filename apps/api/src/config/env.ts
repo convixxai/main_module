@@ -17,7 +17,7 @@ export const env = {
   llm: {
     baseUrl: process.env.LLM_BASE_URL!,
     apiKey: process.env.LLM_API_KEY!,
-    model: process.env.LLM_MODEL || "qwen2.5:1.5b",
+    model: process.env.LLM_MODEL || "phi3:mini",
   },
 
   openai: {
