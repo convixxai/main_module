@@ -6,19 +6,56 @@
     "version": "1.0.0"
   },
   "servers": [
-    { "url": "/", "description": "Current host (recommended for Try it out)" },
-    { "url": "https://www.convixx.in", "description": "Production" },
-    { "url": "http://localhost:8080", "description": "Local" }
+    {
+      "url": "/",
+      "description": "Current host (recommended for Try it out)"
+    },
+    {
+      "url": "https://www.convixx.in",
+      "description": "Production"
+    },
+    {
+      "url": "http://localhost:8080",
+      "description": "Local"
+    }
   ],
   "tags": [
-    { "name": "Health", "description": "Liveness checks for API, Postgres, pgvector, LLM, and embeddings." },
-    { "name": "Customers", "description": "Admin-only customer CRUD and API key issuance (`x-admin-token`)." },
-    { "name": "Agents", "description": "Per-customer agents (`x-api-key`)." },
-    { "name": "Knowledgebase", "description": "Q&A upload and CRUD with embeddings (`x-api-key`)." },
-    { "name": "Settings", "description": "Customer preferences such as RAG mode (`x-api-key`)." },
-    { "name": "Ask", "description": "RAG question answering (`x-api-key`)." },
-    { "name": "Chat", "description": "Session and message listing (`x-api-key`)." },
-    { "name": "Voice", "description": "Sarvam speech-to-text and text-to-speech (`x-api-key`)." }
+    {
+      "name": "Health",
+      "description": "Liveness checks for API, Postgres, pgvector, LLM, and embeddings."
+    },
+    {
+      "name": "Customers",
+      "description": "Admin-only customer CRUD and API key issuance (`x-admin-token`)."
+    },
+    {
+      "name": "Agents",
+      "description": "Per-customer agents (`x-api-key`)."
+    },
+    {
+      "name": "Knowledgebase",
+      "description": "Q&A upload and CRUD with embeddings (`x-api-key`)."
+    },
+    {
+      "name": "Settings",
+      "description": "Customer preferences such as RAG mode (`x-api-key`)."
+    },
+    {
+      "name": "Ask",
+      "description": "RAG question answering (`x-api-key`)."
+    },
+    {
+      "name": "Chat",
+      "description": "Session and message listing (`x-api-key`)."
+    },
+    {
+      "name": "Voice",
+      "description": "Sarvam speech-to-text and text-to-speech (`x-api-key`)."
+    },
+    {
+      "name": "Exotel Voicebot",
+      "description": "Multi-tenant Exotel Voicebot WebSocket system. Admin CRUD for per-tenant Exotel settings, live session monitoring, HTTPS bootstrap, and WebSocket status (`x-admin-token`)."
+    }
   ],
   "components": {
     "securitySchemes": {
@@ -39,7 +76,9 @@
   "paths": {
     "/health": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "summary": "API status",
         "description": "Returns basic API health and timestamp.\nNo authentication required.",
         "responses": {
@@ -47,7 +86,10 @@
             "description": "API is running",
             "content": {
               "application/json": {
-                "example": { "status": "ok", "timestamp": "2026-02-23T10:00:00.000Z" }
+                "example": {
+                  "status": "ok",
+                  "timestamp": "2026-02-23T10:00:00.000Z"
+                }
               }
             }
           }
@@ -56,7 +98,9 @@
     },
     "/health/db": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "summary": "PostgreSQL check",
         "description": "Verifies connection to PostgreSQL database.\nReturns 503 if connection fails.",
         "responses": {
@@ -64,7 +108,10 @@
             "description": "Database connected",
             "content": {
               "application/json": {
-                "example": { "status": "ok", "time": "2026-02-23T10:00:00.000Z" }
+                "example": {
+                  "status": "ok",
+                  "time": "2026-02-23T10:00:00.000Z"
+                }
               }
             }
           },
@@ -72,7 +119,10 @@
             "description": "Database unavailable",
             "content": {
               "application/json": {
-                "example": { "status": "error", "message": "connection refused" }
+                "example": {
+                  "status": "error",
+                  "message": "connection refused"
+                }
               }
             }
           }
@@ -81,7 +131,9 @@
     },
     "/health/vector": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "summary": "pgvector extension",
         "description": "Checks if pgvector extension is installed.\nRequired for embeddings and vector search.",
         "responses": {
@@ -89,7 +141,10 @@
             "description": "pgvector available",
             "content": {
               "application/json": {
-                "example": { "status": "ok", "pgvector_version": "0.8.1" }
+                "example": {
+                  "status": "ok",
+                  "pgvector_version": "0.8.1"
+                }
               }
             }
           },
@@ -97,7 +152,10 @@
             "description": "pgvector not found",
             "content": {
               "application/json": {
-                "example": { "status": "error", "message": "pgvector extension not found" }
+                "example": {
+                  "status": "error",
+                  "message": "pgvector extension not found"
+                }
               }
             }
           }
@@ -106,7 +164,9 @@
     },
     "/health/llm": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "summary": "Self-hosted LLM check",
         "description": "Tests connection to self-hosted LLM at ai.convixx.in.\nSends a simple prompt and returns response.",
         "responses": {
@@ -114,7 +174,10 @@
             "description": "LLM responding",
             "content": {
               "application/json": {
-                "example": { "status": "ok", "response": "Hello!" }
+                "example": {
+                  "status": "ok",
+                  "response": "Hello!"
+                }
               }
             }
           },
@@ -122,7 +185,10 @@
             "description": "LLM unavailable",
             "content": {
               "application/json": {
-                "example": { "status": "error", "message": "connect ECONNREFUSED" }
+                "example": {
+                  "status": "error",
+                  "message": "connect ECONNREFUSED"
+                }
               }
             }
           }
@@ -131,7 +197,9 @@
     },
     "/health/embedding": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "summary": "Embedding model check",
         "description": "Verifies embedding generation works.\nReturns vector dimensions (384 for nomic-embed-text).",
         "responses": {
@@ -139,7 +207,10 @@
             "description": "Embedding OK",
             "content": {
               "application/json": {
-                "example": { "status": "ok", "dimensions": 384 }
+                "example": {
+                  "status": "ok",
+                  "dimensions": 384
+                }
               }
             }
           },
@@ -147,7 +218,10 @@
             "description": "Embedding failed",
             "content": {
               "application/json": {
-                "example": { "status": "error", "message": "model not found" }
+                "example": {
+                  "status": "error",
+                  "message": "model not found"
+                }
               }
             }
           }
@@ -156,20 +230,32 @@
     },
     "/customers": {
       "post": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "summary": "Create customer",
         "description": "Creates a new customer with optional system prompt.\nRequires x-admin-token. Returns customer with UUID.",
-        "security": [{ "AdminToken": [] }],
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["name"],
+                "required": [
+                  "name"
+                ],
                 "properties": {
-                  "name": { "type": "string" },
-                  "system_prompt": { "type": "string" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "system_prompt": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -193,17 +279,25 @@
             "description": "Missing or invalid admin token",
             "content": {
               "application/json": {
-                "example": { "error": "Missing or invalid x-admin-token" }
+                "example": {
+                  "error": "Missing or invalid x-admin-token"
+                }
               }
             }
           }
         }
       },
       "get": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "summary": "List customers",
         "description": "Returns all customers ordered by creation date.\nRequires x-admin-token.",
-        "security": [{ "AdminToken": [] }],
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "List of customers",
@@ -225,12 +319,26 @@
     },
     "/customers/{id}": {
       "get": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "summary": "Get customer",
         "description": "Returns a single customer by ID.\nRequires x-admin-token.",
-        "security": [{ "AdminToken": [] }],
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -250,19 +358,35 @@
             "description": "Customer not found",
             "content": {
               "application/json": {
-                "example": { "error": "Customer not found" }
+                "example": {
+                  "error": "Customer not found"
+                }
               }
             }
           }
         }
       },
       "put": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "summary": "Update customer",
         "description": "Updates customer name and/or system_prompt.\nRequires x-admin-token. At least one field must be provided.",
-        "security": [{ "AdminToken": [] }],
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "requestBody": {
           "content": {
@@ -270,8 +394,12 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "name": { "type": "string" },
-                  "system_prompt": { "type": "string" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "system_prompt": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -296,12 +424,26 @@
     },
     "/customers/{id}/api-key": {
       "post": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "summary": "Generate API key",
         "description": "Generates a new API key for the customer.\nRequires x-admin-token. Key is used for KB, ask, agents, chat, and voice.",
-        "security": [{ "AdminToken": [] }],
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "responses": {
           "201": {
@@ -319,7 +461,9 @@
             "description": "Customer not found",
             "content": {
               "application/json": {
-                "example": { "error": "Customer not found" }
+                "example": {
+                  "error": "Customer not found"
+                }
               }
             }
           }
@@ -328,21 +472,35 @@
     },
     "/agents": {
       "post": {
-        "tags": ["Agents"],
+        "tags": [
+          "Agents"
+        ],
         "summary": "Create agent",
         "description": "Creates an agent with name, description, system prompt.\nRequires x-api-key. Each agent has its own system prompt.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["name"],
+                "required": [
+                  "name"
+                ],
                 "properties": {
-                  "name": { "type": "string" },
-                  "description": { "type": "string" },
-                  "system_prompt": { "type": "string" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "system_prompt": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -368,10 +526,16 @@
         }
       },
       "get": {
-        "tags": ["Agents"],
+        "tags": [
+          "Agents"
+        ],
         "summary": "List agents",
         "description": "Returns all agents for the authenticated customer.\nRequires x-api-key.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "List of agents",
@@ -396,12 +560,26 @@
     },
     "/agents/{id}": {
       "get": {
-        "tags": ["Agents"],
+        "tags": [
+          "Agents"
+        ],
         "summary": "Get agent",
         "description": "Returns a single agent by ID.\nRequires x-api-key. Agent must belong to customer.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -424,19 +602,35 @@
             "description": "Agent not found",
             "content": {
               "application/json": {
-                "example": { "error": "Agent not found" }
+                "example": {
+                  "error": "Agent not found"
+                }
               }
             }
           }
         }
       },
       "put": {
-        "tags": ["Agents"],
+        "tags": [
+          "Agents"
+        ],
         "summary": "Update agent",
         "description": "Updates agent name, description, or system_prompt.\nRequires x-api-key. At least one field required.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "requestBody": {
           "content": {
@@ -444,9 +638,15 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "name": { "type": "string" },
-                  "description": { "type": "string" },
-                  "system_prompt": { "type": "string" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "system_prompt": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -472,12 +672,26 @@
         }
       },
       "delete": {
-        "tags": ["Agents"],
+        "tags": [
+          "Agents"
+        ],
         "summary": "Delete agent",
         "description": "Deletes an agent permanently.\nRequires x-api-key.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -496,26 +710,41 @@
     },
     "/kb/upload": {
       "post": {
-        "tags": ["Knowledgebase"],
+        "tags": [
+          "Knowledgebase"
+        ],
         "summary": "Upload KB entries",
         "description": "Uploads Q&A pairs to the customer knowledgebase.\nRequires x-api-key. Each question is embedded and stored for vector search.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["entries"],
+                "required": [
+                  "entries"
+                ],
                 "properties": {
                   "entries": {
                     "type": "array",
                     "items": {
                       "type": "object",
-                      "required": ["question", "answer"],
+                      "required": [
+                        "question",
+                        "answer"
+                      ],
                       "properties": {
-                        "question": { "type": "string" },
-                        "answer": { "type": "string" }
+                        "question": {
+                          "type": "string"
+                        },
+                        "answer": {
+                          "type": "string"
+                        }
                       }
                     }
                   }
@@ -541,10 +770,16 @@
     },
     "/kb/entries": {
       "get": {
-        "tags": ["Knowledgebase"],
+        "tags": [
+          "Knowledgebase"
+        ],
         "summary": "List KB entries",
         "description": "Returns all KB entries for the authenticated customer.\nRequires x-api-key.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "List of KB entries",
@@ -566,12 +801,26 @@
     },
     "/kb/entries/{id}": {
       "get": {
-        "tags": ["Knowledgebase"],
+        "tags": [
+          "Knowledgebase"
+        ],
         "summary": "Get KB entry",
         "description": "Returns a single KB entry by ID.\nRequires x-api-key.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -590,12 +839,26 @@
         }
       },
       "put": {
-        "tags": ["Knowledgebase"],
+        "tags": [
+          "Knowledgebase"
+        ],
         "summary": "Update KB entry",
         "description": "Updates question and/or answer. Re-embeds if question changes.\nRequires x-api-key. At least one field required.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "requestBody": {
           "content": {
@@ -603,8 +866,12 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "question": { "type": "string" },
-                  "answer": { "type": "string" }
+                  "question": {
+                    "type": "string"
+                  },
+                  "answer": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -627,12 +894,26 @@
         }
       },
       "delete": {
-        "tags": ["Knowledgebase"],
+        "tags": [
+          "Knowledgebase"
+        ],
         "summary": "Delete KB entry",
         "description": "Deletes a KB entry permanently.\nRequires x-api-key.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -651,35 +932,53 @@
     },
     "/settings/rag": {
       "get": {
-        "tags": ["Settings"],
+        "tags": [
+          "Settings"
+        ],
         "summary": "Get RAG LLM mode",
         "description": "Returns `rag_use_openai_only`: when true, RAG uses OpenAI only (self-hosted LLM is not called). Stored per customer. Requires x-api-key.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Current setting",
             "content": {
               "application/json": {
-                "example": { "rag_use_openai_only": false }
+                "example": {
+                  "rag_use_openai_only": false
+                }
               }
             }
           }
         }
       },
       "patch": {
-        "tags": ["Settings"],
+        "tags": [
+          "Settings"
+        ],
         "summary": "Set RAG LLM mode (OpenAI-only toggle)",
         "description": "Set `rag_use_openai_only`. When true, `/ask` and `/ask/voice` use OpenAI for RAG answers only (same KB context and prompts; self-hosted is skipped). When false, default pipeline (self-hosted with OpenAI fallback) applies. Requires x-api-key.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["rag_use_openai_only"],
+                "required": [
+                  "rag_use_openai_only"
+                ],
                 "properties": {
-                  "rag_use_openai_only": { "type": "boolean" }
+                  "rag_use_openai_only": {
+                    "type": "boolean"
+                  }
                 }
               }
             }
@@ -690,7 +989,9 @@
             "description": "Updated setting",
             "content": {
               "application/json": {
-                "example": { "rag_use_openai_only": true }
+                "example": {
+                  "rag_use_openai_only": true
+                }
               }
             }
           }
@@ -699,21 +1000,37 @@
     },
     "/ask": {
       "post": {
-        "tags": ["Ask"],
+        "tags": [
+          "Ask"
+        ],
         "summary": "Ask a question",
         "description": "RAG-based question answering. Uses vector search + LLM.\nRequires x-api-key. Optional agent_id and session_id for multi-agent and chat threads.\nIf the customer has `rag_use_openai_only` enabled (see GET `/settings/rag`), RAG uses OpenAI only.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["question"],
+                "required": [
+                  "question"
+                ],
                 "properties": {
-                  "question": { "type": "string" },
-                  "session_id": { "type": "string", "format": "uuid" },
-                  "agent_id": { "type": "string", "format": "uuid" }
+                  "question": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "agent_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
                 }
               }
             }
@@ -741,36 +1058,77 @@
     },
     "/ask/voice": {
       "post": {
-        "tags": ["Ask"],
+        "tags": [
+          "Ask"
+        ],
         "summary": "Ask via audio (STT + RAG + TTS)",
         "description": "Upload an audio question: Sarvam STT → same pipeline as `POST /ask` → Sarvam TTS on the answer.\n\n**Requires:** `x-api-key` and `SARVAM_API_KEY`.\n\n**Multipart form fields:**\n- `file` (required) — audio (WAV, MP3, AAC, FLAC, OGG)\n- `session_id` (optional, uuid)\n- `agent_id` (optional, uuid)\n- `stt_mode` — transcribe | translate | verbatim | translit | codemix (default transcribe)\n- `language_code` — optional STT language hint (e.g. hi-IN)\n- `stt_model` — optional, default saaras:v3\n- `target_language_code` — TTS language (default en-IN): bn-IN, en-IN, gu-IN, hi-IN, kn-IN, ml-IN, mr-IN, od-IN, pa-IN, ta-IN, te-IN\n- `speaker` — optional Bulbul voice (e.g. ritu)\n- `speech_sample_rate` — optional, default 24000\n- `output_audio_codec` — wav or mp3 (default wav)\n\n**Response:** JSON with the same fields as `/ask` plus `transcript`, `stt_language_code`, `stt_request_id`, and `audio` `{ format, content_type, base64, request_id }`. On TTS failure, `audio` is null and `audio_error` explains.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "multipart/form-data": {
               "schema": {
                 "type": "object",
-                "required": ["file"],
+                "required": [
+                  "file"
+                ],
                 "properties": {
                   "file": {
                     "type": "string",
                     "format": "binary",
                     "description": "Audio recording of the question"
                   },
-                  "session_id": { "type": "string", "format": "uuid" },
-                  "agent_id": { "type": "string", "format": "uuid" },
+                  "session_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "agent_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
                   "stt_mode": {
                     "type": "string",
-                    "enum": ["transcribe", "translate", "verbatim", "translit", "codemix"],
+                    "enum": [
+                      "transcribe",
+                      "translate",
+                      "verbatim",
+                      "translit",
+                      "codemix"
+                    ],
                     "default": "transcribe"
                   },
-                  "language_code": { "type": "string", "example": "hi-IN" },
-                  "stt_model": { "type": "string", "default": "saaras:v3" },
-                  "target_language_code": { "type": "string", "example": "en-IN" },
-                  "speaker": { "type": "string", "example": "ritu" },
-                  "speech_sample_rate": { "type": "string", "example": "24000" },
-                  "output_audio_codec": { "type": "string", "enum": ["wav", "mp3"] }
+                  "language_code": {
+                    "type": "string",
+                    "example": "hi-IN"
+                  },
+                  "stt_model": {
+                    "type": "string",
+                    "default": "saaras:v3"
+                  },
+                  "target_language_code": {
+                    "type": "string",
+                    "example": "en-IN"
+                  },
+                  "speaker": {
+                    "type": "string",
+                    "example": "ritu"
+                  },
+                  "speech_sample_rate": {
+                    "type": "string",
+                    "example": "24000"
+                  },
+                  "output_audio_codec": {
+                    "type": "string",
+                    "enum": [
+                      "wav",
+                      "mp3"
+                    ]
+                  }
                 }
               }
             }
@@ -806,7 +1164,9 @@
             "description": "Bad multipart or invalid fields",
             "content": {
               "application/json": {
-                "example": { "error": "Missing audio file. Send multipart field `file` with WAV/MP3/AAC/FLAC/OGG." }
+                "example": {
+                  "error": "Missing audio file. Send multipart field `file` with WAV/MP3/AAC/FLAC/OGG."
+                }
               }
             }
           },
@@ -814,7 +1174,9 @@
             "description": "Sarvam not configured",
             "content": {
               "application/json": {
-                "example": { "error": "Sarvam is not configured (SARVAM_API_KEY)" }
+                "example": {
+                  "error": "Sarvam is not configured (SARVAM_API_KEY)"
+                }
               }
             }
           }
@@ -823,10 +1185,16 @@
     },
     "/chat/sessions": {
       "get": {
-        "tags": ["Chat"],
+        "tags": [
+          "Chat"
+        ],
         "summary": "List chat sessions",
         "description": "Returns all chat sessions for the customer, newest first.\nRequires x-api-key. Includes message count per session.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "List of chat sessions",
@@ -848,12 +1216,26 @@
     },
     "/chat/sessions/{session_id}/messages": {
       "get": {
-        "tags": ["Chat"],
+        "tags": [
+          "Chat"
+        ],
         "summary": "Get chat messages",
         "description": "Returns decrypted messages for a session in chronological order.\nRequires x-api-key. Session must belong to customer.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
-          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -885,7 +1267,9 @@
             "description": "Session not found",
             "content": {
               "application/json": {
-                "example": { "error": "Session not found or does not belong to this customer" }
+                "example": {
+                  "error": "Session not found or does not belong to this customer"
+                }
               }
             }
           }
@@ -894,7 +1278,9 @@
     },
     "/voice/stream": {
       "get": {
-        "tags": ["Voice"],
+        "tags": [
+          "Voice"
+        ],
         "summary": "Voice stream demo (HTML)",
         "description": "Temporary browser page: real-time mic → silence detection → `POST /ask/voice`. No auth to open; you still need `x-api-key` on the form for API calls.\n\nOpen in browser: `/voice/stream`",
         "responses": {
@@ -902,7 +1288,9 @@
             "description": "HTML page",
             "content": {
               "text/html": {
-                "schema": { "type": "string" }
+                "schema": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -911,18 +1299,38 @@
     },
     "/voice/capabilities": {
       "get": {
-        "tags": ["Voice"],
+        "tags": [
+          "Voice"
+        ],
         "summary": "Voice API capabilities",
         "description": "Lists Sarvam-backed STT/TTS languages, speakers, modes, and limits.\nRequires x-api-key. No Sarvam call.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Static capability metadata",
             "content": {
               "application/json": {
                 "example": {
-                  "speech_to_text": { "model_default": "saaras:v3", "modes": ["transcribe", "translate"] },
-                  "text_to_speech": { "model_default": "bulbul:v3", "languages": [{ "code": "hi-IN", "label": "Hindi" }] }
+                  "speech_to_text": {
+                    "model_default": "saaras:v3",
+                    "modes": [
+                      "transcribe",
+                      "translate"
+                    ]
+                  },
+                  "text_to_speech": {
+                    "model_default": "bulbul:v3",
+                    "languages": [
+                      {
+                        "code": "hi-IN",
+                        "label": "Hindi"
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -932,21 +1340,40 @@
     },
     "/voice/speech-to-text": {
       "post": {
-        "tags": ["Voice"],
+        "tags": [
+          "Voice"
+        ],
         "summary": "Speech to text (Sarvam)",
         "description": "Upload audio (multipart field `file`). Optional fields: `mode` (transcribe|translate|verbatim|translit|codemix), `language_code` (e.g. hi-IN), `model` (default saaras:v3).\nMax ~30s audio. Server needs SARVAM_API_KEY.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "requestBody": {
           "content": {
             "multipart/form-data": {
               "schema": {
                 "type": "object",
-                "required": ["file"],
+                "required": [
+                  "file"
+                ],
                 "properties": {
-                  "file": { "type": "string", "format": "binary" },
-                  "mode": { "type": "string", "default": "transcribe" },
-                  "language_code": { "type": "string" },
-                  "model": { "type": "string", "default": "saaras:v3" }
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "mode": {
+                    "type": "string",
+                    "default": "transcribe"
+                  },
+                  "language_code": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": "saaras:v3"
+                  }
                 }
               }
             }
@@ -969,7 +1396,9 @@
             "description": "Sarvam not configured",
             "content": {
               "application/json": {
-                "example": { "error": "Sarvam is not configured (SARVAM_API_KEY)" }
+                "example": {
+                  "error": "Sarvam is not configured (SARVAM_API_KEY)"
+                }
               }
             }
           }
@@ -978,37 +1407,63 @@
     },
     "/voice/text-to-speech": {
       "post": {
-        "tags": ["Voice"],
+        "tags": [
+          "Voice"
+        ],
         "summary": "Text to speech (Sarvam)",
         "description": "Synthesize speech with Bulbul v3 (default). Use `speaker` (lowercase), `pace` 0.5–2.0, `speech_sample_rate`, `output_audio_codec` (wav|mp3|…), `temperature` (v3).\n\n**Response:** Default is JSON with base64 in `audios` (the string can be very long). For **raw audio** use query `?response_format=binary` or `?download=1`, or send header `Accept: audio/wav` (or `audio/mpeg` for mp3). Use `?response_format=json` to force JSON. Optional `filename=myclip` sets the download basename.",
-        "security": [{ "ApiKey": [] }],
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
         "parameters": [
           {
             "name": "Accept",
             "in": "header",
             "required": false,
-            "schema": { "type": "string", "example": "audio/wav" },
+            "schema": {
+              "type": "string",
+              "example": "audio/wav"
+            },
             "description": "If this header includes an audio media type (e.g. `audio/wav`, `audio/mpeg`, `audio/*`), the response is raw bytes like `response_format=binary`. Use `?response_format=json` to force JSON."
           },
           {
             "name": "response_format",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "enum": ["json", "binary"], "default": "json" },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "binary"
+              ],
+              "default": "json"
+            },
             "description": "Use `binary` to return raw audio bytes with Content-Disposition: attachment (save in Postman / browser). Omit or `json` for Sarvam JSON with base64 `audios`."
           },
           {
             "name": "download",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "enum": ["0", "1"] },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ]
+            },
             "description": "Shortcut: `1` is the same as `response_format=binary`."
           },
           {
             "name": "filename",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$" },
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            },
             "description": "Download file basename without extension; extension matches `output_audio_codec` (e.g. wav). Default `speech`."
           }
         ],
@@ -1018,16 +1473,45 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["text", "target_language_code"],
+                "required": [
+                  "text",
+                  "target_language_code"
+                ],
                 "properties": {
-                  "text": { "type": "string", "maxLength": 2500 },
-                  "target_language_code": { "type": "string", "example": "hi-IN" },
-                  "speaker": { "type": "string", "example": "shubh" },
-                  "model": { "type": "string", "enum": ["bulbul:v3", "bulbul:v2"], "default": "bulbul:v3" },
-                  "pace": { "type": "number" },
-                  "speech_sample_rate": { "type": "string", "example": "24000" },
-                  "output_audio_codec": { "type": "string", "example": "wav" },
-                  "temperature": { "type": "number" }
+                  "text": {
+                    "type": "string",
+                    "maxLength": 2500
+                  },
+                  "target_language_code": {
+                    "type": "string",
+                    "example": "hi-IN"
+                  },
+                  "speaker": {
+                    "type": "string",
+                    "example": "shubh"
+                  },
+                  "model": {
+                    "type": "string",
+                    "enum": [
+                      "bulbul:v3",
+                      "bulbul:v2"
+                    ],
+                    "default": "bulbul:v3"
+                  },
+                  "pace": {
+                    "type": "number"
+                  },
+                  "speech_sample_rate": {
+                    "type": "string",
+                    "example": "24000"
+                  },
+                  "output_audio_codec": {
+                    "type": "string",
+                    "example": "wav"
+                  },
+                  "temperature": {
+                    "type": "number"
+                  }
                 }
               },
               "example": {
@@ -1050,15 +1534,23 @@
               "application/json": {
                 "example": {
                   "request_id": "20241115_12345678",
-                  "audios": ["UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZGF0YQAAAAA..."]
+                  "audios": [
+                    "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZGF0YQAAAAA..."
+                  ]
                 }
               },
               "audio/wav": {
-                "schema": { "type": "string", "format": "binary" },
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                },
                 "example": "(raw WAV bytes — use Save Response in Postman)"
               },
               "audio/mpeg": {
-                "schema": { "type": "string", "format": "binary" },
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                },
                 "example": "(raw MP3 when output_audio_codec is mp3)"
               }
             }
@@ -1067,7 +1559,420 @@
             "description": "Sarvam not configured",
             "content": {
               "application/json": {
-                "example": { "error": "Sarvam is not configured (SARVAM_API_KEY)" }
+                "example": {
+                  "error": "Sarvam is not configured (SARVAM_API_KEY)"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{customerId}/exotel-settings": {
+      "get": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "Get Exotel settings",
+        "description": "Returns the per-tenant Exotel configuration for a customer.\n\nSecrets (`exotel_api_key`, `exotel_api_token`, `webhook_secret`) are **never** returned in the response — only boolean flags (`has_api_key`, `has_api_token`, `has_webhook_secret`) indicating whether they are set.\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exotel settings for the customer",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
+                  "customer_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "exotel_account_sid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "exotel_app_id": "my-exotel-app",
+                  "exotel_subdomain": "api.exotel.com",
+                  "inbound_phone_number": "+9111xxxxxxxx",
+                  "default_outbound_caller_id": "+9111xxxxxxxx",
+                  "voicebot_wss_url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "voicebot_bootstrap_https_url": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "is_enabled": true,
+                  "use_sandbox": false,
+                  "has_api_key": true,
+                  "has_api_token": true,
+                  "has_webhook_secret": true,
+                  "created_at": "2026-04-13T10:00:00.000Z",
+                  "updated_at": "2026-04-13T10:00:00.000Z"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Exotel settings configured for this customer",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Exotel settings not found for this customer"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Missing or invalid x-admin-token"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "Create or update Exotel settings",
+        "description": "Upserts the per-tenant Exotel configuration for a customer (one row per customer).\n\nAll fields are optional — only provided fields are updated (existing values are preserved via COALESCE). To clear a field, you would need a direct DB update.\n\n**Fields:**\n- `exotel_account_sid` — Exotel Account SID\n- `exotel_app_id` — Exotel App ID\n- `exotel_subdomain` — Exotel regional subdomain (e.g. `api.exotel.com`)\n- `exotel_api_key` — Exotel API key (stored securely, never returned in GET)\n- `exotel_api_token` — Exotel API token (stored securely, never returned in GET)\n- `inbound_phone_number` — DID mapped to this tenant\n- `default_outbound_caller_id` — Outbound CLI if applicable\n- `webhook_secret` — Secret for webhook/WSS verification\n- `voicebot_wss_url` — The canonical `wss://` URL for this tenant's Voicebot\n- `voicebot_bootstrap_https_url` — HTTPS bootstrap URL that returns `{ url: wss://... }`\n- `is_enabled` — Whether Voicebot is active for this tenant\n- `use_sandbox` — Whether to use Exotel sandbox environment\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "exotel_account_sid": {
+                    "type": "string",
+                    "example": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                  },
+                  "exotel_app_id": {
+                    "type": "string",
+                    "example": "my-exotel-app"
+                  },
+                  "exotel_subdomain": {
+                    "type": "string",
+                    "example": "api.exotel.com"
+                  },
+                  "exotel_api_key": {
+                    "type": "string",
+                    "example": "your-exotel-api-key"
+                  },
+                  "exotel_api_token": {
+                    "type": "string",
+                    "example": "your-exotel-api-token"
+                  },
+                  "inbound_phone_number": {
+                    "type": "string",
+                    "example": "+9111xxxxxxxx"
+                  },
+                  "default_outbound_caller_id": {
+                    "type": "string",
+                    "example": "+9111xxxxxxxx"
+                  },
+                  "webhook_secret": {
+                    "type": "string",
+                    "example": "random-long-secret"
+                  },
+                  "voicebot_wss_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "example": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  },
+                  "voicebot_bootstrap_https_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "example": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  },
+                  "is_enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "use_sandbox": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              },
+              "example": {
+                "exotel_account_sid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "exotel_app_id": "my-exotel-app",
+                "exotel_subdomain": "api.exotel.com",
+                "exotel_api_key": "your-exotel-api-key",
+                "exotel_api_token": "your-exotel-api-token",
+                "inbound_phone_number": "+9111xxxxxxxx",
+                "default_outbound_caller_id": "+9111xxxxxxxx",
+                "webhook_secret": "random-long-secret-for-webhook-verification",
+                "voicebot_wss_url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "voicebot_bootstrap_https_url": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "is_enabled": true,
+                "use_sandbox": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exotel settings created or updated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
+                  "customer_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "exotel_account_sid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "exotel_app_id": "my-exotel-app",
+                  "exotel_subdomain": "api.exotel.com",
+                  "inbound_phone_number": "+9111xxxxxxxx",
+                  "default_outbound_caller_id": "+9111xxxxxxxx",
+                  "voicebot_wss_url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "voicebot_bootstrap_https_url": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "is_enabled": true,
+                  "use_sandbox": false,
+                  "created_at": "2026-04-13T10:00:00.000Z",
+                  "updated_at": "2026-04-13T10:00:00.000Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": {
+                    "formErrors": [],
+                    "fieldErrors": {
+                      "voicebot_wss_url": [
+                        "Invalid url"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Customer not found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "Delete Exotel settings",
+        "description": "Removes all Exotel configuration for a customer. This will disable the Voicebot for this tenant.\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exotel settings deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleted": true,
+                  "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Exotel settings found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "No Exotel settings found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{customerId}/voicebot-sessions": {
+      "get": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "List voicebot sessions",
+        "description": "Returns both **active** (in-memory, currently connected) and **recent** (from database, last 25) voicebot call sessions for a customer.\n\n**Active sessions** include real-time info: stream_sid, call_sid, caller/called numbers, sample rate, duration, speaking state.\n**Recent sessions** include DB-persisted call history with status, timestamps, and linked chat_session_id.\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active and recent voicebot sessions",
+            "content": {
+              "application/json": {
+                "example": {
+                  "active": [
+                    {
+                      "stream_sid": "ST_abcdef1234567890",
+                      "call_sid": "CA_abcdef1234567890",
+                      "from": "+919876543210",
+                      "to": "+9111xxxxxxxx",
+                      "sample_rate": 16000,
+                      "started_at": "2026-04-13T10:00:00.000Z",
+                      "duration_seconds": 45,
+                      "is_speaking": false,
+                      "has_chat_session": true
+                    }
+                  ],
+                  "recent": [
+                    {
+                      "id": "c1d2e3f4-a5b6-7890-abcd-ef1234567890",
+                      "exotel_call_sid": "CA_abcdef1234567890",
+                      "exotel_stream_sid": "ST_abcdef1234567890",
+                      "direction": "inbound",
+                      "from_number": "+919876543210",
+                      "to_number": "+9111xxxxxxxx",
+                      "status": "stopped:callerHangup",
+                      "chat_session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                      "started_at": "2026-04-13T10:00:00.000Z",
+                      "ended_at": "2026-04-13T10:02:30.000Z"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exotel/voicebot/status": {
+      "get": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "Voicebot system status",
+        "description": "Health check for the Voicebot WebSocket system. Returns total active sessions across all tenants.\n\nNo authentication required.",
+        "responses": {
+          "200": {
+            "description": "Voicebot system status",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "active_sessions": 3,
+                  "timestamp": "2026-04-13T12:00:00.000Z"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exotel/voicebot/bootstrap/{customerId}": {
+      "get": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "HTTPS bootstrap (returns WSS URL)",
+        "description": "Returns the tenant's WebSocket URL as JSON `{ url: \"wss://...\" }`.\n\nExotel can be configured to call this HTTPS endpoint first, then connect to the returned WSS URL. This enables dynamic routing, signed tokens, or environment-specific hosts.\n\nIf `voicebot_wss_url` is configured in the tenant's Exotel settings, it is returned directly. Otherwise, a default URL is generated from the request hostname.\n\nNo authentication required (Exotel calls this).",
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WebSocket URL for this tenant",
+            "content": {
+              "application/json": {
+                "example": {
+                  "url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid customer ID",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Invalid customer ID format"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Voicebot not configured",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Voicebot not configured for this tenant"
+                }
               }
             }
           }

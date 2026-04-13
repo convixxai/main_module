@@ -30,7 +30,7 @@ Complete step-by-step guide for pushing code to GitHub and deploying the Convixx
 1. Log in to [github.com](https://github.com).
 2. Click the **"+"** icon (top right) → **"New repository"**.
 3. Fill in:
-   - **Repository name:** `convixx-backend` (or any name you like)
+   - **Repository name:** `main_module` (or any name you like)
    - **Description:** Optional, e.g. "Convixx RAG + LLM Backend"
    - **Visibility:** Choose **Private** (recommended) or **Public**
    - **Do NOT** check "Initialize with README" – your project already has files
@@ -111,12 +111,12 @@ And ensure `apps/api/.env` is in `.gitignore`.
 
 ### Step 1.6: Connect to GitHub and Push
 
-1. On your GitHub repository page, copy the repository URL (e.g. `https://github.com/YourUsername/convixx-backend.git`).
+1. On your GitHub repository page, copy the repository URL (e.g. `https://github.com/YourUsername/main_module.git`).
 
 2. Add the remote and push:
    ```bash
    # Replace with YOUR repository URL
-   git remote add origin https://github.com/YourUsername/convixx-backend.git
+   git remote add origin https://github.com/YourUsername/main_module.git
 
    # Rename branch to main (if needed)
    git branch -M main
@@ -187,6 +187,21 @@ sudo lsof -i :443
 # Check Nginx configuration (if Nginx is used)
 ls -la /etc/nginx/sites-enabled/
 cat /etc/nginx/sites-enabled/default
+
+# Nginx is not installed then run below command
+# To install Nginx (if not already installed), run:
+sudo apt-get update
+sudo apt-get install -y nginx
+
+# After installation, check its status:
+sudo systemctl status nginx
+
+# Start Nginx if not running:
+sudo systemctl start nginx
+
+# Enable Nginx to start automatically on reboot:
+sudo systemctl enable nginx
+
 ```
 
 **Share the output with your developer/team** so we know exactly what to stop and what config files to edit.
@@ -222,7 +237,7 @@ cat /etc/nginx/sites-enabled/default
 PM2 keeps your Node.js app running and restarts it if it crashes:
 
 ```bash
-sudo npm install -g pm2
+   sudo npm install -g pm2
 pm2 --version
 ```
 
@@ -236,8 +251,8 @@ sudo mkdir -p /var/www
 cd /var/www
 
 # Clone (replace with YOUR repo URL)
-sudo git clone https://github.com/YourUsername/convixx-backend.git
-cd convixx-backend
+sudo git clone https://github.com/YourUsername/main_module.git
+cd main_module
 ```
 
 If the repo is **private**, you have two options:
@@ -245,7 +260,7 @@ If the repo is **private**, you have two options:
 - **Option A (HTTPS):** Use a Personal Access Token when Git asks for password.
 - **Option B (SSH):** Set up SSH keys on the server and add the server's public key to GitHub. Then clone using:
   ```bash
-  git clone git@github.com:YourUsername/convixx-backend.git
+  git clone git@github.com:YourUsername/main_module.git
   ```
 
 ---
@@ -255,7 +270,7 @@ If the repo is **private**, you have two options:
 **Never commit .env to GitHub.** Create it manually on the server:
 
 ```bash
-cd /var/www/convixx-backend/apps/api
+cd /var/www/main_module/apps/api
 sudo nano .env
 ```
 
@@ -271,7 +286,7 @@ Save and exit: `Ctrl+O`, `Enter`, `Ctrl+X`.
 ### Step 2.7: Build and Run the Application
 
 ```bash
-cd /var/www/convixx-backend/apps/api
+cd /var/www/main_module/apps/api
 
 # Install dependencies
 npm install
@@ -290,7 +305,7 @@ Visit `http://YOUR_SERVER_IP:8080/health` in a browser. If you see `{"status":"o
 ### Step 2.8: Run with PM2 (Production)
 
 ```bash
-cd /var/www/convixx-backend/apps/api
+cd /var/www/main_module/apps/api
 
 # Start with PM2 (pick one)
 pm2 start dist/index.js --name convixx-api
@@ -437,7 +452,7 @@ pm2 restart convixx-api
 | Restart app        | `pm2 restart convixx-api`                      |
 | Test health        | `curl http://localhost:8080/health`            |
 | Check Nginx        | `sudo nginx -t && sudo systemctl status nginx` |
-| Update from GitHub | `cd /var/www/convixx-backend && git pull && cd apps/api && npm run build && pm2 restart convixx-api` |
+| Update from GitHub | `cd /var/www/main_module && git pull && cd apps/api && npm run build && pm2 restart convixx-api` |
 
 ---
 
@@ -456,7 +471,7 @@ pm2 restart convixx-api
 If `npm install` fails with `EACCES: permission denied` on `package-lock.json`, the directory was likely updated with `sudo git pull`, so root owns the files and the `ubuntu` user cannot write. Fix ownership, then retry:
 
 ```bash
-sudo chown -R ubuntu:ubuntu /var/www/main_module
+sudo chown -R convixx-main:convixx-main /var/www/main_module
 cd /var/www/main_module/apps/api
 npm install
 npm run build
