@@ -48,5 +48,11 @@ export const env = {
 
   /** Set to `false` to disable verbose RAG pipeline logs (embeddings, OpenAI payloads). */
   logRagTrace: process.env.LOG_RAG_TRACE !== "false",
+
+  /** Pino level: `fatal` | `error` | `warn` | `info` | `debug` | `trace` */
+  logLevel: process.env.LOG_LEVEL || "info",
+
+  /** When `true`, log every SQL statement (text + duration). Can be noisy; avoid in prod unless debugging. */
+  logDbQueries: process.env.LOG_DB_QUERIES === "true",
 };
 

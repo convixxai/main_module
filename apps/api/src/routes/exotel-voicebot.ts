@@ -8,7 +8,7 @@
 // Reference: docs/EXOTEL_VOICEBOT_WEBSOCKET_SPEC.md §14 Phase C+D
 // ============================================================
 
-import { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { WebSocket } from "ws";
 import { pool } from "../config/db";
 import { env } from "../config/env";
@@ -65,34 +65,6 @@ const GREETING_TEXT = "Hello! How can I help you today?";
 // ============================================================
 // Helpers
 // ============================================================
-
-/** Validate Basic auth header against stored credentials. */
-function validateBasicAuth(
-  request: FastifyRequest,
-  settings: ExotelSettings
-): boolean {
-  // If no webhook secret is configured, skip auth (IP-only validation assumed)
-  if (!settings.webhook_secret) return true;
-
-  const authHeader = request.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Basic ")) return false;
-
-  const decoded = Buffer.from(authHeader.slice(6), "base64").toString("utf-8");
-  const [key, token] = decoded.split(":");
-
-  // Accept either exotel_api_key:exotel_api_token or webhook_secret as password
-  if (
-    settings.exotel_api_key &&
-    settings.exotel_api_token &&
-    key === settings.exotel_api_key &&
-    token === settings.exotel_api_token
-  ) {
-    return true;
-  }
-
-  // Also accept the simple webhook_secret as the full decoded string
-  return decoded === settings.webhook_secret;
-}
 
 /**
  * Send a JSON message to Exotel on the WebSocket.
@@ -575,13 +547,6 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         return;
       }
 
-      // ---- Validate auth ----
-      if (!validateBasicAuth(request, settings)) {
-        log.warn({ customerId }, "voicebot auth failed");
-        socket.close(4401, "Unauthorized");
-        return;
-      }
-
       log.info({ customerId }, "exotel voicebot connection accepted");
 
       // ---- State for this connection ----
@@ -597,6 +562,20 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         if (!msg) {
           log.warn({ raw: raw.slice(0, 200) }, "voicebot: unparseable message");
           return;
+        }
+
+        if (msg.event === "media") {
+          const m = msg as ExotelMediaMessage;
+          log.trace(
+            {
+              event: msg.event,
+              payloadB64Len: m.media?.payload?.length ?? 0,
+              stream_sid: session?.streamSid,
+            },
+            "voicebot: inbound message"
+          );
+        } else {
+          log.debug({ event: msg.event, stream_sid: session?.streamSid }, "voicebot: inbound message");
         }
 
         try {
