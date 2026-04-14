@@ -11,14 +11,15 @@ import { voiceRoutes } from "./routes/voice";
 import { settingsRoutes } from "./routes/settings";
 import { exotelVoicebotRoutes } from "./routes/exotel-voicebot";
 import { exotelSettingsRoutes } from "./routes/exotel-settings";
-import { env } from "./config/env";
+import { adminLogsRoutes } from "./routes/adminLogs";
+import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
 import { registerSwagger } from "./plugins/swagger";
 
 export async function buildApp() {
   const app = Fastify({
-    logger: { level: env.logLevel },
+    logger: createRootLogger(),
     disableRequestLogging: true,
   });
 
@@ -39,6 +40,7 @@ export async function buildApp() {
   app.register(voiceRoutes);
   app.register(exotelVoicebotRoutes);          // Exotel Voicebot WebSocket (multi-tenant)
   app.register(exotelSettingsRoutes);           // Exotel settings admin API
+  app.register(adminLogsRoutes);                // Daily log file list + download (admin)
 
   return app;
 }

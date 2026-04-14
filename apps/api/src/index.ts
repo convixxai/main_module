@@ -6,7 +6,7 @@ async function main() {
 
   try {
     await app.listen({ port: env.port, host: "0.0.0.0" });
-    console.log(`Server running on http://localhost:${env.port}`);
+    app.log.info(`Server listening on http://0.0.0.0:${env.port}`);
   } catch (err) {
     app.log.error(err);
     process.exit(1);

@@ -52,6 +52,19 @@ export const env = {
   /** Pino level: `fatal` | `error` | `warn` | `info` | `debug` | `trace` */
   logLevel: process.env.LOG_LEVEL || "info",
 
+  /**
+   * Directory for daily rotating API log files (`convixx-YYYY-MM-DD.log`).
+   * Absolute or relative to process cwd. Default: `logs`.
+   * Written whenever the Node process runs (not tied to SSH sessions).
+   */
+  logFileDir: path.resolve(
+    process.cwd(),
+    (process.env.LOG_DIR || "logs").trim() || "logs"
+  ),
+
+  /** Set to `false` to disable daily log files (stdout only). */
+  logFileEnabled: process.env.LOG_FILE_ENABLED !== "false",
+
   /** When `true`, log every SQL statement (text + duration). Can be noisy; avoid in prod unless debugging. */
   logDbQueries: process.env.LOG_DB_QUERIES === "true",
 
