@@ -95,15 +95,27 @@ Exotel allows **at most 3** custom query parameters on the WSS URL; **total leng
 
 ---
 
-## 7. Chunk sizing (bidirectional)
+## 7. Chunk sizing (bidirectional) — Exotel platform rules
 
-Per Exotel:
+These are **Exotel Voicebot / stream** constraints on **each `media` payload** (the base64-decoded PCM chunk size in bytes). They apply to audio **you send to Exotel** (TTS playback to the caller). Inbound media from Exotel is controlled by their edge; Convixx still **buffers and re-chunks outbound** PCM to match the rules below.
 
-- **Minimum** chunk size **~3.2 KB** (~100 ms of data) — smaller chunks may cause audio issues under jitter.
-- **Maximum** **100 KB** — larger may cause timeouts.
-- Chunk size should be a **multiple of 320 bytes**. Non-multiples can cause extra delay (e.g. 20 ms wait) and **gaps**.
+| Constraint | Value | Why it matters |
+|------------|--------|----------------|
+| **Minimum chunk size** | **3.2 KB** (~100 ms of 16-bit mono PCM at typical telephony rates) | Smaller chunks increase sensitivity to **network jitter** and can cause audible instability. |
+| **Maximum chunk size** | **100 KB** (implementation uses **99,840 bytes** — largest **320-byte multiple** not above the cap) | Larger payloads can cause **timeouts** on the platform. |
+| **Alignment** | Every chunk length must be a **multiple of 320 bytes** | If the size is not a multiple of 320 (e.g. 4096 bytes), the **last fragment** can be shorter than 320 bytes. The platform may then **wait ~20 ms** before the next chunk: less audio per wait interval, which can sound like **gaps** between plays. |
 
-The Convixx media loop should **buffer outbound PCM** to respect these rules.
+**Summary**
+
+1. **Below minimum (~3.2 KB):** risk of **audio issues due to network jitter**.
+2. **Above 100 KB:** risk of **timeouts**.
+3. **Not a multiple of 320 bytes:** the last packet can be shorter than 320 bytes, **~20 ms wait** before the next chunk → **gaps** in playback.
+
+**Convixx implementation** (`apps/api/src/services/pcm-audio.ts` → `PcmChunkBuffer` used from `exotel-voicebot` outbound):
+
+- Default emit size is **6400 bytes** (aligned to 320, between min and max).
+- `push()` emits chunks of exactly that size; each slice is a **320-byte multiple**.
+- `flush()` aligns the remainder to **320 bytes**, then **pads with silence** up to at least **3.2 KB** when the final block would otherwise be below the minimum. If padding would exceed the max, it sends a **full max-sized frame** first and **flushes again** so no audio is dropped.
 
 ---
 

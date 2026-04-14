@@ -4,14 +4,17 @@
 // ============================================================
 
 /**
- * Exotel chunk constraints (bidirectional):
- *  - Minimum chunk size: ~3200 bytes (3.2 KB = ~100 ms at 16kHz 16-bit)
- *  - Maximum chunk size: 100,000 bytes (100 KB)
- *  - Must be a multiple of 320 bytes
+ * Exotel Voicebot / stream rules (each outbound `media` PCM payload):
+ *  - Minimum: 3.2 KB (~100 ms) — below this, jitter can break audio.
+ *  - Maximum: 100 KB — above this, timeouts.
+ *  - Length must be a multiple of 320 bytes — otherwise the platform may wait ~20 ms
+ *    on undersized tail fragments and cause gaps.
+ * @see docs/EXOTEL_VOICEBOT_WEBSOCKET_SPEC.md §7
  */
 export const PCM_CHUNK_MULTIPLE = 320;
 export const PCM_MIN_CHUNK_BYTES = 3200;
-export const PCM_MAX_CHUNK_BYTES = 100_000;
+/** Largest size ≤ 100 KB that is a multiple of 320 (Exotel max + alignment). */
+export const PCM_MAX_CHUNK_BYTES = Math.floor(100_000 / PCM_CHUNK_MULTIPLE) * PCM_CHUNK_MULTIPLE;
 
 /** Default outbound chunk size: ~6400 bytes (~200ms at 16kHz/16-bit mono) */
 export const DEFAULT_OUTBOUND_CHUNK_SIZE = 6400;
@@ -47,17 +50,39 @@ export class PcmChunkBuffer {
     return chunks;
   }
 
-  /** Flush remaining data (pads to the nearest 320 multiple if needed). */
+  /**
+   * Flush remaining PCM as one or more chunks for Exotel:
+   * 1) pad to a 320-byte multiple (avoids sub-320 B tail, 20 ms wait, and gaps);
+   * 2) if still below 3.2 KB, pad with silence to minimum (reduces jitter on short tails);
+   * 3) if above max, emit a full max-sized frame and leave the rest in the buffer (call flush again).
+   */
   flush(): Buffer | null {
     if (this.buffer.length === 0) return null;
-    // Pad to nearest 320-byte multiple
-    const remainder = this.buffer.length % PCM_CHUNK_MULTIPLE;
-    if (remainder !== 0) {
-      const pad = PCM_CHUNK_MULTIPLE - remainder;
-      this.buffer = Buffer.concat([this.buffer, Buffer.alloc(pad, 0)]);
+
+    const rem = this.buffer.length % PCM_CHUNK_MULTIPLE;
+    if (rem !== 0) {
+      this.buffer = Buffer.concat([
+        this.buffer,
+        Buffer.alloc(PCM_CHUNK_MULTIPLE - rem, 0),
+      ]);
     }
-    const chunk = this.buffer;
+
+    let chunk = this.buffer;
     this.buffer = Buffer.alloc(0);
+
+    if (chunk.length < PCM_MIN_CHUNK_BYTES) {
+      chunk = Buffer.concat([
+        chunk,
+        Buffer.alloc(PCM_MIN_CHUNK_BYTES - chunk.length, 0),
+      ]);
+    }
+
+    if (chunk.length > PCM_MAX_CHUNK_BYTES) {
+      const head = chunk.subarray(0, PCM_MAX_CHUNK_BYTES);
+      this.buffer = chunk.subarray(PCM_MAX_CHUNK_BYTES);
+      return head;
+    }
+
     return chunk;
   }
 

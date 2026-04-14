@@ -126,6 +126,12 @@ function exotelCallIdForMessages(session: VoicebotSession): string | null {
   return session.callSessionDbId;
 }
 
+/** PG undefined_column — migration 004 not applied yet; retry without exotel_call_session_id. */
+function isMissingExotelColumnError(err: unknown): boolean {
+  const e = err as { code?: string; message?: string };
+  return e?.code === "42703" || /exotel_call_session_id/i.test(String(e?.message ?? ""));
+}
+
 /** Persist user + assistant lines for this voice turn (encrypted content). Tagged with Exotel call row id when present. */
 async function appendVoiceTurnToChat(
   session: VoicebotSession,
@@ -136,23 +142,37 @@ async function appendVoiceTurnToChat(
   if (!session.chatSessionId) return;
   const callId = exotelCallIdForMessages(session);
   const { encrypt } = await import("../services/crypto");
-  await pool.query(
-    `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [session.chatSessionId, "user", encrypt(userText), "voice", callId]
-  );
-  await pool.query(
-    `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd, exotel_call_session_id)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [
-      session.chatSessionId,
-      "assistant",
-      encrypt(assistantText),
-      opts?.assistantSource ?? "voice",
-      opts?.openaiCostUsd ?? null,
-      callId,
-    ]
-  );
+  const uq = [session.chatSessionId, "user", encrypt(userText), "voice", callId] as const;
+  const aq = [
+    session.chatSessionId,
+    "assistant",
+    encrypt(assistantText),
+    opts?.assistantSource ?? "voice",
+    opts?.openaiCostUsd ?? null,
+    callId,
+  ] as const;
+  try {
+    await pool.query(
+      `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [...uq]
+    );
+    await pool.query(
+      `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd, exotel_call_session_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [...aq]
+    );
+  } catch (err) {
+    if (!isMissingExotelColumnError(err)) throw err;
+    await pool.query(
+      `INSERT INTO chat_messages (session_id, role, content, source) VALUES ($1, $2, $3, $4)`,
+      [uq[0], uq[1], uq[2], uq[3]]
+    );
+    await pool.query(
+      `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd) VALUES ($1, $2, $3, $4, $5)`,
+      [aq[0], aq[1], aq[2], aq[3], aq[4]]
+    );
+  }
   await touchChatSession(session.chatSessionId);
 }
 
@@ -166,11 +186,20 @@ async function appendAssistantChatLine(
 
   const { encrypt } = await import("../services/crypto");
   const callId = exotelCallIdForMessages(session);
-  await pool.query(
-    `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [session.chatSessionId, "assistant", encrypt(text), source, callId]
-  );
+  const row = [session.chatSessionId, "assistant", encrypt(text), source, callId] as const;
+  try {
+    await pool.query(
+      `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [...row]
+    );
+  } catch (err) {
+    if (!isMissingExotelColumnError(err)) throw err;
+    await pool.query(
+      `INSERT INTO chat_messages (session_id, role, content, source) VALUES ($1, $2, $3, $4)`,
+      [row[0], row[1], row[2], row[3]]
+    );
+  }
   await touchChatSession(session.chatSessionId);
 }
 
@@ -217,9 +246,13 @@ function sendAudioToExotel(
 ): void {
   const chunkBuffer = new PcmChunkBuffer();
   const chunks = chunkBuffer.push(pcmBuffer);
-  const remaining = chunkBuffer.flush();
+  const flushed: Buffer[] = [];
+  let piece: Buffer | null;
+  while ((piece = chunkBuffer.flush()) !== null) {
+    flushed.push(piece);
+  }
 
-  const allChunks = remaining ? [...chunks, remaining] : chunks;
+  const allChunks = flushed.length > 0 ? [...chunks, ...flushed] : chunks;
   let totalB64 = 0;
 
   const ctx: VoiceTraceCtx = {
@@ -394,7 +427,12 @@ async function processUtterance(
 
   const combinedPcm = Buffer.concat(pcmChunks);
   if (combinedPcm.length < 1600) {
-    // Too short to be meaningful speech (~50ms at 16kHz) — skip
+    voiceTrace(log, "pipeline.skip_short_utterance", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      pcm_bytes: combinedPcm.length,
+      min_required: 1600,
+    });
     return;
   }
 
@@ -453,7 +491,18 @@ async function processUtterance(
     });
 
     if (!transcript) {
-      log?.info({ stream_sid: session.streamSid }, "voicebot STT empty transcript");
+      log?.warn(
+        {
+          stream_sid: session.streamSid,
+          stt_body: safeJsonForLog(stt.body),
+        },
+        "voicebot STT empty transcript — check audio encoding/sample rate vs Exotel media_format"
+      );
+      voiceTrace(log, "pipeline.stt.empty_transcript", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        raw: safeJsonForLog(stt.body),
+      });
       return; // Silence or noise — don't respond
     }
 
@@ -873,11 +922,11 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               const mediaMsg = msg as ExotelMediaMessage;
               const pcm = decodeBase64Pcm(mediaMsg.media.payload);
 
-              // Barge-in: if bot is speaking and we get new caller audio, clear
-              if (session.isSpeaking && pcm.length > 640) {
-                sendClearToExotel(socket, session);
+              // Barge-in: any non-trivial caller audio while we're playing TTS (Exotel often sends 320-byte multiples; >640 was too strict)
+              if (session.isSpeaking && pcm.length > 32) {
+                sendClearToExotel(socket, session, log);
                 session.isSpeaking = false;
-                log.info({ stream_sid: session.streamSid }, "voicebot: barge-in detected");
+                log.info({ stream_sid: session.streamSid, pcm_chunk: pcm.length }, "voicebot: barge-in detected");
               }
 
               // Accumulate inbound PCM
@@ -891,8 +940,13 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               if (session.inboundBytes >= MAX_INBOUND_BUFFER_BYTES) {
                 if (!isProcessing) {
                   isProcessing = true;
-                  await processUtterance(socket, session, log);
-                  isProcessing = false;
+                  try {
+                    await processUtterance(socket, session, log);
+                  } catch (err) {
+                    log.error({ err }, "voicebot: utterance processing error");
+                  } finally {
+                    isProcessing = false;
+                  }
                 }
                 break;
               }
