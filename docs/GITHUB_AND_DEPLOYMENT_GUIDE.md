@@ -461,10 +461,48 @@ pm2 restart convixx-api
 | Problem                     | What to check                                               |
 |----------------------------|-------------------------------------------------------------|
 | "Connection refused"       | Is the app running? `pm2 status`                            |
-| "502 Bad Gateway"          | Is Node.js listening on 8080? `pm2 logs convixx-api`       |
+| "502 Bad Gateway"          | See **502 Bad Gateway** below (upstream not reachable — not specific to `/docs`). |
 | "Database connection" error | Is PostgreSQL reachable? Check PG_HOST, firewall, pg_hba.conf |
 | Old Python still responding| Ensure old service is stopped and Nginx serves only new config |
 | **EACCES on npm install**  | Files owned by root after `sudo git pull`. Run: `sudo chown -R ubuntu:ubuntu /var/www/main_module` |
+
+### 502 Bad Gateway on `/docs`, `/health`, or every URL
+
+Nginx returns **502** when it cannot get a valid HTTP response from the **upstream** (`proxy_pass`, usually `http://127.0.0.1:8080`). That affects **all** routes the same way, including Swagger at `/docs`. It is not a separate Swagger bug.
+
+Work through this on the **server** (SSH):
+
+1. **Is Node listening on the port Nginx uses?**  
+   Your Nginx config must match **`PORT` in `apps/api/.env`** (default **8080**). If `.env` has `PORT=3000` but Nginx still proxies to `8080`, you will get 502.  
+   Check: `grep ^PORT /var/www/main_module/apps/api/.env` and compare to `proxy_pass` in `/etc/nginx/sites-enabled/…`.
+
+2. **Bypass Nginx and hit Node directly:**
+   ```bash
+   curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/health
+   ```
+   If this fails or is not `200`, fix the app first (`pm2 logs convixx-api`, see below). If this works but the domain still returns 502, the problem is Nginx config or which `server_name` block is handling the request.
+
+3. **Is the process running and stable?**
+   ```bash
+   pm2 status
+   pm2 logs convixx-api --lines 80
+   ```
+   Look for **crash loops** (missing `.env`, bad `PG_*`, failed `npm run build`, `EADDRINUSE`). Restart after fixing: `cd /var/www/main_module/apps/api && npm run build && pm2 restart convixx-api --update-env`.
+
+4. **Confirm something is bound to the port:**
+   ```bash
+   sudo ss -tlnp | grep 8080
+   ```
+   You should see `node` (or `PM2`). If nothing listens, the API is not running.
+
+5. **Read Nginx’s error log** (often says `Connection refused` to upstream):
+   ```bash
+   sudo tail -n 50 /var/log/nginx/error.log
+   ```
+
+6. **Wrong site / default server:** If you have several configs, ensure `server_name` matches the host you open in the browser and that this site’s `location /` proxies to the correct port. Disable duplicate or old `sites-enabled` configs if two servers fight for the same domain.
+
+After Node responds on `curl http://127.0.0.1:8080/health`, reload Nginx (`sudo nginx -t && sudo systemctl reload nginx`) and test the domain again.
 
 ### EACCES: permission denied on package-lock.json
 

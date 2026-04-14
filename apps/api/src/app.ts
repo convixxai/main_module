@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { healthRoutes } from "./routes/health";
@@ -17,11 +17,11 @@ import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
 import { registerSwagger } from "./plugins/swagger";
 
-export async function buildApp() {
+export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: createRootLogger(),
+    loggerInstance: createRootLogger(),
     disableRequestLogging: true,
-  });
+  }) as unknown as FastifyInstance;
 
   attachPoolQueryLogging(app.log);
 
