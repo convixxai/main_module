@@ -160,3 +160,45 @@ export function pcmDurationMs(
   const samples = byteCount / 2;
   return (samples / sampleRate) * 1000;
 }
+
+/**
+ * Parse a WAV (PCM 16-bit LE mono) buffer and return raw PCM + sample rate from the `fmt` chunk.
+ * Returns null if not a valid PCM WAV.
+ */
+export function parseWavPcm16Mono(
+  buffer: Buffer
+): { pcm: Buffer; sampleRate: number } | null {
+  if (
+    buffer.length < 44 ||
+    buffer.toString("ascii", 0, 4) !== "RIFF" ||
+    buffer.toString("ascii", 8, 12) !== "WAVE"
+  ) {
+    return null;
+  }
+
+  let sampleRate = 8000;
+  let bitsPerSample = 16;
+  let dataChunk: Buffer | null = null;
+
+  let offset = 12;
+  while (offset + 8 <= buffer.length) {
+    const id = buffer.toString("ascii", offset, offset + 4);
+    const size = buffer.readUInt32LE(offset + 4);
+    const payloadStart = offset + 8;
+    if (payloadStart + size > buffer.length) break;
+
+    if (id === "fmt " && size >= 16) {
+      sampleRate = buffer.readUInt32LE(payloadStart + 4);
+      bitsPerSample = buffer.readUInt16LE(payloadStart + 14);
+    }
+    if (id === "data") {
+      dataChunk = buffer.subarray(payloadStart, payloadStart + size);
+      break;
+    }
+
+    offset = payloadStart + size + (size % 2);
+  }
+
+  if (!dataChunk || bitsPerSample !== 16) return null;
+  return { pcm: dataChunk, sampleRate };
+}

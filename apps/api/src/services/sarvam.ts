@@ -19,7 +19,7 @@ export interface SarvamTtsBody {
   text: string;
   target_language_code: string;
   speaker?: string | null;
-  model?: "bulbul:v3" | "bulbul:v2";
+  model?: "bulbul:v3" | "bulbul:v2" | string;
   pace?: number | null;
   speech_sample_rate?: string | null;
   output_audio_codec?: string | null;

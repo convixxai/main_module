@@ -39,11 +39,14 @@ import {
   decodeBase64Pcm,
   encodeBase64Pcm,
   PcmChunkBuffer,
+  parseWavPcm16Mono,
+  pcmDurationMs,
   resamplePcm16,
 } from "../services/pcm-audio";
 import {
   sarvamSpeechToText,
   sarvamTextToSpeech,
+  type SarvamTtsBody,
 } from "../services/sarvam";
 import {
   voiceTrace,
@@ -67,6 +70,46 @@ const ERROR_AUDIO_TEXT = "Sorry, I was unable to process that. Please try again.
 
 /** Greeting text for new calls. */
 const GREETING_TEXT = "Hello! How can I help you today?";
+
+/** If Exotel never sends inbound `mark` after our outbound audio, unblock STT after this slack past estimated play time. */
+const PLAYBACK_MARK_FALLBACK_SLACK_MS = 2500;
+
+function clearPlaybackMarkFallback(session: VoicebotSession): void {
+  if (session.playbackFallbackTimer) {
+    clearTimeout(session.playbackFallbackTimer);
+    session.playbackFallbackTimer = null;
+  }
+}
+
+/**
+ * Exotel should echo `mark` when playback reaches each mark. If that never arrives, pending marks
+ * would block caller audio forever — clear after estimated PCM duration + slack.
+ */
+function schedulePlaybackMarkFallback(
+  session: VoicebotSession,
+  outboundPcmBytes: number,
+  exotelSampleRate: number,
+  log?: FastifyRequest["log"]
+): void {
+  clearPlaybackMarkFallback(session);
+  if (outboundPcmBytes <= 0 || session.pendingMarks.size === 0) return;
+  const playMs = pcmDurationMs(outboundPcmBytes, exotelSampleRate);
+  const waitMs = Math.ceil(playMs + PLAYBACK_MARK_FALLBACK_SLACK_MS);
+  session.playbackFallbackTimer = setTimeout(() => {
+    session.playbackFallbackTimer = null;
+    if (session.pendingMarks.size === 0) return;
+    log?.warn(
+      {
+        stream_sid: session.streamSid,
+        pending_marks: [...session.pendingMarks],
+        fallback_after_ms: waitMs,
+      },
+      "voicebot: mark ack missing after playback window; clearing pending marks so caller audio can be processed"
+    );
+    session.pendingMarks.clear();
+    session.isSpeaking = false;
+  }, waitMs);
+}
 
 // ============================================================
 // Helpers — chat_sessions / chat_messages (one session per call)
@@ -337,14 +380,21 @@ async function speakToExotel(
       sample_rate: session.mediaFormat.sample_rate,
     });
 
-    // Get TTS audio from Sarvam
-    const tts = await sarvamTextToSpeech({
-      text: text.slice(0, 2500), // TTS character limit
+    const ttsPayload: SarvamTtsBody = {
+      text: text.slice(0, 2500),
       target_language_code: languageCode,
-      model: "bulbul:v3",
-      speech_sample_rate: `${session.mediaFormat.sample_rate}`,
+      model: env.sarvam.ttsModel || "bulbul:v2",
+      speech_sample_rate: env.sarvam.ttsSpeechSampleRate || "22050",
       output_audio_codec: "wav",
-    });
+    };
+    if (env.sarvam.ttsSpeaker) {
+      ttsPayload.speaker = env.sarvam.ttsSpeaker;
+    }
+    if (env.sarvam.ttsPace != null && !Number.isNaN(env.sarvam.ttsPace)) {
+      ttsPayload.pace = env.sarvam.ttsPace;
+    }
+
+    const tts = await sarvamTextToSpeech(ttsPayload);
 
     if (tts.status !== 200) {
       session.ttsInProgress = false;
@@ -381,41 +431,44 @@ async function speakToExotel(
       wav_b64_chars: b64Audio.length,
     });
 
-    // Decode the WAV file — skip the 44-byte WAV header to get raw PCM
     const wavBuffer = Buffer.from(b64Audio, "base64");
+    const parsed = parseWavPcm16Mono(wavBuffer);
+    const fallbackRate = parseInt(env.sarvam.ttsSpeechSampleRate, 10) || 22050;
     let pcmData: Buffer;
+    let srcRate: number;
 
-    // Check for WAV header (RIFF...WAVE)
-    if (
-      wavBuffer.length > 44 &&
-      wavBuffer.toString("ascii", 0, 4) === "RIFF" &&
-      wavBuffer.toString("ascii", 8, 12) === "WAVE"
-    ) {
-      // Find the 'data' chunk
-      let dataOffset = 12;
-      while (dataOffset < wavBuffer.length - 8) {
-        const chunkId = wavBuffer.toString("ascii", dataOffset, dataOffset + 4);
-        const chunkSize = wavBuffer.readUInt32LE(dataOffset + 4);
-        if (chunkId === "data") {
-          pcmData = wavBuffer.subarray(dataOffset + 8, dataOffset + 8 + chunkSize);
-          break;
-        }
-        dataOffset += 8 + chunkSize;
-      }
-      pcmData = pcmData! || wavBuffer.subarray(44);
+    if (parsed) {
+      pcmData = parsed.pcm;
+      srcRate = parsed.sampleRate;
     } else {
-      // Assume raw PCM or non-standard format
-      pcmData = wavBuffer;
+      pcmData = wavBuffer.length > 44 ? wavBuffer.subarray(44) : wavBuffer;
+      srcRate = fallbackRate;
+      log?.warn(
+        { stream_sid: session.streamSid, wav_bytes: wavBuffer.length },
+        "voicebot: WAV parse failed; assuming raw PCM at SARVAM_TTS_SPEECH_SAMPLE_RATE"
+      );
     }
 
-    // Resample if Sarvam's output rate differs from Exotel's negotiated rate
-    // (Sarvam default for TTS with wav codec may produce at the requested rate)
+    const exotelRate = session.mediaFormat.sample_rate;
+    if (srcRate !== exotelRate) {
+      voiceTrace(log, "pipeline.tts.resample", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        pcm_bytes_before: pcmData.length,
+        from_sample_rate: srcRate,
+        to_sample_rate: exotelRate,
+      });
+      pcmData = resamplePcm16(pcmData, srcRate, exotelRate);
+    }
+
     sendAudioToExotel(ws, session, pcmData, log);
     session.ttsInProgress = false;
+    schedulePlaybackMarkFallback(session, pcmData.length, exotelRate, log);
     logVoiceStage(log, "tts.sent_to_exotel", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
       pcm_bytes: pcmData.length,
+      exotel_sample_rate: exotelRate,
     });
     return true;
   } catch (err) {
@@ -1096,6 +1149,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 session.pendingMarks.delete(markName);
                 if (session.pendingMarks.size === 0) {
                   session.isSpeaking = false;
+                  clearPlaybackMarkFallback(session);
                 }
               }
               break;

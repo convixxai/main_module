@@ -43,6 +43,8 @@ export interface VoicebotSession {
   isSpeaking: boolean;
   /** True while Sarvam TTS is in flight (before PCM is sent); inbound should not drive STT/VAD yet. */
   ttsInProgress: boolean;
+  /** If Exotel never sends inbound `mark` ack, clear pending playback after this timeout. */
+  playbackFallbackTimer: ReturnType<typeof setTimeout> | null;
   /** Timestamp when the stream started. */
   startedAt: number;
   /** Custom parameters from the Exotel start message. */
@@ -88,6 +90,7 @@ export function createSession(params: {
     pendingMarks: new Set(),
     isSpeaking: false,
     ttsInProgress: false,
+    playbackFallbackTimer: null,
     startedAt: Date.now(),
     customParameters: params.customParameters || {},
     isClosing: false,
@@ -109,6 +112,10 @@ export function removeSession(streamSid: string): void {
     session.isClosing = true;
     session.outboundBuffer.reset();
     session.inboundPcm = [];
+    if (session.playbackFallbackTimer) {
+      clearTimeout(session.playbackFallbackTimer);
+      session.playbackFallbackTimer = null;
+    }
   }
   activeSessions.delete(streamSid);
 }

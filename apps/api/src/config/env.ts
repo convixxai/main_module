@@ -1,7 +1,10 @@
 import dotenv from "dotenv";
 import path from "path";
 
-dotenv.config({ path: path.resolve(__dirname, "../../.env") });
+/** API package root (`apps/api`), stable regardless of PM2 `cwd`. */
+const API_ROOT = path.resolve(__dirname, "../..");
+
+dotenv.config({ path: path.resolve(API_ROOT, ".env") });
 
 export const env = {
   port: parseInt(process.env.PORT || "8080", 10),
@@ -44,6 +47,17 @@ export const env = {
   /** Sarvam AI (speech-to-text / text-to-speech). Get key from https://dashboard.sarvam.ai/ */
   sarvam: {
     apiKey: process.env.SARVAM_API_KEY || "",
+    /** TTS model: `bulbul:v2` (natural default) or `bulbul:v3`. */
+    ttsModel: (process.env.SARVAM_TTS_MODEL || "bulbul:v2").trim(),
+    /**
+     * Sarvam TTS synthesis rate (Hz). Higher = better source quality; we resample to Exotel's rate.
+     * Common: 22050, 24000, 16000. Must match what Sarvam returns in WAV / request.
+     */
+    ttsSpeechSampleRate: (process.env.SARVAM_TTS_SPEECH_SAMPLE_RATE || "22050").trim(),
+    /** Optional speaker id (see Sarvam dashboard). */
+    ttsSpeaker: (process.env.SARVAM_TTS_SPEAKER || "").trim() || undefined,
+    /** Optional pace (Sarvam). */
+    ttsPace: process.env.SARVAM_TTS_PACE ? parseFloat(process.env.SARVAM_TTS_PACE) : undefined,
   },
 
   /** Set to `false` to disable verbose RAG pipeline logs (embeddings, OpenAI payloads). */
@@ -54,13 +68,12 @@ export const env = {
 
   /**
    * Directory for daily rotating API log files (`convixx-YYYY-MM-DD.log`).
-   * Absolute or relative to process cwd. Default: `logs`.
-   * Written whenever the Node process runs (not tied to SSH sessions).
+   * Default: `logs` under the API package root (not `process.cwd()`, so PM2 cwd does not break paths).
    */
-  logFileDir: path.resolve(
-    process.cwd(),
-    (process.env.LOG_DIR || "logs").trim() || "logs"
-  ),
+  logFileDir: (() => {
+    const raw = (process.env.LOG_DIR || "logs").trim() || "logs";
+    return path.isAbsolute(raw) ? raw : path.resolve(API_ROOT, raw);
+  })(),
 
   /** Set to `false` to disable daily log files (stdout only). */
   logFileEnabled: process.env.LOG_FILE_ENABLED !== "false",
