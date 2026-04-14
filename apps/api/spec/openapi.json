@@ -409,6 +409,84 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "Admin logs"
+        ],
+        "summary": "Delete log file for a day",
+        "description": "Deletes the daily log file for the given UTC day (`YYYY-MM-DD`). Useful for server-space cleanup.\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            "description": "UTC date matching `convixx-{date}.log`"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Log file deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleted": true,
+                  "date": "2026-04-14",
+                  "filename": "convixx-2026-04-14.log"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid date format",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Invalid date; use YYYY-MM-DD"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Missing or invalid x-admin-token"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No log file for that date",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Log file not found for this date"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Admin token not configured",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Admin token not configured"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/customers": {

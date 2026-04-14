@@ -210,6 +210,15 @@ type VoiceTraceCtx = {
   exotelCallDbId?: string | null;
 };
 
+function logVoiceStage(
+  log: FastifyRequest["log"] | undefined,
+  stage: string,
+  meta: Record<string, unknown> = {},
+  message?: string
+): void {
+  log?.info({ voicebotStage: stage, ...meta }, message ?? `voicebot stage: ${stage}`);
+}
+
 /**
  * Send a JSON message to Exotel on the WebSocket (logs safe payload preview).
  */
@@ -328,6 +337,14 @@ async function speakToExotel(
   log?: FastifyRequest["log"]
 ): Promise<boolean> {
   try {
+    logVoiceStage(log, "tts.start", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      call_sid: session.callSid,
+      exotel_call_session_id: session.callSessionDbId,
+      text_chars: text.length,
+      languageCode,
+    });
     voiceTrace(log, "pipeline.tts.request", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -356,6 +373,11 @@ async function speakToExotel(
         status: tts.status,
         body: safeJsonForLog(tts.body),
       });
+      logVoiceStage(log, "tts.error", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        status: tts.status,
+      }, "voicebot TTS failed");
       return false;
     }
 
@@ -363,6 +385,10 @@ async function speakToExotel(
     const b64Audio = ttsData.audios?.[0];
     if (!b64Audio) {
       log?.error("voicebot TTS returned no audio");
+      logVoiceStage(log, "tts.empty_audio", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+      }, "voicebot TTS returned empty audio payload");
       return false;
     }
 
@@ -402,9 +428,19 @@ async function speakToExotel(
     // Resample if Sarvam's output rate differs from Exotel's negotiated rate
     // (Sarvam default for TTS with wav codec may produce at the requested rate)
     sendAudioToExotel(ws, session, pcmData, log);
+    logVoiceStage(log, "tts.sent_to_exotel", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      pcm_bytes: pcmData.length,
+    });
     return true;
   } catch (err) {
     log?.error({ err }, "voicebot speakToExotel failed");
+    logVoiceStage(log, "tts.exception", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      err: String(err),
+    }, "voicebot speakToExotel threw");
     return false;
   }
 }
@@ -419,6 +455,7 @@ async function processUtterance(
   log?: FastifyRequest["log"]
 ): Promise<void> {
   if (session.inboundPcm.length === 0 || session.isClosing) return;
+  const utteranceStartedAt = Date.now();
 
   // Grab all accumulated PCM and reset
   const pcmChunks = session.inboundPcm;
@@ -435,6 +472,12 @@ async function processUtterance(
     });
     return;
   }
+  logVoiceStage(log, "utterance.received", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    pcm_bytes: combinedPcm.length,
+    estimated_ms: (combinedPcm.length / 2 / session.mediaFormat.sample_rate) * 1000,
+  });
 
   log?.info({
     stream_sid: session.streamSid,
@@ -479,6 +522,12 @@ async function processUtterance(
     const sttBody = stt.body as { transcript?: string; language_code?: string };
     const transcript = sttBody.transcript?.trim();
     const detectedLanguage = sttBody.language_code || "en-IN";
+    logVoiceStage(log, "stt.done", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      language: detectedLanguage,
+      transcript_chars: transcript?.length ?? 0,
+    });
 
     voiceTrace(log, "pipeline.stt.response", {
       customerId: session.customerId,
@@ -532,6 +581,10 @@ async function processUtterance(
         assistantSource: "pipeline_error",
       });
       await speakToExotel(ws, session, ERROR_AUDIO_TEXT, detectedLanguage, log);
+      logVoiceStage(log, "pipeline.fallback_error_audio", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+      });
       return;
     }
 
@@ -544,8 +597,23 @@ async function processUtterance(
     // === Step 3: TTS + Send ===
     const ttsLanguage = mapToTtsLanguage(detectedLanguage);
     await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
+    const elapsedMs = Date.now() - utteranceStartedAt;
+    logVoiceStage(log, "utterance.completed", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      llm_source: askResult.source,
+      elapsed_ms: elapsedMs,
+    });
+    if (elapsedMs > 15000) {
+      log?.warn({ stream_sid: session.streamSid, elapsedMs }, "voicebot utterance slow path (>15s)");
+    }
   } catch (err) {
     log?.error({ err, stream_sid: session.streamSid }, "voicebot utterance processing error");
+    logVoiceStage(log, "utterance.exception", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      err: String(err),
+    }, "voicebot utterance failed");
     await speakToExotel(ws, session, ERROR_AUDIO_TEXT, "en-IN", log).catch(() => {});
   }
 }
@@ -635,6 +703,11 @@ async function runVoicebotAskPipeline(
 
     // Generate embedding for the question
     const embedding = await generateEmbedding(question);
+    logVoiceStage(log, "rag.embedding.done", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      vector_dims: embedding.length,
+    });
 
     // KB vector search
     const embeddingStr = `[${embedding.join(",")}]`;
@@ -665,6 +738,10 @@ async function runVoicebotAskPipeline(
       });
       await appendVoiceTurnToChat(session, question, noKbAnswer, {
         assistantSource: "kb-empty",
+      });
+      logVoiceStage(log, "rag.kb_miss", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
       });
       return {
         answer: noKbAnswer,
@@ -718,6 +795,13 @@ async function runVoicebotAskPipeline(
     // Call OpenAI (faster for voice)
     const llmResult = await chatOpenAI(messages, 150);
     const answer = llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
+    logVoiceStage(log, "rag.llm.done", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      provider: "openai",
+      answer_chars: answer.length,
+      cost_usd: llmResult.costUsd,
+    });
 
     voiceTrace(log, "pipeline.rag.llm_response", {
       customerId: session.customerId,
@@ -744,6 +828,11 @@ async function runVoicebotAskPipeline(
       stream_sid: session.streamSid,
       err: String(err),
     });
+    logVoiceStage(log, "rag.exception", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      err: String(err),
+    }, "voicebot RAG pipeline failed");
     return null;
   }
 }
@@ -826,6 +915,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
       let session: VoicebotSession | null = null;
       let vadTimer: ReturnType<typeof setTimeout> | null = null;
       let isProcessing = false;
+      let sawMediaBeforeStart = false;
 
       // ---- Message handler ----
       socket.on("message", async (rawData: Buffer | string) => {
@@ -879,6 +969,13 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 sample_rate: details.media_format.sample_rate,
                 encoding: details.media_format.encoding,
               }, "voicebot: stream started");
+              logVoiceStage(log, "call.started", {
+                customerId,
+                stream_sid: details.stream_sid,
+                call_sid: details.call_sid,
+                sample_rate: details.media_format.sample_rate,
+                encoding: details.media_format.encoding,
+              });
 
               // One chat_sessions row for this call; link via exotel_call_sessions.chat_session_id
               try {
@@ -910,14 +1007,36 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
 
               // Send greeting audio
               if (env.sarvam.apiKey) {
+                logVoiceStage(log, "greeting.sending", {
+                  customerId,
+                  stream_sid: session.streamSid,
+                  call_sid: session.callSid,
+                });
                 await speakToExotel(socket, session, GREETING_TEXT, "en-IN", log);
+                logVoiceStage(log, "greeting.sent", {
+                  customerId,
+                  stream_sid: session.streamSid,
+                  call_sid: session.callSid,
+                });
               }
               break;
             }
 
             // ---- media (caller audio) ----
             case "media": {
-              if (!session) break;
+              if (!session) {
+                if (!sawMediaBeforeStart) {
+                  sawMediaBeforeStart = true;
+                  log?.warn(
+                    {
+                      customerId,
+                      stream_sid: (msg as ExotelMediaMessage).stream_sid,
+                    },
+                    "voicebot received media before start; cannot process/greet until start event arrives"
+                  );
+                }
+                break;
+              }
 
               const mediaMsg = msg as ExotelMediaMessage;
               const pcm = decodeBase64Pcm(mediaMsg.media.payload);
@@ -955,6 +1074,12 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               vadTimer = setTimeout(async () => {
                 if (!session || session.isClosing || isProcessing) return;
                 if (session.inboundPcm.length === 0) return;
+                logVoiceStage(log, "vad.timeout_triggered", {
+                  customerId: session.customerId,
+                  stream_sid: session.streamSid,
+                  buffered_chunks: session.inboundPcm.length,
+                  buffered_bytes: session.inboundBytes,
+                });
 
                 isProcessing = true;
                 try {
@@ -1001,6 +1126,15 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               if (vadTimer) clearTimeout(vadTimer);
 
               if (session) {
+                if (session.inboundBytes > 0) {
+                  log?.warn(
+                    {
+                      stream_sid: session.streamSid,
+                      pending_bytes: session.inboundBytes,
+                    },
+                    "voicebot call stopped with pending inbound audio; utterance may be incomplete"
+                  );
+                }
                 // Update DB row
                 if (session.callSessionDbId) {
                   await endCallSession(session.callSessionDbId, `stopped:${reason}`);

@@ -111,4 +111,31 @@ export async function adminLogsRoutes(app: FastifyInstance): Promise<void> {
       return reply.send(createReadStream(resolved));
     }
   );
+
+  app.delete<{ Params: { date: string } }>(
+    "/admin/logs/:date",
+    { preHandler: adminAuth },
+    async (request, reply) => {
+      const resolved = safeLogPathForDate(request.params.date);
+      if (!resolved) {
+        return reply.status(400).send({ error: "Invalid date; use YYYY-MM-DD" });
+      }
+
+      try {
+        await fs.unlink(resolved);
+      } catch (e: unknown) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
+          return reply.status(404).send({ error: "Log file not found for this date" });
+        }
+        throw e;
+      }
+
+      return reply.send({
+        deleted: true,
+        date: request.params.date,
+        filename: path.basename(resolved),
+      });
+    }
+  );
 }
