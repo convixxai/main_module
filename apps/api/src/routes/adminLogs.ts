@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { createReadStream } from "fs";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { adminAuth } from "../middleware/auth";
 import { env } from "../config/env";
 import { getLogDirectory } from "../config/logger-factory";
@@ -22,6 +22,61 @@ function safeLogPathForDate(date: string): string | null {
     return null;
   }
   return resolved;
+}
+
+function utcTodayDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function listAvailableLogDates(logDir: string): Promise<string[]> {
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(logDir);
+  } catch (e: unknown) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return [];
+    throw e;
+  }
+
+  const dates: string[] = [];
+  for (const name of entries) {
+    const date = parseLogDate(name);
+    if (date) dates.push(date);
+  }
+  dates.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+  return dates;
+}
+
+async function streamLogForDate(
+  date: string,
+  reply: FastifyReply
+): Promise<unknown> {
+  const resolved = safeLogPathForDate(date);
+  if (!resolved) {
+    return reply.status(400).send({ error: "Invalid date; use YYYY-MM-DD" });
+  }
+
+  try {
+    await fs.access(resolved);
+  } catch {
+    const logDir = getLogDirectory();
+    const availableDates = await listAvailableLogDates(logDir);
+    return reply.status(404).send({
+      error: "Log file not found for this date",
+      requested_date: date,
+      available_dates: availableDates,
+      utc_today: utcTodayDate(),
+      hint: "Log files are rotated by UTC day (convixx-YYYY-MM-DD.log).",
+    });
+  }
+
+  const filename = path.basename(resolved);
+  reply.header(
+    "Content-Disposition",
+    `attachment; filename="${filename}"`
+  );
+  reply.type("application/x-ndjson; charset=utf-8");
+  return reply.send(createReadStream(resolved));
 }
 
 export async function adminLogsRoutes(app: FastifyInstance): Promise<void> {
@@ -90,26 +145,13 @@ export async function adminLogsRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { date: string } }>(
     "/admin/logs/:date",
     { preHandler: adminAuth },
-    async (request, reply) => {
-      const resolved = safeLogPathForDate(request.params.date);
-      if (!resolved) {
-        return reply.status(400).send({ error: "Invalid date; use YYYY-MM-DD" });
-      }
+    async (request, reply) => streamLogForDate(request.params.date, reply)
+  );
 
-      try {
-        await fs.access(resolved);
-      } catch {
-        return reply.status(404).send({ error: "Log file not found for this date" });
-      }
-
-      const filename = path.basename(resolved);
-      reply.header(
-        "Content-Disposition",
-        `attachment; filename="${filename}"`
-      );
-      reply.type("application/x-ndjson; charset=utf-8");
-      return reply.send(createReadStream(resolved));
-    }
+  app.get(
+    "/admin/logs/today",
+    { preHandler: adminAuth },
+    async (_request, reply) => streamLogForDate(utcTodayDate(), reply)
   );
 
   app.delete<{ Params: { date: string } }>(
@@ -126,7 +168,15 @@ export async function adminLogsRoutes(app: FastifyInstance): Promise<void> {
       } catch (e: unknown) {
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "ENOENT") {
-          return reply.status(404).send({ error: "Log file not found for this date" });
+          const logDir = getLogDirectory();
+          const availableDates = await listAvailableLogDates(logDir);
+          return reply.status(404).send({
+            error: "Log file not found for this date",
+            requested_date: request.params.date,
+            available_dates: availableDates,
+            utc_today: utcTodayDate(),
+            hint: "Log files are rotated by UTC day (convixx-YYYY-MM-DD.log).",
+          });
         }
         throw e;
       }

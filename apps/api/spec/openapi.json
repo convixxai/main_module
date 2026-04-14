@@ -393,7 +393,13 @@
             "content": {
               "application/json": {
                 "example": {
-                  "error": "Log file not found for this date"
+                  "error": "Log file not found for this date",
+                  "requested_date": "2026-04-14",
+                  "available_dates": [
+                    "2026-04-13"
+                  ],
+                  "utc_today": "2026-04-14",
+                  "hint": "Log files are rotated by UTC day (convixx-YYYY-MM-DD.log)."
                 }
               }
             }
@@ -471,7 +477,74 @@
             "content": {
               "application/json": {
                 "example": {
-                  "error": "Log file not found for this date"
+                  "error": "Log file not found for this date",
+                  "requested_date": "2026-04-14",
+                  "available_dates": [
+                    "2026-04-13"
+                  ],
+                  "utc_today": "2026-04-14",
+                  "hint": "Log files are rotated by UTC day (convixx-YYYY-MM-DD.log)."
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Admin token not configured",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Admin token not configured"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/logs/today": {
+      "get": {
+        "tags": [
+          "Admin logs"
+        ],
+        "summary": "Download today's UTC log file",
+        "description": "Downloads the current UTC day's log file directly (equivalent to `GET /admin/logs/{utcDate}`).\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Log file stream",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Missing or invalid x-admin-token"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No log file for UTC today",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Log file not found for this date",
+                  "requested_date": "2026-04-14",
+                  "available_dates": [],
+                  "utc_today": "2026-04-14",
+                  "hint": "Log files are rotated by UTC day (convixx-YYYY-MM-DD.log)."
                 }
               }
             }
