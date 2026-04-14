@@ -46,6 +46,12 @@ import {
   sarvamSpeechToText,
   sarvamTextToSpeech,
 } from "../services/sarvam";
+import {
+  voiceTrace,
+  safeJsonForLog,
+  redactInboundExotelForLog,
+  redactOutboundExotelForLog,
+} from "../services/voicebot-trace";
 
 // ============================================================
 // Constants
@@ -64,16 +70,139 @@ const ERROR_AUDIO_TEXT = "Sorry, I was unable to process that. Please try again.
 const GREETING_TEXT = "Hello! How can I help you today?";
 
 // ============================================================
-// Helpers
+// Helpers — chat_sessions / chat_messages (one session per call)
 // ============================================================
 
 /**
- * Send a JSON message to Exotel on the WebSocket.
+ * One `chat_sessions` row per phone call; all turns go to `chat_messages` under that id.
+ * Call once from Exotel `start` before `createCallSession` so the call row can store `chat_session_id`.
  */
-function sendToExotel(ws: WebSocket, message: object): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(message));
+async function bootstrapVoicebotChatSession(
+  session: VoicebotSession,
+  _log?: FastifyRequest["log"]
+): Promise<void> {
+  if (session.chatSessionId) return;
+
+  const sessionResult = await pool.query(
+    `INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`,
+    [session.customerId]
+  );
+  session.chatSessionId = sessionResult.rows[0].id as string;
+
+  const agentsResult = await pool.query(
+    `SELECT id, system_prompt FROM agents
+     WHERE customer_id = $1 AND is_active = TRUE
+     ORDER BY created_at ASC LIMIT 1`,
+    [session.customerId]
+  );
+  if (agentsResult.rows.length > 0) {
+    session.agentId = agentsResult.rows[0].id as string;
+    await pool.query(
+      `UPDATE chat_sessions SET agent_id = $1, updated_at = NOW() WHERE id = $2`,
+      [session.agentId, session.chatSessionId]
+    );
   }
+}
+
+/**
+ * If `start` did not run (should not happen), recover chat + link to call.
+ */
+async function ensureVoicebotChatSessionForUtterance(
+  session: VoicebotSession,
+  log?: FastifyRequest["log"]
+): Promise<void> {
+  if (session.chatSessionId) return;
+  await bootstrapVoicebotChatSession(session, log);
+  if (session.callSessionDbId && session.chatSessionId) {
+    await linkChatSessionToCall(session.callSessionDbId, session.chatSessionId);
+  }
+}
+
+async function touchChatSession(sessionId: string): Promise<void> {
+  await pool.query(`UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1`, [sessionId]);
+}
+
+function exotelCallIdForMessages(session: VoicebotSession): string | null {
+  return session.callSessionDbId;
+}
+
+/** Persist user + assistant lines for this voice turn (encrypted content). Tagged with Exotel call row id when present. */
+async function appendVoiceTurnToChat(
+  session: VoicebotSession,
+  userText: string,
+  assistantText: string,
+  opts?: { assistantSource?: string | null; openaiCostUsd?: number | null }
+): Promise<void> {
+  if (!session.chatSessionId) return;
+  const callId = exotelCallIdForMessages(session);
+  const { encrypt } = await import("../services/crypto");
+  await pool.query(
+    `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [session.chatSessionId, "user", encrypt(userText), "voice", callId]
+  );
+  await pool.query(
+    `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd, exotel_call_session_id)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      session.chatSessionId,
+      "assistant",
+      encrypt(assistantText),
+      opts?.assistantSource ?? "voice",
+      opts?.openaiCostUsd ?? null,
+      callId,
+    ]
+  );
+  await touchChatSession(session.chatSessionId);
+}
+
+/** Assistant-only line (e.g. greeting). */
+async function appendAssistantChatLine(
+  session: VoicebotSession,
+  text: string,
+  source: string
+): Promise<void> {
+  if (!session.chatSessionId) return;
+
+  const { encrypt } = await import("../services/crypto");
+  const callId = exotelCallIdForMessages(session);
+  await pool.query(
+    `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [session.chatSessionId, "assistant", encrypt(text), source, callId]
+  );
+  await touchChatSession(session.chatSessionId);
+}
+
+type VoiceTraceCtx = {
+  customerId: string;
+  streamSid?: string;
+  callSid?: string;
+  exotelCallDbId?: string | null;
+};
+
+/**
+ * Send a JSON message to Exotel on the WebSocket (logs safe payload preview).
+ */
+function sendToExotel(
+  ws: WebSocket,
+  message: object,
+  log?: FastifyRequest["log"],
+  ctx?: VoiceTraceCtx,
+  options?: { skipTrace?: boolean }
+): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (!options?.skipTrace && log) {
+    const asRecord = message as Record<string, unknown>;
+    voiceTrace(log, "exotel.out.json", {
+      customerId: ctx?.customerId,
+      stream_sid: ctx?.streamSid ?? (asRecord.stream_sid as string | undefined),
+      call_sid: ctx?.callSid,
+      exotel_call_session_id: ctx?.exotelCallDbId,
+      payload: redactOutboundExotelForLog(asRecord),
+    });
+  }
+  ws.send(JSON.stringify(message));
 }
 
 /**
@@ -83,24 +212,43 @@ function sendToExotel(ws: WebSocket, message: object): void {
 function sendAudioToExotel(
   ws: WebSocket,
   session: VoicebotSession,
-  pcmBuffer: Buffer
+  pcmBuffer: Buffer,
+  log?: FastifyRequest["log"]
 ): void {
   const chunkBuffer = new PcmChunkBuffer();
   const chunks = chunkBuffer.push(pcmBuffer);
   const remaining = chunkBuffer.flush();
 
   const allChunks = remaining ? [...chunks, remaining] : chunks;
+  let totalB64 = 0;
+
+  const ctx: VoiceTraceCtx = {
+    customerId: session.customerId,
+    streamSid: session.streamSid,
+    callSid: session.callSid,
+    exotelCallDbId: session.callSessionDbId,
+  };
 
   for (const chunk of allChunks) {
+    const b64 = encodeBase64Pcm(chunk);
+    totalB64 += b64.length;
     const media: ExotelOutboundMedia = {
       event: "media",
       stream_sid: session.streamSid,
-      media: {
-        payload: encodeBase64Pcm(chunk),
-      },
+      media: { payload: b64 },
     };
-    sendToExotel(ws, media);
+    sendToExotel(ws, media, log, ctx, { skipTrace: true });
   }
+
+  voiceTrace(log, "exotel.out.media_batch", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    call_sid: session.callSid,
+    exotel_call_session_id: session.callSessionDbId,
+    pcm_in_bytes: pcmBuffer.length,
+    media_chunks: allChunks.length,
+    outbound_b64_chars: totalB64,
+  });
 
   // Send a mark after the last chunk so we know when playback completes
   if (allChunks.length > 0) {
@@ -112,19 +260,25 @@ function sendAudioToExotel(
       stream_sid: session.streamSid,
       mark: { name: markName },
     };
-    sendToExotel(ws, mark);
+    sendToExotel(ws, mark, log, ctx);
   }
 }
 
 /**
  * Send a clear message to cancel pending audio (barge-in).
  */
-function sendClearToExotel(ws: WebSocket, session: VoicebotSession): void {
+function sendClearToExotel(ws: WebSocket, session: VoicebotSession, log?: FastifyRequest["log"]): void {
   const clear: ExotelOutboundClear = {
     event: "clear",
     stream_sid: session.streamSid,
   };
-  sendToExotel(ws, clear);
+  const ctx: VoiceTraceCtx = {
+    customerId: session.customerId,
+    streamSid: session.streamSid,
+    callSid: session.callSid,
+    exotelCallDbId: session.callSessionDbId,
+  };
+  sendToExotel(ws, clear, log, ctx);
   session.pendingMarks.clear();
   session.isSpeaking = false;
 }
@@ -141,6 +295,17 @@ async function speakToExotel(
   log?: FastifyRequest["log"]
 ): Promise<boolean> {
   try {
+    voiceTrace(log, "pipeline.tts.request", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      call_sid: session.callSid,
+      exotel_call_session_id: session.callSessionDbId,
+      text_chars: text.length,
+      text_preview: text.slice(0, 400),
+      languageCode,
+      sample_rate: session.mediaFormat.sample_rate,
+    });
+
     // Get TTS audio from Sarvam
     const tts = await sarvamTextToSpeech({
       text: text.slice(0, 2500), // TTS character limit
@@ -151,7 +316,13 @@ async function speakToExotel(
     });
 
     if (tts.status !== 200) {
-      log?.error({ status: tts.status, body: tts.body }, "voicebot TTS failed");
+      log?.error({ status: tts.status, body: safeJsonForLog(tts.body) }, "voicebot TTS failed");
+      voiceTrace(log, "pipeline.tts.error", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        status: tts.status,
+        body: safeJsonForLog(tts.body),
+      });
       return false;
     }
 
@@ -161,6 +332,12 @@ async function speakToExotel(
       log?.error("voicebot TTS returned no audio");
       return false;
     }
+
+    voiceTrace(log, "pipeline.tts.response", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      wav_b64_chars: b64Audio.length,
+    });
 
     // Decode the WAV file — skip the 44-byte WAV header to get raw PCM
     const wavBuffer = Buffer.from(b64Audio, "base64");
@@ -191,7 +368,7 @@ async function speakToExotel(
 
     // Resample if Sarvam's output rate differs from Exotel's negotiated rate
     // (Sarvam default for TTS with wav codec may produce at the requested rate)
-    sendAudioToExotel(ws, session, pcmData);
+    sendAudioToExotel(ws, session, pcmData, log);
     return true;
   } catch (err) {
     log?.error({ err }, "voicebot speakToExotel failed");
@@ -227,6 +404,15 @@ async function processUtterance(
     duration_ms: (combinedPcm.length / 2 / session.mediaFormat.sample_rate) * 1000,
   }, "voicebot processing utterance");
 
+  voiceTrace(log, "pipeline.stt.request", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    call_sid: session.callSid,
+    exotel_call_session_id: session.callSessionDbId,
+    wav_pcm_bytes: combinedPcm.length,
+    sample_rate: session.mediaFormat.sample_rate,
+  });
+
   try {
     // === Step 1: STT ===
     // Create a minimal WAV header for the raw PCM so Sarvam can process it
@@ -241,7 +427,13 @@ async function processUtterance(
     });
 
     if (stt.status !== 200) {
-      log?.error({ status: stt.status, body: stt.body }, "voicebot STT failed");
+      log?.error({ status: stt.status, body: safeJsonForLog(stt.body) }, "voicebot STT failed");
+      voiceTrace(log, "pipeline.stt.error", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        status: stt.status,
+        body: safeJsonForLog(stt.body),
+      });
       await speakToExotel(ws, session, ERROR_AUDIO_TEXT, "en-IN", log);
       return;
     }
@@ -249,6 +441,16 @@ async function processUtterance(
     const sttBody = stt.body as { transcript?: string; language_code?: string };
     const transcript = sttBody.transcript?.trim();
     const detectedLanguage = sttBody.language_code || "en-IN";
+
+    voiceTrace(log, "pipeline.stt.response", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      call_sid: session.callSid,
+      exotel_call_session_id: session.callSessionDbId,
+      transcript: transcript || "",
+      language: detectedLanguage,
+      raw: safeJsonForLog(stt.body),
+    });
 
     if (!transcript) {
       log?.info({ stream_sid: session.streamSid }, "voicebot STT empty transcript");
@@ -261,6 +463,13 @@ async function processUtterance(
       language: detectedLanguage,
     }, "voicebot STT result");
 
+    voiceTrace(log, "pipeline.rag.start", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      exotel_call_session_id: session.callSessionDbId,
+      question_preview: transcript.slice(0, 500),
+    });
+
     // === Step 2: Run RAG/Ask Pipeline ===
     // Reuse the existing ask pipeline via internal function call
     const askResult = await runVoicebotAskPipeline(
@@ -270,6 +479,9 @@ async function processUtterance(
     );
 
     if (!askResult || !askResult.answer) {
+      await appendVoiceTurnToChat(session, transcript, ERROR_AUDIO_TEXT, {
+        assistantSource: "pipeline_error",
+      });
       await speakToExotel(ws, session, ERROR_AUDIO_TEXT, detectedLanguage, log);
       return;
     }
@@ -352,38 +564,10 @@ async function runVoicebotAskPipeline(
 
     const customerPrompt = customerResult.rows[0].system_prompt;
 
-    // Get or create chat session for this call
-    if (!session.chatSessionId) {
-      const sessionResult = await pool.query(
-        `INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`,
-        [session.customerId]
-      );
-      session.chatSessionId = sessionResult.rows[0].id;
+    await ensureVoicebotChatSessionForUtterance(session, log);
 
-      // Link to call session
-      if (session.callSessionDbId && session.chatSessionId) {
-        await linkChatSessionToCall(session.callSessionDbId, session.chatSessionId);
-      }
-    }
-
-    // Resolve agent
     let agentPrompt = customerPrompt;
-    if (!session.agentId) {
-      const agentsResult = await pool.query(
-        `SELECT id, name, system_prompt FROM agents
-         WHERE customer_id = $1 AND is_active = TRUE
-         ORDER BY created_at ASC LIMIT 1`,
-        [session.customerId]
-      );
-      if (agentsResult.rows.length > 0) {
-        session.agentId = agentsResult.rows[0].id;
-        agentPrompt = agentsResult.rows[0].system_prompt;
-        await pool.query(
-          `UPDATE chat_sessions SET agent_id = $1 WHERE id = $2`,
-          [session.agentId, session.chatSessionId]
-        ).catch(() => {});
-      }
-    } else {
+    if (session.agentId) {
       const agentResult = await pool.query(
         `SELECT system_prompt FROM agents WHERE id = $1`,
         [session.agentId]
@@ -392,6 +576,13 @@ async function runVoicebotAskPipeline(
         agentPrompt = agentResult.rows[0].system_prompt;
       }
     }
+
+    voiceTrace(log, "pipeline.rag.embedding", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      exotel_call_session_id: session.callSessionDbId,
+      question_len: question.length,
+    });
 
     // Generate embedding for the question
     const embedding = await generateEmbedding(question);
@@ -407,9 +598,27 @@ async function runVoicebotAskPipeline(
       [session.customerId, embeddingStr]
     );
 
+    voiceTrace(log, "pipeline.rag.kb_hit", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      exotel_call_session_id: session.callSessionDbId,
+      rows: kbResult.rows.length,
+      top_distances: kbResult.rows.map((r: { distance?: number }) => r.distance),
+    });
+
     if (kbResult.rows.length === 0) {
+      const noKbAnswer =
+        "I don't have enough information to answer that question.";
+      voiceTrace(log, "pipeline.rag.kb_miss", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        exotel_call_session_id: session.callSessionDbId,
+      });
+      await appendVoiceTurnToChat(session, question, noKbAnswer, {
+        assistantSource: "kb-empty",
+      });
       return {
-        answer: "I don't have enough information to answer that question.",
+        answer: noKbAnswer,
         source: "none",
         session_id: session.chatSessionId || "",
       };
@@ -448,20 +657,31 @@ async function runVoicebotAskPipeline(
       { role: "user", content: question },
     ];
 
+    voiceTrace(log, "pipeline.rag.llm_request", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      exotel_call_session_id: session.callSessionDbId,
+      history_messages: messages.length,
+      system_chars: messages[0]?.content?.length ?? 0,
+      user_preview: question.slice(0, 300),
+    });
+
     // Call OpenAI (faster for voice)
     const llmResult = await chatOpenAI(messages, 150);
     const answer = llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
 
-    // Save messages
-    const { encrypt } = await import("../services/crypto");
-    pool.query(
-      `INSERT INTO chat_messages (session_id, role, content, source) VALUES ($1, $2, $3, $4)`,
-      [session.chatSessionId, "user", encrypt(question), null]
-    ).catch(() => {});
-    pool.query(
-      `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd) VALUES ($1, $2, $3, $4, $5)`,
-      [session.chatSessionId, "assistant", encrypt(answer), "openai", llmResult.costUsd]
-    ).catch(() => {});
+    voiceTrace(log, "pipeline.rag.llm_response", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      exotel_call_session_id: session.callSessionDbId,
+      answer_preview: answer.slice(0, 400),
+      cost_usd: llmResult.costUsd,
+    });
+
+    await appendVoiceTurnToChat(session, question, answer, {
+      assistantSource: "openai",
+      openaiCostUsd: llmResult.costUsd,
+    });
 
     return {
       answer,
@@ -470,6 +690,11 @@ async function runVoicebotAskPipeline(
     };
   } catch (err) {
     log?.error({ err }, "voicebot ask pipeline error");
+    voiceTrace(log, "pipeline.rag.error", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      err: String(err),
+    });
     return null;
   }
 }
@@ -563,24 +788,21 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
           return;
         }
 
-        if (msg.event === "media") {
-          const m = msg as ExotelMediaMessage;
-          log.trace(
-            {
-              event: msg.event,
-              payloadB64Len: m.media?.payload?.length ?? 0,
-              stream_sid: session?.streamSid,
-            },
-            "voicebot: inbound message"
-          );
-        } else {
-          log.debug({ event: msg.event, stream_sid: session?.streamSid }, "voicebot: inbound message");
-        }
+        voiceTrace(log, "exotel.in", {
+          customerId,
+          stream_sid: session?.streamSid,
+          call_sid: session?.callSid,
+          exotel_call_session_id: session?.callSessionDbId,
+          chat_session_id: session?.chatSessionId,
+          raw_utf8_bytes: raw.length,
+          payload: redactInboundExotelForLog(msg as unknown as Record<string, unknown>),
+        });
 
         try {
           switch (msg.event) {
             // ---- connected ----
             case "connected":
+              voiceTrace(log, "exotel.in.connected", { customerId });
               log.info("voicebot: Exotel connected");
               break;
 
@@ -609,8 +831,9 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 encoding: details.media_format.encoding,
               }, "voicebot: stream started");
 
-              // Create DB row for this call
+              // One chat_sessions row for this call; link via exotel_call_sessions.chat_session_id
               try {
+                await bootstrapVoicebotChatSession(session, log);
                 session.callSessionDbId = await createCallSession({
                   customerId,
                   callSid: details.call_sid,
@@ -618,17 +841,25 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   direction: "inbound",
                   fromNumber: details.from,
                   toNumber: details.to,
-                  chatSessionId: null,
+                  chatSessionId: session.chatSessionId,
                   metadata: {
                     media_format: details.media_format,
                     custom_parameters: details.custom_parameters,
                   },
                 });
+                await appendAssistantChatLine(session, GREETING_TEXT, "voice_greeting");
+                voiceTrace(log, "call.session_ready", {
+                  customerId,
+                  chat_session_id: session.chatSessionId,
+                  exotel_call_session_id: session.callSessionDbId,
+                  stream_sid: session.streamSid,
+                  call_sid: session.callSid,
+                });
               } catch (err) {
-                log.error({ err }, "voicebot: failed to create call session row");
+                log.error({ err }, "voicebot: failed to bootstrap chat/call session rows");
               }
 
-              // Send greeting
+              // Send greeting audio
               if (env.sarvam.apiKey) {
                 await speakToExotel(socket, session, GREETING_TEXT, "en-IN", log);
               }

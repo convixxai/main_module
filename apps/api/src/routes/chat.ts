@@ -44,10 +44,20 @@ export async function chatRoutes(app: FastifyInstance) {
       }
 
       const result = await pool.query(
-        `SELECT id, role, content, source, openai_cost_usd, created_at
-         FROM chat_messages
-         WHERE session_id = $1
-         ORDER BY created_at ASC`,
+        `SELECT
+           cm.id,
+           cm.role,
+           cm.content,
+           cm.source,
+           cm.openai_cost_usd,
+           cm.created_at,
+           cm.exotel_call_session_id,
+           ecs.exotel_call_sid,
+           ecs.exotel_stream_sid
+         FROM chat_messages cm
+         LEFT JOIN exotel_call_sessions ecs ON ecs.id = cm.exotel_call_session_id
+         WHERE cm.session_id = $1
+         ORDER BY cm.created_at ASC`,
         [session_id]
       );
 
@@ -58,6 +68,9 @@ export async function chatRoutes(app: FastifyInstance) {
         source: row.source,
         openai_cost_usd: row.openai_cost_usd,
         created_at: row.created_at,
+        exotel_call_session_id: row.exotel_call_session_id,
+        exotel_call_sid: row.exotel_call_sid,
+        exotel_stream_sid: row.exotel_stream_sid,
       }));
 
       return messages;

@@ -56,6 +56,12 @@ export const env = {
   logDbQueries: process.env.LOG_DB_QUERIES === "true",
 
   /**
+   * When not `false`, log each Voicebot pipeline step with safe payload previews (`voicebot:*` / `voicebotTrace`).
+   * Disable with `LOG_VOICEBOT_TRACE=false` if logs are too large.
+   */
+  logVoicebotTrace: process.env.LOG_VOICEBOT_TRACE !== "false",
+
+  /**
    * Public hostname for this API (no scheme), e.g. `convixx.in`.
    * Used to build canonical Voicebot `wss://` / `https://` URLs (GET/PUT Exotel settings, bootstrap).
    * If empty, the incoming request `Host` is used when a request exists; otherwise `localhost` in URLs.
