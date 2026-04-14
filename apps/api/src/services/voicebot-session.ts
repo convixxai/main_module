@@ -41,6 +41,8 @@ export interface VoicebotSession {
   pendingMarks: Set<string>;
   /** True while the bot is generating/sending audio (for barge-in detection). */
   isSpeaking: boolean;
+  /** Count of consecutive likely-speech inbound frames while bot is speaking. */
+  bargeInSpeechFrames: number;
   /** Timestamp when the stream started. */
   startedAt: number;
   /** Custom parameters from the Exotel start message. */
@@ -85,6 +87,7 @@ export function createSession(params: {
     markCounter: 0,
     pendingMarks: new Set(),
     isSpeaking: false,
+    bargeInSpeechFrames: 0,
     startedAt: Date.now(),
     customParameters: params.customParameters || {},
     isClosing: false,
