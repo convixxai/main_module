@@ -39,10 +39,10 @@ export interface VoicebotSession {
   markCounter: number;
   /** Set of mark names sent but not yet acknowledged. */
   pendingMarks: Set<string>;
-  /** True while the bot is generating/sending audio (for barge-in detection). */
+  /** True after outbound media is sent until Exotel acknowledges all `mark` events (playback finished). */
   isSpeaking: boolean;
-  /** Count of consecutive likely-speech inbound frames while bot is speaking. */
-  bargeInSpeechFrames: number;
+  /** True while Sarvam TTS is in flight (before PCM is sent); inbound should not drive STT/VAD yet. */
+  ttsInProgress: boolean;
   /** Timestamp when the stream started. */
   startedAt: number;
   /** Custom parameters from the Exotel start message. */
@@ -87,7 +87,7 @@ export function createSession(params: {
     markCounter: 0,
     pendingMarks: new Set(),
     isSpeaking: false,
-    bargeInSpeechFrames: 0,
+    ttsInProgress: false,
     startedAt: Date.now(),
     customParameters: params.customParameters || {},
     isClosing: false,

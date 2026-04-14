@@ -19,7 +19,6 @@ import {
   type ExotelMediaMessage,
   type ExotelOutboundMedia,
   type ExotelOutboundMark,
-  type ExotelOutboundClear,
 } from "../types/exotel-ws";
 import {
   getExotelSettings,
@@ -68,27 +67,6 @@ const ERROR_AUDIO_TEXT = "Sorry, I was unable to process that. Please try again.
 
 /** Greeting text for new calls. */
 const GREETING_TEXT = "Hello! How can I help you today?";
-
-/**
- * Barge-in gate:
- * - Telephony often delivers baseline 20ms frames (320 bytes at 8k, 16-bit mono)
- * - Don't clear bot audio on a single frame/noise; require consecutive speech-like frames.
- */
-const BARGE_IN_MIN_PCM_BYTES = 320;
-const BARGE_IN_MIN_RMS = 450;
-const BARGE_IN_REQUIRED_FRAMES = 3;
-
-function pcm16Rms(pcm: Buffer): number {
-  if (pcm.length < 2) return 0;
-  const samples = Math.floor(pcm.length / 2);
-  if (samples === 0) return 0;
-  let sum = 0;
-  for (let i = 0; i < samples; i++) {
-    const s = pcm.readInt16LE(i * 2);
-    sum += s * s;
-  }
-  return Math.sqrt(sum / samples);
-}
 
 // ============================================================
 // Helpers — chat_sessions / chat_messages (one session per call)
@@ -318,7 +296,6 @@ function sendAudioToExotel(
     const markName = nextMarkName(session);
     session.pendingMarks.add(markName);
     session.isSpeaking = true;
-    session.bargeInSpeechFrames = 0;
     const mark: ExotelOutboundMark = {
       event: "mark",
       stream_sid: session.streamSid,
@@ -326,26 +303,6 @@ function sendAudioToExotel(
     };
     sendToExotel(ws, mark, log, ctx);
   }
-}
-
-/**
- * Send a clear message to cancel pending audio (barge-in).
- */
-function sendClearToExotel(ws: WebSocket, session: VoicebotSession, log?: FastifyRequest["log"]): void {
-  const clear: ExotelOutboundClear = {
-    event: "clear",
-    stream_sid: session.streamSid,
-  };
-  const ctx: VoiceTraceCtx = {
-    customerId: session.customerId,
-    streamSid: session.streamSid,
-    callSid: session.callSid,
-    exotelCallDbId: session.callSessionDbId,
-  };
-  sendToExotel(ws, clear, log, ctx);
-  session.pendingMarks.clear();
-  session.isSpeaking = false;
-  session.bargeInSpeechFrames = 0;
 }
 
 /**
@@ -359,6 +316,7 @@ async function speakToExotel(
   languageCode: string = "en-IN",
   log?: FastifyRequest["log"]
 ): Promise<boolean> {
+  session.ttsInProgress = true;
   try {
     logVoiceStage(log, "tts.start", {
       customerId: session.customerId,
@@ -389,6 +347,7 @@ async function speakToExotel(
     });
 
     if (tts.status !== 200) {
+      session.ttsInProgress = false;
       log?.error({ status: tts.status, body: safeJsonForLog(tts.body) }, "voicebot TTS failed");
       voiceTrace(log, "pipeline.tts.error", {
         customerId: session.customerId,
@@ -407,6 +366,7 @@ async function speakToExotel(
     const ttsData = tts.body as { audios?: string[] };
     const b64Audio = ttsData.audios?.[0];
     if (!b64Audio) {
+      session.ttsInProgress = false;
       log?.error("voicebot TTS returned no audio");
       logVoiceStage(log, "tts.empty_audio", {
         customerId: session.customerId,
@@ -451,6 +411,7 @@ async function speakToExotel(
     // Resample if Sarvam's output rate differs from Exotel's negotiated rate
     // (Sarvam default for TTS with wav codec may produce at the requested rate)
     sendAudioToExotel(ws, session, pcmData, log);
+    session.ttsInProgress = false;
     logVoiceStage(log, "tts.sent_to_exotel", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -458,6 +419,7 @@ async function speakToExotel(
     });
     return true;
   } catch (err) {
+    session.ttsInProgress = false;
     log?.error({ err }, "voicebot speakToExotel failed");
     logVoiceStage(log, "tts.exception", {
       customerId: session.customerId,
@@ -478,6 +440,7 @@ async function processUtterance(
   log?: FastifyRequest["log"]
 ): Promise<void> {
   if (session.inboundPcm.length === 0 || session.isClosing) return;
+  if (session.ttsInProgress || session.pendingMarks.size > 0) return;
   const utteranceStartedAt = Date.now();
 
   // Grab all accumulated PCM and reset
@@ -1064,24 +1027,11 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               const mediaMsg = msg as ExotelMediaMessage;
               const pcm = decodeBase64Pcm(mediaMsg.media.payload);
 
-              // Barge-in: require sustained speech-like energy, not a single telephony frame.
-              if (session.isSpeaking) {
-                const rms = pcm16Rms(pcm);
-                const isSpeechLike = pcm.length >= BARGE_IN_MIN_PCM_BYTES && rms >= BARGE_IN_MIN_RMS;
-                session.bargeInSpeechFrames = isSpeechLike ? session.bargeInSpeechFrames + 1 : 0;
-                if (session.bargeInSpeechFrames >= BARGE_IN_REQUIRED_FRAMES) {
-                  sendClearToExotel(socket, session, log);
-                  session.isSpeaking = false;
-                  log.info(
-                    {
-                      stream_sid: session.streamSid,
-                      pcm_chunk: pcm.length,
-                      rms: Math.round(rms),
-                      consecutive_frames: session.bargeInSpeechFrames,
-                    },
-                    "voicebot: barge-in detected"
-                  );
-                }
+              // While agent audio is generating or Exotel has not yet ack'd playback via `mark`,
+              // do not buffer inbound for STT/VAD and do not send `clear` — playback ends only when marks complete.
+              if (session.ttsInProgress || session.pendingMarks.size > 0) {
+                if (vadTimer) clearTimeout(vadTimer);
+                break;
               }
 
               // Accumulate inbound PCM
@@ -1146,7 +1096,6 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 session.pendingMarks.delete(markName);
                 if (session.pendingMarks.size === 0) {
                   session.isSpeaking = false;
-                  session.bargeInSpeechFrames = 0;
                 }
               }
               break;
