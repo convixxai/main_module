@@ -24,7 +24,7 @@ export async function buildApp() {
 
   attachPoolQueryLogging(app.log);
 
-  await app.register(registerRequestLogging);
+  registerRequestLogging(app);
   await app.register(cors, { origin: true }); // Allow all origins (required for Swagger UI Try it out)
   await app.register(websocket);               // Enable WebSocket support for Exotel Voicebot
   await registerSwagger(app);
