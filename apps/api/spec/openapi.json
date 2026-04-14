@@ -11,7 +11,7 @@
       "description": "Current host (recommended for Try it out)"
     },
     {
-      "url": "https://www.convixx.in",
+      "url": "https://convixx.in",
       "description": "Production"
     },
     {
@@ -1605,8 +1605,8 @@
                   "exotel_subdomain": "api.exotel.com",
                   "inbound_phone_number": "+9111xxxxxxxx",
                   "default_outbound_caller_id": "+9111xxxxxxxx",
-                  "voicebot_wss_url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-                  "voicebot_bootstrap_https_url": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "voicebot_wss_url": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "voicebot_bootstrap_https_url": "https://convixx.in/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                   "is_enabled": true,
                   "use_sandbox": false,
                   "has_api_key": true,
@@ -1705,12 +1705,12 @@
                   "voicebot_wss_url": {
                     "type": "string",
                     "format": "uri",
-                    "example": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    "example": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                   },
                   "voicebot_bootstrap_https_url": {
                     "type": "string",
                     "format": "uri",
-                    "example": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    "example": "https://convixx.in/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                   },
                   "is_enabled": {
                     "type": "boolean",
@@ -1731,8 +1731,8 @@
                 "inbound_phone_number": "+9111xxxxxxxx",
                 "default_outbound_caller_id": "+9111xxxxxxxx",
                 "webhook_secret": "random-long-secret-for-webhook-verification",
-                "voicebot_wss_url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-                "voicebot_bootstrap_https_url": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "voicebot_wss_url": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "voicebot_bootstrap_https_url": "https://convixx.in/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                 "is_enabled": true,
                 "use_sandbox": false
               }
@@ -1752,8 +1752,8 @@
                   "exotel_subdomain": "api.exotel.com",
                   "inbound_phone_number": "+9111xxxxxxxx",
                   "default_outbound_caller_id": "+9111xxxxxxxx",
-                  "voicebot_wss_url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-                  "voicebot_bootstrap_https_url": "https://api.convixx.com/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "voicebot_wss_url": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "voicebot_bootstrap_https_url": "https://convixx.in/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                   "is_enabled": true,
                   "use_sandbox": false,
                   "created_at": "2026-04-13T10:00:00.000Z",
@@ -1932,7 +1932,7 @@
           "Exotel Voicebot"
         ],
         "summary": "HTTPS bootstrap (returns WSS URL)",
-        "description": "Returns the tenant's WebSocket URL as JSON `{ url: \"wss://...\" }`.\n\nExotel can be configured to call this HTTPS endpoint first, then connect to the returned WSS URL. This enables dynamic routing, signed tokens, or environment-specific hosts.\n\nIf `voicebot_wss_url` is configured in the tenant's Exotel settings, it is returned directly. Otherwise, a default URL is generated from the request hostname.\n\nNo authentication required (Exotel calls this).",
+        "description": "Returns the tenant's WebSocket URL as JSON `{ url: \"wss://...\" }`.\n\nExotel can be configured to call this HTTPS endpoint first, then connect to the returned WSS URL. This enables dynamic routing, signed tokens, or environment-specific hosts.\n\nIf `voicebot_wss_url` is configured in the tenant's Exotel settings, it is returned directly. Otherwise, a default URL is built using the `PUBLIC_API_HOST` env var (e.g. `convixx.in`) if set, else the request `Host`.\n\nNo authentication required (Exotel calls this).",
         "parameters": [
           {
             "name": "customerId",
@@ -1951,7 +1951,7 @@
             "content": {
               "application/json": {
                 "example": {
-                  "url": "wss://api.convixx.com/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  "url": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                 }
               }
             }

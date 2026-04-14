@@ -30,8 +30,8 @@ INSERT INTO customer_exotel_settings (
   '+9111xxxxxxxx',                                -- DID mapped to this tenant
   '+9111xxxxxxxx',                                -- outbound CLI if applicable
   'random-long-secret-for-webhook-verification',
-  'wss://api.yourdomain.com/exotel/voicebot/00000000-0000-0000-0000-000000000001',
-  'https://api.yourdomain.com/exotel/voicebot/bootstrap/00000000-0000-0000-0000-000000000001',
+  'wss://convixx.in/exotel/voicebot/00000000-0000-0000-0000-000000000001',
+  'https://convixx.in/exotel/voicebot/bootstrap/00000000-0000-0000-0000-000000000001',
   TRUE,
   FALSE
 );
@@ -66,8 +66,8 @@ INSERT INTO customer_exotel_settings (
   '+9111xxxxxxxx',
   '+9111xxxxxxxx',
   'random-long-secret-for-webhook-verification',
-  'wss://api.yourdomain.com/exotel/voicebot/00000000-0000-0000-0000-000000000001',
-  'https://api.yourdomain.com/exotel/voicebot/bootstrap/00000000-0000-0000-0000-000000000001',
+  'wss://convixx.in/exotel/voicebot/00000000-0000-0000-0000-000000000001',
+  'https://convixx.in/exotel/voicebot/bootstrap/00000000-0000-0000-0000-000000000001',
   TRUE,
   FALSE
 )

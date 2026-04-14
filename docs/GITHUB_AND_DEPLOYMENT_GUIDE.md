@@ -341,7 +341,7 @@ Nginx will receive requests on port 80/443 and forward them to your Node.js app 
    sudo nano /etc/nginx/sites-available/convixx
    ```
 
-3. **Paste this configuration** (replace `yourdomain.com` with your actual domain, e.g. `api.convixx.in`):
+3. **Paste this configuration** (replace `yourdomain.com` with your actual domain, e.g. `convixx.in`):
 
    ```nginx
    server {
@@ -375,7 +375,7 @@ Nginx will receive requests on port 80/443 and forward them to your Node.js app 
 
 1. Go to your domain registrar (e.g. GoDaddy, Namecheap, AWS Route 53).
 2. Add an **A record**:
-   - **Name:** `api` (for api.convixx.in) or `@` (for root domain)
+   - **Name:** `@` (apex `convixx.in`) or another subdomain if you use one (e.g. `api` for `api.convixx.in`)
    - **Type:** A
    - **Value:** Your AWS server's public IP
    - **TTL:** 300

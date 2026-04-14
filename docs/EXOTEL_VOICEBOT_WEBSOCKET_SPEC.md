@@ -39,7 +39,7 @@ For a **voice agent** that speaks back to the caller, the design baseline is the
 
 These two statements are both true:
 
-1. **Per Convixx tenant:** Register **exactly one** Voicebot **WebSocket URL** for that tenant (e.g. `wss://api.convixx.com/exotel/voicebot/<customer_uuid>` or `wss://<tenant-slug>.voice.convixx.com/media`). That URL is stored in Convixx (see §12.1) and pasted into **that tenant’s** Exotel app/flow. **Other tenants use different URLs** — clean isolation at the edge and in config.
+1. **Per Convixx tenant:** Register **exactly one** Voicebot **WebSocket URL** for that tenant (e.g. `wss://convixx.in/exotel/voicebot/<customer_uuid>`). That URL is stored in Convixx (see §12.1) and pasted into **that tenant’s** Exotel app/flow. **Other tenants use different URLs** — clean isolation at the edge and in config.
 
 2. **Per phone call (Exotel behaviour):** When a call hits the Voicebot applet, Exotel **opens a new WebSocket connection** to your URL for that stream. **Two concurrent calls** for the same tenant ⇒ **two concurrent WebSocket connections** to the **same tenant endpoint**; the server tells them apart using `stream_sid` / `call_sid` in the `start` message.
 

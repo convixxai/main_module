@@ -54,5 +54,12 @@ export const env = {
 
   /** When `true`, log every SQL statement (text + duration). Can be noisy; avoid in prod unless debugging. */
   logDbQueries: process.env.LOG_DB_QUERIES === "true",
+
+  /**
+   * Public hostname for this API (no scheme), e.g. `convixx.in`.
+   * Used when building default `wss://…` URLs in Exotel bootstrap if `voicebot_wss_url` is unset.
+   * If empty, `request.hostname` is used (fine behind nginx with correct Host header).
+   */
+  publicApiHost: (process.env.PUBLIC_API_HOST || "").trim(),
 };
 

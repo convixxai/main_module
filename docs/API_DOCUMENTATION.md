@@ -1,6 +1,6 @@
 # Convixx API Documentation
 
-**Base URL (Production):** `https://www.convixx.in`  
+**Base URL (Production):** `https://convixx.in`  
 **Base URL (Local):** `http://localhost:8080`
 
 Use the production URL for all API calls when the app is deployed. Replace the base in examples below with the appropriate URL.
@@ -9,7 +9,7 @@ Use the production URL for all API calls when the app is deployed. Replace the b
 
 Interactive API documentation is available at a separate path from the API:
 
-- **Production:** `https://www.convixx.in/docs`
+- **Production:** `https://convixx.in/docs`
 - **Local:** `http://localhost:8080/docs`
 
 Use the **Authorize** button in Swagger UI to set `x-admin-token` (for customer/admin endpoints) or `x-api-key` (for KB, agents, ask, chat). You can try out endpoints directly from the browser.
@@ -48,7 +48,7 @@ List all chat sessions for the authenticated customer, ordered by most recently 
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/chat/sessions \
+curl https://convixx.in/chat/sessions \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -101,7 +101,7 @@ Get all messages for a specific chat session. Messages are decrypted and returne
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/messages \
+curl https://convixx.in/chat/sessions/a1b2c3d4-e5f6-7890-abcd-ef1234567890/messages \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -199,7 +199,7 @@ Transcribes short audio (~30 seconds max for the REST API). Send **multipart/for
 **Example (curl):**
 
 ```bash
-curl -X POST https://www.convixx.in/voice/speech-to-text \
+curl -X POST https://convixx.in/voice/speech-to-text \
   -H "x-api-key: cvx_your_key" \
   -F "file=@recording.wav;type=audio/wav" \
   -F "mode=transcribe"
@@ -422,7 +422,7 @@ Create a new customer.
 **Example Request:**
 
 ```bash
-curl -X POST https://www.convixx.in/customers \
+curl -X POST https://convixx.in/customers \
   -H "Content-Type: application/json" \
   -H "x-admin-token: your_admin_token_here" \
   -d '{
@@ -478,7 +478,7 @@ List all customers.
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/customers \
+curl https://convixx.in/customers \
   -H "x-admin-token: your_admin_token_here"
 ```
 
@@ -516,7 +516,7 @@ Get a single customer by ID.
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+curl https://convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "x-admin-token: your_admin_token_here"
 ```
 
@@ -570,7 +570,7 @@ At least one field must be provided.
 **Example Request (update system prompt):**
 
 ```bash
-curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+curl -X PUT https://convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -H "x-admin-token: your_admin_token_here" \
   -d '{
@@ -581,7 +581,7 @@ curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef123456789
 **Example Request (update both):**
 
 ```bash
-curl -X PUT https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+curl -X PUT https://convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -H "x-admin-token: your_admin_token_here" \
   -d '{
@@ -638,7 +638,7 @@ Generate a new API key for a customer. This key is used to authenticate all KB, 
 **Example Request:**
 
 ```bash
-curl -X POST https://www.convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890/api-key \
+curl -X POST https://convixx.in/customers/a1b2c3d4-e5f6-7890-abcd-ef1234567890/api-key \
   -H "x-admin-token: your_admin_token_here"
 ```
 
@@ -687,7 +687,7 @@ Create a new agent for the authenticated customer.
 **Example Request:**
 
 ```bash
-curl -X POST https://www.convixx.in/agents \
+curl -X POST https://convixx.in/agents \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -727,7 +727,7 @@ List all agents for the authenticated customer.
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/agents \
+curl https://convixx.in/agents \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -777,7 +777,7 @@ Get a single agent by its ID.
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl https://convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -835,7 +835,7 @@ At least one field must be provided.
 **Example Request (update system prompt only):**
 
 ```bash
-curl -X PUT https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl -X PUT https://convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -846,7 +846,7 @@ curl -X PUT https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
 **Example Request (update all fields):**
 
 ```bash
-curl -X PUT https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl -X PUT https://convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -907,7 +907,7 @@ Delete an agent.
 **Example Request:**
 
 ```bash
-curl -X DELETE https://www.convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
+curl -X DELETE https://convixx.in/agents/b2c3d4e5-f6a7-8901-bcde-f12345678901 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -954,7 +954,7 @@ Upload one or more Q&A pairs to the customer's knowledgebase. Each question is e
 **Example Request:**
 
 ```bash
-curl -X POST https://www.convixx.in/kb/upload \
+curl -X POST https://convixx.in/kb/upload \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1024,7 +1024,7 @@ List all KB entries for the authenticated customer.
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/kb/entries \
+curl https://convixx.in/kb/entries \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -1068,7 +1068,7 @@ Get a single KB entry by its ID.
 **Example Request:**
 
 ```bash
-curl https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl https://convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -1122,7 +1122,7 @@ At least one of `question` or `answer` must be provided.
 **Example Request (update answer only):**
 
 ```bash
-curl -X PUT https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl -X PUT https://convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1133,7 +1133,7 @@ curl -X PUT https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef12345678
 **Example Request (update both):**
 
 ```bash
-curl -X PUT https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl -X PUT https://convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1190,7 +1190,7 @@ Delete a KB entry.
 **Example Request:**
 
 ```bash
-curl -X DELETE https://www.convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
+curl -X DELETE https://convixx.in/kb/entries/f1e2d3c4-b5a6-7890-abcd-ef1234567890 \
   -H "x-api-key: cvx_your_api_key_here"
 ```
 
@@ -1255,7 +1255,7 @@ All chat messages (user and assistant) are encrypted with AES-256-GCM before sto
 **Example Request (new session, auto-route agent):**
 
 ```bash
-curl -X POST https://www.convixx.in/ask \
+curl -X POST https://convixx.in/ask \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1266,7 +1266,7 @@ curl -X POST https://www.convixx.in/ask \
 **Example Request (explicit agent):**
 
 ```bash
-curl -X POST https://www.convixx.in/ask \
+curl -X POST https://convixx.in/ask \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{
@@ -1278,7 +1278,7 @@ curl -X POST https://www.convixx.in/ask \
 **Example Request (continue session):**
 
 ```bash
-curl -X POST https://www.convixx.in/ask \
+curl -X POST https://convixx.in/ask \
   -H "Content-Type: application/json" \
   -H "x-api-key: cvx_your_api_key_here" \
   -d '{

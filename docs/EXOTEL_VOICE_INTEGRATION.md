@@ -43,7 +43,7 @@ Articles there include (titles may be updated by Exotel):
 
 | Takeaway | Detail |
 |----------|--------|
-| **WebSocket URL** | Exotel Voicebot applet points at your public `wss://` URL (e.g. `wss://your-domain.com/?sample-rate=24000`). |
+| **WebSocket URL** | Exotel Voicebot applet points at your public `wss://` URL (e.g. `wss://convixx.in/exotel/voicebot/<customer-uuid>?sample-rate=24000`). |
 | **Audio** | Raw/slin PCM, **24 kHz** recommended in sample; chunk/buffer sizing in repo (`AUDIO_CHUNK_SIZE`, etc.). |
 | **Bidirectional** | Enable in applet when you need duplex streaming. |
 | **Local dev** | Tunnel (ngrok) to expose `wss://` — same requirement for Convixx dev/staging. |

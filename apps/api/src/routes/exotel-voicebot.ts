@@ -496,9 +496,10 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         return reply.status(404).send({ error: "Voicebot not configured for this tenant" });
       }
 
+      const host = env.publicApiHost || request.hostname;
       // Return the stored WSS URL for this tenant
       const wssUrl = settings.voicebot_wss_url ||
-        `wss://${request.hostname}/exotel/voicebot/${customerId}`;
+        `wss://${host}/exotel/voicebot/${customerId}`;
 
       return reply.send({ url: wssUrl });
     }

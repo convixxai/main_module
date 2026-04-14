@@ -7,7 +7,7 @@ export const swaggerOption = {
       version: "1.0.0",
     },
     servers: [
-      { url: "https://www.convixx.in", description: "Production" },
+      { url: "https://convixx.in", description: "Production" },
       { url: "http://localhost:8080", description: "Local development" },
     ],
     tags: [
