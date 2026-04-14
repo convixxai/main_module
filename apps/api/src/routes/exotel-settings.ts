@@ -12,6 +12,7 @@ import {
   invalidateExotelSettingsCache,
   getExotelSettings,
 } from "../services/exotel-settings";
+import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
 import { getActiveSessionsForCustomer } from "../services/voicebot-session";
 
 // ---------- Schemas ----------
@@ -24,9 +25,6 @@ const upsertExotelSettingsSchema = z.object({
   exotel_api_token: z.string().min(1).optional(),
   inbound_phone_number: z.string().min(1).optional(),
   default_outbound_caller_id: z.string().min(1).optional(),
-  webhook_secret: z.string().min(1).optional(),
-  voicebot_wss_url: z.string().url().optional(),
-  voicebot_bootstrap_https_url: z.string().url().optional(),
   is_enabled: z.boolean().optional(),
   use_sandbox: z.boolean().optional(),
 });
@@ -46,8 +44,9 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
            id, customer_id,
            exotel_account_sid, exotel_app_id, exotel_subdomain,
            inbound_phone_number, default_outbound_caller_id,
-           voicebot_wss_url, voicebot_bootstrap_https_url,
            is_enabled, use_sandbox,
+           (exotel_api_key IS NOT NULL) AS has_api_key,
+           (exotel_api_token IS NOT NULL) AS has_api_token,
            created_at, updated_at
          FROM customer_exotel_settings
          WHERE customer_id = $1`,
@@ -58,13 +57,11 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
         return reply.status(404).send({ error: "Exotel settings not found for this customer" });
       }
 
-      // Return settings WITHOUT secrets (api_key, api_token, webhook_secret)
       const row = result.rows[0];
+      const urls = voicebotUrlsForCustomer(customerId, request);
       return reply.send({
         ...row,
-        has_api_key: !!row.exotel_api_key,
-        has_api_token: !!row.exotel_api_token,
-        has_webhook_secret: !!row.webhook_secret,
+        ...urls,
       });
     }
   );
@@ -75,7 +72,7 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
     { preHandler: adminAuth },
     async (request, reply) => {
       const { customerId } = request.params;
-      const body = upsertExotelSettingsSchema.safeParse(request.body);
+      const body = upsertExotelSettingsSchema.safeParse(request.body ?? {});
 
       if (!body.success) {
         return reply.status(400).send({ error: body.error.flatten() });
@@ -98,10 +95,8 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
            exotel_account_sid, exotel_app_id, exotel_subdomain,
            exotel_api_key, exotel_api_token,
            inbound_phone_number, default_outbound_caller_id,
-           webhook_secret,
-           voicebot_wss_url, voicebot_bootstrap_https_url,
            is_enabled, use_sandbox
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (customer_id) DO UPDATE SET
            exotel_account_sid = COALESCE(EXCLUDED.exotel_account_sid, customer_exotel_settings.exotel_account_sid),
            exotel_app_id = COALESCE(EXCLUDED.exotel_app_id, customer_exotel_settings.exotel_app_id),
@@ -110,9 +105,9 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
            exotel_api_token = COALESCE(EXCLUDED.exotel_api_token, customer_exotel_settings.exotel_api_token),
            inbound_phone_number = COALESCE(EXCLUDED.inbound_phone_number, customer_exotel_settings.inbound_phone_number),
            default_outbound_caller_id = COALESCE(EXCLUDED.default_outbound_caller_id, customer_exotel_settings.default_outbound_caller_id),
-           webhook_secret = COALESCE(EXCLUDED.webhook_secret, customer_exotel_settings.webhook_secret),
-           voicebot_wss_url = COALESCE(EXCLUDED.voicebot_wss_url, customer_exotel_settings.voicebot_wss_url),
-           voicebot_bootstrap_https_url = COALESCE(EXCLUDED.voicebot_bootstrap_https_url, customer_exotel_settings.voicebot_bootstrap_https_url),
+           webhook_secret = NULL,
+           voicebot_wss_url = NULL,
+           voicebot_bootstrap_https_url = NULL,
            is_enabled = COALESCE(EXCLUDED.is_enabled, customer_exotel_settings.is_enabled),
            use_sandbox = COALESCE(EXCLUDED.use_sandbox, customer_exotel_settings.use_sandbox),
            updated_at = NOW()
@@ -120,8 +115,9 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
            id, customer_id,
            exotel_account_sid, exotel_app_id, exotel_subdomain,
            inbound_phone_number, default_outbound_caller_id,
-           voicebot_wss_url, voicebot_bootstrap_https_url,
            is_enabled, use_sandbox,
+           (exotel_api_key IS NOT NULL) AS has_api_key,
+           (exotel_api_token IS NOT NULL) AS has_api_token,
            created_at, updated_at`,
         [
           customerId,
@@ -132,9 +128,6 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
           d.exotel_api_token || null,
           d.inbound_phone_number || null,
           d.default_outbound_caller_id || null,
-          d.webhook_secret || null,
-          d.voicebot_wss_url || null,
-          d.voicebot_bootstrap_https_url || null,
           d.is_enabled ?? false,
           d.use_sandbox ?? false,
         ]
@@ -143,7 +136,9 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
       // Invalidate cache for this customer
       invalidateExotelSettingsCache(customerId);
 
-      return reply.send(result.rows[0]);
+      const row = result.rows[0];
+      const urls = voicebotUrlsForCustomer(customerId, request);
+      return reply.send({ ...row, ...urls });
     }
   );
 

@@ -1574,7 +1574,7 @@
           "Exotel Voicebot"
         ],
         "summary": "Get Exotel settings",
-        "description": "Returns the per-tenant Exotel configuration for a customer.\n\nSecrets (`exotel_api_key`, `exotel_api_token`, `webhook_secret`) are **never** returned in the response — only boolean flags (`has_api_key`, `has_api_token`, `has_webhook_secret`) indicating whether they are set.\n\nRequires `x-admin-token`.",
+        "description": "Returns the per-tenant Exotel configuration for a customer.\n\n`exotel_api_key` and `exotel_api_token` are never returned — only `has_api_key` and `has_api_token`.\n\n`voicebot_wss_url` and `voicebot_bootstrap_https_url` are **always generated** by the server from `PUBLIC_API_HOST` (or the request host) and the path `customerId`; you do not configure them in the request body.\n\nRequires `x-admin-token`.",
         "security": [
           {
             "AdminToken": []
@@ -1611,7 +1611,6 @@
                   "use_sandbox": false,
                   "has_api_key": true,
                   "has_api_token": true,
-                  "has_webhook_secret": true,
                   "created_at": "2026-04-13T10:00:00.000Z",
                   "updated_at": "2026-04-13T10:00:00.000Z"
                 }
@@ -1645,7 +1644,7 @@
           "Exotel Voicebot"
         ],
         "summary": "Create or update Exotel settings",
-        "description": "Upserts the per-tenant Exotel configuration for a customer (one row per customer).\n\nAll fields are optional — only provided fields are updated (existing values are preserved via COALESCE). To clear a field, you would need a direct DB update.\n\n**Fields:**\n- `exotel_account_sid` — Exotel Account SID\n- `exotel_app_id` — Exotel App ID\n- `exotel_subdomain` — Exotel regional subdomain (e.g. `api.exotel.com`)\n- `exotel_api_key` — Exotel API key (stored securely, never returned in GET)\n- `exotel_api_token` — Exotel API token (stored securely, never returned in GET)\n- `inbound_phone_number` — DID mapped to this tenant\n- `default_outbound_caller_id` — Outbound CLI if applicable\n- `webhook_secret` — Secret for webhook/WSS verification\n- `voicebot_wss_url` — The canonical `wss://` URL for this tenant's Voicebot\n- `voicebot_bootstrap_https_url` — HTTPS bootstrap URL that returns `{ url: wss://... }`\n- `is_enabled` — Whether Voicebot is active for this tenant\n- `use_sandbox` — Whether to use Exotel sandbox environment\n\nRequires `x-admin-token`.",
+        "description": "Upserts the per-tenant Exotel configuration for a customer (one row per customer).\n\nOptional fields: Exotel credentials, numbers, `is_enabled`, `use_sandbox`. Voicebot `wss://` and bootstrap `https://` URLs are **not** accepted here — they are computed and returned in the response.\n\nRequires `x-admin-token`.",
         "security": [
           {
             "AdminToken": []
@@ -1664,7 +1663,7 @@
           }
         ],
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/json": {
               "schema": {
@@ -1698,20 +1697,6 @@
                     "type": "string",
                     "example": "+9111xxxxxxxx"
                   },
-                  "webhook_secret": {
-                    "type": "string",
-                    "example": "random-long-secret"
-                  },
-                  "voicebot_wss_url": {
-                    "type": "string",
-                    "format": "uri",
-                    "example": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-                  },
-                  "voicebot_bootstrap_https_url": {
-                    "type": "string",
-                    "format": "uri",
-                    "example": "https://convixx.in/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-                  },
                   "is_enabled": {
                     "type": "boolean",
                     "default": false
@@ -1730,9 +1715,6 @@
                 "exotel_api_token": "your-exotel-api-token",
                 "inbound_phone_number": "+9111xxxxxxxx",
                 "default_outbound_caller_id": "+9111xxxxxxxx",
-                "webhook_secret": "random-long-secret-for-webhook-verification",
-                "voicebot_wss_url": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-                "voicebot_bootstrap_https_url": "https://convixx.in/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                 "is_enabled": true,
                 "use_sandbox": false
               }
@@ -1754,6 +1736,8 @@
                   "default_outbound_caller_id": "+9111xxxxxxxx",
                   "voicebot_wss_url": "wss://convixx.in/exotel/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                   "voicebot_bootstrap_https_url": "https://convixx.in/exotel/voicebot/bootstrap/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "has_api_key": true,
+                  "has_api_token": true,
                   "is_enabled": true,
                   "use_sandbox": false,
                   "created_at": "2026-04-13T10:00:00.000Z",
@@ -1770,8 +1754,8 @@
                   "error": {
                     "formErrors": [],
                     "fieldErrors": {
-                      "voicebot_wss_url": [
-                        "Invalid url"
+                      "exotel_account_sid": [
+                        "String must contain at least 1 character(s)"
                       ]
                     }
                   }
@@ -1932,7 +1916,7 @@
           "Exotel Voicebot"
         ],
         "summary": "HTTPS bootstrap (returns WSS URL)",
-        "description": "Returns the tenant's WebSocket URL as JSON `{ url: \"wss://...\" }`.\n\nExotel can be configured to call this HTTPS endpoint first, then connect to the returned WSS URL. This enables dynamic routing, signed tokens, or environment-specific hosts.\n\nIf `voicebot_wss_url` is configured in the tenant's Exotel settings, it is returned directly. Otherwise, a default URL is built using the `PUBLIC_API_HOST` env var (e.g. `convixx.in`) if set, else the request `Host`.\n\nNo authentication required (Exotel calls this).",
+        "description": "Returns the tenant's WebSocket URL as JSON `{ url: \"wss://...\" }`.\n\nThe `wss://` URL is always computed from `PUBLIC_API_HOST` (or the request `Host`) and the path `customerId`.\n\nNo authentication required (Exotel calls this).",
         "parameters": [
           {
             "name": "customerId",

@@ -57,8 +57,8 @@ export const env = {
 
   /**
    * Public hostname for this API (no scheme), e.g. `convixx.in`.
-   * Used when building default `wss://…` URLs in Exotel bootstrap if `voicebot_wss_url` is unset.
-   * If empty, `request.hostname` is used (fine behind nginx with correct Host header).
+   * Used to build canonical Voicebot `wss://` / `https://` URLs (GET/PUT Exotel settings, bootstrap).
+   * If empty, the incoming request `Host` is used when a request exists; otherwise `localhost` in URLs.
    */
   publicApiHost: (process.env.PUBLIC_API_HOST || "").trim(),
 };

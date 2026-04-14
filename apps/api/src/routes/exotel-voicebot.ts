@@ -28,6 +28,7 @@ import {
   linkChatSessionToCall,
   type ExotelSettings,
 } from "../services/exotel-settings";
+import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
 import {
   createSession,
   removeSession,
@@ -496,10 +497,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         return reply.status(404).send({ error: "Voicebot not configured for this tenant" });
       }
 
-      const host = env.publicApiHost || request.hostname;
-      // Return the stored WSS URL for this tenant
-      const wssUrl = settings.voicebot_wss_url ||
-        `wss://${host}/exotel/voicebot/${customerId}`;
+      const { voicebot_wss_url: wssUrl } = voicebotUrlsForCustomer(customerId, request);
 
       return reply.send({ url: wssUrl });
     }
