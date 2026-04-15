@@ -835,6 +835,14 @@
                   "system_prompt": {
                     "type": "string"
                   },
+                  "greeting_text": {
+                    "type": "string",
+                    "description": "Text spoken when the voicebot answers a call. Null uses system default."
+                  },
+                  "error_text": {
+                    "type": "string",
+                    "description": "Text spoken when pipeline fails (e.g. LLM timeout). Null uses system default."
+                  },
                   "tts_pace": {
                     "type": "number",
                     "format": "float",
@@ -867,6 +875,8 @@
                   "name": "Sales Agent",
                   "description": "Handles pricing queries",
                   "system_prompt": "You are a sales agent.",
+                  "greeting_text": "Hello, welcome to sales!",
+                  "error_text": "We are busy right now, please try again.",
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -902,6 +912,8 @@
                     "name": "Sales Agent",
                     "description": "Handles pricing",
                     "system_prompt": "You are a sales agent.",
+                    "greeting_text": "Hello, welcome to sales!",
+                    "error_text": "We are busy right now, please try again.",
                     "tts_pace": 0.85,
                     "tts_model": "bulbul:v3",
                     "tts_speaker": null,
@@ -950,6 +962,8 @@
                   "name": "Sales Agent",
                   "description": "Handles pricing",
                   "system_prompt": "You are a sales agent.",
+                  "greeting_text": "Hello, welcome to sales!",
+                  "error_text": "We are busy right now, please try again.",
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -1042,6 +1056,8 @@
                   "name": "Premium Sales Agent",
                   "description": "Handles VIP pricing",
                   "system_prompt": "You are a premium sales agent.",
+                  "greeting_text": "Hello VIP, welcome to premium sales!",
+                  "error_text": "Pardon us, our premium service is delayed.",
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,

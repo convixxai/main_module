@@ -7,6 +7,8 @@ const createAgentSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional().default(""),
   system_prompt: z.string().optional().default("You are a helpful assistant."),
+  greeting_text: z.string().optional().nullable(),
+  error_text: z.string().optional().nullable(),
   tts_pace: z.number().min(0.5).max(2.0).optional().nullable(),
   tts_model: z.string().optional().nullable(),
   tts_speaker: z.string().optional().nullable(),
@@ -17,6 +19,8 @@ const updateAgentSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   system_prompt: z.string().optional(),
+  greeting_text: z.string().optional().nullable(),
+  error_text: z.string().optional().nullable(),
   tts_pace: z.number().min(0.5).max(2.0).optional().nullable(),
   tts_model: z.string().optional().nullable(),
   tts_speaker: z.string().optional().nullable(),
@@ -34,13 +38,13 @@ export async function agentRoutes(app: FastifyInstance) {
       }
 
       const customerId = request.customerId!;
-      const { name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate } = body.data;
+      const { name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate } = body.data;
 
       const result = await pool.query(
-        `INSERT INTO agents (customer_id, name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, customer_id, name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at`,
-        [customerId, name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate]
+        `INSERT INTO agents (customer_id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, customer_id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at`,
+        [customerId, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate]
       );
 
       return reply.status(201).send(result.rows[0]);
@@ -54,7 +58,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const customerId = request.customerId!;
 
       const result = await pool.query(
-        `SELECT id, name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at
+        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at
          FROM agents
          WHERE customer_id = $1
          ORDER BY created_at DESC`,
@@ -73,7 +77,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const { id } = request.params as { id: string };
 
       const result = await pool.query(
-        `SELECT id, name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at
+        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at
          FROM agents
          WHERE id = $1 AND customer_id = $2`,
         [id, customerId]
@@ -98,9 +102,9 @@ export async function agentRoutes(app: FastifyInstance) {
 
       const customerId = request.customerId!;
       const { id } = request.params as { id: string };
-      const { name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate } = body.data;
+      const { name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate } = body.data;
 
-      if (!name && description === undefined && system_prompt === undefined && tts_pace === undefined && tts_model === undefined && tts_speaker === undefined && tts_sample_rate === undefined) {
+      if (!name && description === undefined && system_prompt === undefined && greeting_text === undefined && error_text === undefined && tts_pace === undefined && tts_model === undefined && tts_speaker === undefined && tts_sample_rate === undefined) {
         return reply
           .status(400)
           .send({ error: "Provide at least one field to update" });
@@ -131,6 +135,14 @@ export async function agentRoutes(app: FastifyInstance) {
         sets.push(`system_prompt = $${idx++}`);
         values.push(system_prompt);
       }
+      if (greeting_text !== undefined) {
+        sets.push(`greeting_text = $${idx++}`);
+        values.push(greeting_text);
+      }
+      if (error_text !== undefined) {
+        sets.push(`error_text = $${idx++}`);
+        values.push(error_text);
+      }
       if (tts_pace !== undefined) {
         sets.push(`tts_pace = $${idx++}`);
         values.push(tts_pace);
@@ -155,7 +167,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const result = await pool.query(
         `UPDATE agents SET ${sets.join(", ")}
          WHERE id = $${idx++} AND customer_id = $${idx}
-         RETURNING id, name, description, system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at`,
+         RETURNING id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at`,
         values
       );
 

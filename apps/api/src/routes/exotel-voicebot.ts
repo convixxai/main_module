@@ -153,13 +153,22 @@ async function bootstrapVoicebotChatSession(
   session.chatSessionId = sessionResult.rows[0].id as string;
 
   const agentsResult = await pool.query(
-    `SELECT id, system_prompt FROM agents
+    `SELECT id, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate FROM agents
      WHERE customer_id = $1 AND is_active = TRUE
      ORDER BY created_at ASC LIMIT 1`,
     [session.customerId]
   );
   if (agentsResult.rows.length > 0) {
-    session.agentId = agentsResult.rows[0].id as string;
+    const row = agentsResult.rows[0];
+    session.agentId = row.id as string;
+    
+    session.greetingText = row.greeting_text;
+    session.errorText = row.error_text;
+    session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
+    session.ttsModel = row.tts_model;
+    session.ttsSpeaker = row.tts_speaker;
+    session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
+
     await pool.query(
       `UPDATE chat_sessions SET agent_id = $1, updated_at = NOW() WHERE id = $2`,
       [session.agentId, session.chatSessionId]
@@ -592,7 +601,7 @@ async function processUtterance(
         status: stt.status,
         body: safeJsonForLog(stt.body),
       });
-      await speakToExotel(ws, session, ERROR_AUDIO_TEXT, "en-IN", log);
+      await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
       return;
     }
 
@@ -654,10 +663,10 @@ async function processUtterance(
     );
 
     if (!askResult || !askResult.answer) {
-      await appendVoiceTurnToChat(session, transcript, ERROR_AUDIO_TEXT, {
+      await appendVoiceTurnToChat(session, transcript, session.errorText || ERROR_AUDIO_TEXT, {
         assistantSource: "pipeline_error",
       });
-      await speakToExotel(ws, session, ERROR_AUDIO_TEXT, detectedLanguage, log);
+      await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, detectedLanguage, log);
       logVoiceStage(log, "pipeline.fallback_error_audio", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
@@ -701,7 +710,7 @@ async function processUtterance(
       stream_sid: session.streamSid,
       err: String(err),
     }, "voicebot utterance failed");
-    await speakToExotel(ws, session, ERROR_AUDIO_TEXT, "en-IN", log).catch(() => {});
+    await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log).catch(() => {});
   }
 }
 
@@ -1097,7 +1106,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     custom_parameters: details.custom_parameters,
                   },
                 });
-                await appendAssistantChatLine(session, GREETING_TEXT, "voice_greeting");
+                await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
                 voiceTrace(log, "call.session_ready", {
                   customerId,
                   chat_session_id: session.chatSessionId,
@@ -1116,7 +1125,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   stream_sid: session.streamSid,
                   call_sid: session.callSid,
                 });
-                await speakToExotel(socket, session, GREETING_TEXT, "en-IN", log);
+                await speakToExotel(socket, session, session.greetingText || GREETING_TEXT, "en-IN", log);
                 logVoiceStage(log, "greeting.sent", {
                   customerId,
                   stream_sid: session.streamSid,

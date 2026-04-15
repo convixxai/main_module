@@ -29,6 +29,10 @@ export interface VoicebotSession {
   chatSessionId: string | null;
   /** Agent UUID resolved for this call (cached after first utterance). */
   agentId: string | null;
+  /** Greeting text to play on call connect. */
+  greetingText?: string;
+  /** Error text to play on pipeline failure. */
+  errorText?: string;
   /** TTS pace override for this session. */
   ttsPace?: number | null;
   /** TTS model override for this session. */
