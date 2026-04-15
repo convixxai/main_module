@@ -834,6 +834,23 @@
                   },
                   "system_prompt": {
                     "type": "string"
+                  },
+                  "tts_pace": {
+                    "type": "number",
+                    "format": "float",
+                    "description": "Speech speed modifier (e.g., 0.85 for slower, 1.0 for normal)."
+                  },
+                  "tts_model": {
+                    "type": "string",
+                    "description": "Sarvam TTS model identifier (e.g., 'bulbul:v3')."
+                  },
+                  "tts_speaker": {
+                    "type": "string",
+                    "description": "Sarvam speaker ID for voice persona (e.g., 'amartya'). Leave null for default."
+                  },
+                  "tts_sample_rate": {
+                    "type": "integer",
+                    "description": "Audio sample rate in Hz. Exotel requires 8000."
                   }
                 }
               }
@@ -850,6 +867,10 @@
                   "name": "Sales Agent",
                   "description": "Handles pricing queries",
                   "system_prompt": "You are a sales agent.",
+                  "tts_pace": 0.85,
+                  "tts_model": "bulbul:v3",
+                  "tts_speaker": null,
+                  "tts_sample_rate": 8000,
                   "is_active": true,
                   "created_at": "2026-02-23T10:00:00.000Z",
                   "updated_at": "2026-02-23T10:00:00.000Z"
@@ -881,6 +902,10 @@
                     "name": "Sales Agent",
                     "description": "Handles pricing",
                     "system_prompt": "You are a sales agent.",
+                    "tts_pace": 0.85,
+                    "tts_model": "bulbul:v3",
+                    "tts_speaker": null,
+                    "tts_sample_rate": 8000,
                     "is_active": true,
                     "created_at": "2026-02-23T10:00:00.000Z",
                     "updated_at": "2026-02-23T10:00:00.000Z"
@@ -925,6 +950,10 @@
                   "name": "Sales Agent",
                   "description": "Handles pricing",
                   "system_prompt": "You are a sales agent.",
+                  "tts_pace": 0.85,
+                  "tts_model": "bulbul:v3",
+                  "tts_speaker": null,
+                  "tts_sample_rate": 8000,
                   "is_active": true,
                   "created_at": "2026-02-23T10:00:00.000Z",
                   "updated_at": "2026-02-23T10:00:00.000Z"
@@ -980,6 +1009,23 @@
                   },
                   "system_prompt": {
                     "type": "string"
+                  },
+                  "tts_pace": {
+                    "type": "number",
+                    "format": "float",
+                    "description": "Speech speed modifier (e.g., 0.85 for slower, 1.0 for normal)."
+                  },
+                  "tts_model": {
+                    "type": "string",
+                    "description": "Sarvam TTS model identifier (e.g., 'bulbul:v3')."
+                  },
+                  "tts_speaker": {
+                    "type": "string",
+                    "description": "Sarvam speaker ID for voice persona (e.g., 'amartya'). Leave null for default."
+                  },
+                  "tts_sample_rate": {
+                    "type": "integer",
+                    "description": "Audio sample rate in Hz. Exotel requires 8000."
                   }
                 }
               }
@@ -996,6 +1042,10 @@
                   "name": "Premium Sales Agent",
                   "description": "Handles VIP pricing",
                   "system_prompt": "You are a premium sales agent.",
+                  "tts_pace": 0.85,
+                  "tts_model": "bulbul:v3",
+                  "tts_speaker": null,
+                  "tts_sample_rate": 8000,
                   "is_active": true,
                   "created_at": "2026-02-23T10:00:00.000Z",
                   "updated_at": "2026-02-23T10:05:00.000Z"

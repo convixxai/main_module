@@ -404,15 +404,19 @@ async function speakToExotel(
     const ttsPayload: SarvamTtsBody = {
       text: text.slice(0, 2500),
       target_language_code: languageCode,
-      model: env.sarvam.ttsModel || "bulbul:v2",
-      speech_sample_rate: env.sarvam.ttsSpeechSampleRate || "22050",
+      model: session.ttsModel || env.sarvam.ttsModel || "bulbul:v3",
+      speech_sample_rate: (session.ttsSampleRate || env.sarvam.ttsSpeechSampleRate || "8000").toString(),
       output_audio_codec: "wav",
     };
-    if (env.sarvam.ttsSpeaker) {
+    if (session.ttsSpeaker) {
+      ttsPayload.speaker = session.ttsSpeaker;
+    } else if (env.sarvam.ttsSpeaker) {
       ttsPayload.speaker = env.sarvam.ttsSpeaker;
     }
-    if (env.sarvam.ttsPace != null && !Number.isNaN(env.sarvam.ttsPace)) {
-      ttsPayload.pace = env.sarvam.ttsPace;
+    
+    const pace = session.ttsPace ?? env.sarvam.ttsPace;
+    if (pace != null && !Number.isNaN(pace)) {
+      ttsPayload.pace = pace;
     }
 
     const tts = await sarvamTextToSpeech(ttsPayload);
@@ -769,11 +773,17 @@ async function runVoicebotAskPipeline(
     let agentPrompt = customerPrompt;
     if (session.agentId) {
       const agentResult = await pool.query(
-        `SELECT system_prompt FROM agents WHERE id = $1`,
+        `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate FROM agents WHERE id = $1`,
         [session.agentId]
       );
       if (agentResult.rows.length > 0) {
-        agentPrompt = agentResult.rows[0].system_prompt;
+        const row = agentResult.rows[0];
+        agentPrompt = row.system_prompt;
+
+        session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
+        session.ttsModel = row.tts_model;
+        session.ttsSpeaker = row.tts_speaker;
+        session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
       }
     }
 

@@ -29,6 +29,14 @@ export interface VoicebotSession {
   chatSessionId: string | null;
   /** Agent UUID resolved for this call (cached after first utterance). */
   agentId: string | null;
+  /** TTS pace override for this session. */
+  ttsPace?: number | null;
+  /** TTS model override for this session. */
+  ttsModel?: string | null;
+  /** TTS speaker override for this session. */
+  ttsSpeaker?: string | null;
+  /** TTS sample rate override for this session. */
+  ttsSampleRate?: number | null;
   /** Outbound PCM chunk buffer (respects Exotel 320-byte rules). */
   outboundBuffer: PcmChunkBuffer;
   /** Accumulated inbound PCM from caller (for batch STT or VAD). */
