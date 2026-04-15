@@ -768,26 +768,29 @@ async function runVoicebotAskPipeline(
     // Import the pipeline function lazily to avoid circular deps
     const { generateEmbedding, chatOpenAI } = await import("../services/llm");
 
-    // Get customer system prompt
+    // Get customer system prompt and default fallback
     const customerResult = await pool.query(
-      `SELECT system_prompt, rag_use_openai_only FROM customers WHERE id = $1`,
+      `SELECT system_prompt, rag_use_openai_only, default_no_kb_fallback_instruction FROM customers WHERE id = $1`,
       [session.customerId]
     );
     if (customerResult.rows.length === 0) return null;
 
     const customerPrompt = customerResult.rows[0].system_prompt;
+    const defaultFallbackInstruction = customerResult.rows[0].default_no_kb_fallback_instruction;
 
     await ensureVoicebotChatSessionForUtterance(session, log);
 
     let agentPrompt = customerPrompt;
+    let agentFallbackInstruction: string | null = null;
     if (session.agentId) {
       const agentResult = await pool.query(
-        `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate FROM agents WHERE id = $1`,
+        `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction FROM agents WHERE id = $1`,
         [session.agentId]
       );
       if (agentResult.rows.length > 0) {
         const row = agentResult.rows[0];
         agentPrompt = row.system_prompt;
+        agentFallbackInstruction = row.no_kb_fallback_instruction;
 
         session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
         session.ttsModel = row.tts_model;
@@ -795,6 +798,11 @@ async function runVoicebotAskPipeline(
         session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
       }
     }
+
+    // Use agent-specific fallback, or customer default, or system default
+    const noKbFallbackInstruction = agentFallbackInstruction 
+      || defaultFallbackInstruction 
+      || 'respond with a polite message like "I don\'t have an answer for that right now" then ask 1-2 follow-up questions related to the conversation context to keep the discussion going and explore sales opportunities.';
 
     voiceTrace(log, "pipeline.rag.embedding", {
       customerId: session.customerId,
@@ -882,7 +890,7 @@ async function runVoicebotAskPipeline(
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- Use ANSWER_NOT_FOUND only when no passage answers the question.${languageRule}`;
+- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}`;
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {
