@@ -71,6 +71,27 @@ const ERROR_AUDIO_TEXT = "Sorry, I was unable to process that. Please try again.
 /** Greeting text for new calls. */
 const GREETING_TEXT = "Hello! How can I help you today?";
 
+/** Energy threshold for voice activity detection.
+ *  PCM chunks with RMS energy below this are treated as silence.
+ *  Telephony audio (8kHz) typically has noise floor ~50-150.
+ *  Speech is typically 300-5000+. Start with 200 and tune if needed. */
+const VAD_ENERGY_THRESHOLD = 200;
+
+/**
+ * Compute RMS (root mean square) energy of a 16-bit LE PCM buffer.
+ * Returns 0 for empty buffers. Speech typically > 300, silence < 150.
+ */
+function pcmRmsEnergy(pcm: Buffer): number {
+  const sampleCount = Math.floor(pcm.length / 2);
+  if (sampleCount === 0) return 0;
+  let sumSq = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    const sample = pcm.readInt16LE(i * 2);
+    sumSq += sample * sample;
+  }
+  return Math.sqrt(sumSq / sampleCount);
+}
+
 /** If Exotel never sends inbound `mark` after our outbound audio, unblock STT after this slack past estimated play time. */
 const PLAYBACK_MARK_FALLBACK_SLACK_MS = 2500;
 
@@ -996,7 +1017,10 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 accountSid: details.account_sid,
                 from: details.from,
                 to: details.to,
-                mediaFormat: details.media_format,
+                mediaFormat: {
+                  ...details.media_format,
+                  sample_rate: parseInt(String(details.media_format.sample_rate), 10) || 8000,
+                },
                 customParameters: details.custom_parameters,
               });
 
@@ -1081,21 +1105,67 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               const pcm = decodeBase64Pcm(mediaMsg.media.payload);
 
               // While agent audio is generating or Exotel has not yet ack'd playback via `mark`,
-              // do not buffer inbound for STT/VAD and do not send `clear` — playback ends only when marks complete.
+              // do not buffer inbound for STT/VAD — discard caller audio during playback.
               if (session.ttsInProgress || session.pendingMarks.size > 0) {
-                if (vadTimer) clearTimeout(vadTimer);
                 break;
               }
 
-              // Accumulate inbound PCM
-              session.inboundPcm.push(pcm);
-              session.inboundBytes += pcm.length;
+              // --- Energy-based VAD ---
+              // Exotel sends media chunks every 20ms continuously, even during silence.
+              // A simple timeout-based VAD would never fire because chunks always arrive.
+              // Instead, measure the audio energy (loudness) to distinguish speech from silence.
+              const energy = pcmRmsEnergy(pcm);
+              const isSpeech = energy > VAD_ENERGY_THRESHOLD;
 
-              // Reset VAD silence timer
-              if (vadTimer) clearTimeout(vadTimer);
+              if (isSpeech) {
+                // Caller is speaking — buffer this chunk
+                session.inboundPcm.push(pcm);
+                session.inboundBytes += pcm.length;
+
+                // Cancel any silence timer — caller is still talking
+                if (vadTimer) {
+                  clearTimeout(vadTimer);
+                  vadTimer = null;
+                }
+              } else if (session.inboundPcm.length > 0) {
+                // Caller was speaking but this chunk is silent —
+                // they may have paused or finished speaking.
+                // Still buffer it (captures natural pauses within speech).
+                session.inboundPcm.push(pcm);
+                session.inboundBytes += pcm.length;
+
+                // Start the silence timer if not already running —
+                // if silence continues for VAD_SILENCE_TIMEOUT_MS, process the utterance.
+                // Do NOT reset the timer on subsequent silence chunks;
+                // let it count down from when silence first began.
+                if (!vadTimer) {
+                  vadTimer = setTimeout(async () => {
+                    vadTimer = null;
+                    if (!session || session.isClosing || isProcessing) return;
+                    if (session.inboundPcm.length === 0) return;
+                    logVoiceStage(log, "vad.timeout_triggered", {
+                      customerId: session.customerId,
+                      stream_sid: session.streamSid,
+                      buffered_chunks: session.inboundPcm.length,
+                      buffered_bytes: session.inboundBytes,
+                    });
+
+                    isProcessing = true;
+                    try {
+                      await processUtterance(socket, session, log);
+                    } catch (err) {
+                      log.error({ err }, "voicebot: utterance processing error");
+                    } finally {
+                      isProcessing = false;
+                    }
+                  }, VAD_SILENCE_TIMEOUT_MS);
+                }
+              }
+              // else: silence and no buffered speech — caller hasn't spoken yet, ignore
 
               // Safety: if buffer is too large, force-process
               if (session.inboundBytes >= MAX_INBOUND_BUFFER_BYTES) {
+                if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
                 if (!isProcessing) {
                   isProcessing = true;
                   try {
@@ -1106,29 +1176,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     isProcessing = false;
                   }
                 }
-                break;
               }
-
-              // Start silence timer — when silence detected, process utterance
-              vadTimer = setTimeout(async () => {
-                if (!session || session.isClosing || isProcessing) return;
-                if (session.inboundPcm.length === 0) return;
-                logVoiceStage(log, "vad.timeout_triggered", {
-                  customerId: session.customerId,
-                  stream_sid: session.streamSid,
-                  buffered_chunks: session.inboundPcm.length,
-                  buffered_bytes: session.inboundBytes,
-                });
-
-                isProcessing = true;
-                try {
-                  await processUtterance(socket, session, log);
-                } catch (err) {
-                  log.error({ err }, "voicebot: utterance processing error");
-                } finally {
-                  isProcessing = false;
-                }
-              }, VAD_SILENCE_TIMEOUT_MS);
               break;
             }
 
@@ -1150,6 +1198,14 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 if (session.pendingMarks.size === 0) {
                   session.isSpeaking = false;
                   clearPlaybackMarkFallback(session);
+                  // Clear any audio that arrived during playback — it's echo/crosstalk
+                  session.inboundPcm = [];
+                  session.inboundBytes = 0;
+                  if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
+                  log?.info({
+                    stream_sid: session.streamSid,
+                    mark: markName,
+                  }, "voicebot: playback complete, cleared inbound buffer, ready for caller speech");
                 }
               }
               break;
