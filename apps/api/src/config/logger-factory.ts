@@ -4,6 +4,21 @@ import pino from "pino";
 import { env } from "./env";
 import { DailyLogFileStream } from "../services/daily-log-file-stream";
 
+const tzFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+function getKolkataTime() {
+  return tzFormatter.format(new Date()).replace(", ", " ");
+}
+
 /**
  * Root Pino logger: stdout + optional daily rotating file under `env.logFileDir`.
  * File logging works whenever the process runs (PM2, systemd, etc.) — independent of SSH.
@@ -28,7 +43,10 @@ export function createRootLogger(): pino.Logger {
     }
   }
 
-  return pino({ level }, pino.multistream(streams));
+  return pino({ 
+    level,
+    timestamp: () => `,"time":"${getKolkataTime()}"`
+  }, pino.multistream(streams));
 }
 
 /** Resolved absolute path to the log directory (for admin API). */
