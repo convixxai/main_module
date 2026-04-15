@@ -559,12 +559,25 @@ async function processUtterance(
     // Create a minimal WAV header for the raw PCM so Sarvam can process it
     const wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
 
+    // ──────────────────────────────────────────────────────────────
+    // TEMPORARY FIX: Force English STT when VOICEBOT_MULTILINGUAL=false (default).
+    // Sarvam auto-detection on 8kHz telephony audio is unreliable (misdetects
+    // English as Gujarati/other languages with <25% confidence).
+    //
+    // TODO: When ready for all Indian languages, set VOICEBOT_MULTILINGUAL=true
+    // in .env — this will remove the language_code hint and let Sarvam auto-detect.
+    // ──────────────────────────────────────────────────────────────
+    const sttLanguageHint = env.voicebotMultilingual
+      ? undefined          // Multi-language: let Sarvam auto-detect
+      : "en-IN";           // English-only: force English transcription
+
     const stt = await sarvamSpeechToText({
       fileBuffer: wavBuffer,
       filename: "utterance.wav",
       mimeType: "audio/wav",
       model: "saaras:v3",
       mode: "transcribe",
+      language_code: sttLanguageHint,
     });
 
     if (stt.status !== 200) {
@@ -655,7 +668,17 @@ async function processUtterance(
     }, "voicebot pipeline result");
 
     // === Step 3: TTS + Send ===
-    const ttsLanguage = mapToTtsLanguage(detectedLanguage);
+    // ──────────────────────────────────────────────────────────────
+    // TEMPORARY FIX: Force English TTS when VOICEBOT_MULTILINGUAL=false (default).
+    // When STT misdetects the language (e.g. gu-IN for English speech),
+    // TTS receives English text with wrong language code → garbled audio.
+    //
+    // TODO: When VOICEBOT_MULTILINGUAL=true, the old mapToTtsLanguage()
+    // will be used again so TTS follows the STT-detected language.
+    // ──────────────────────────────────────────────────────────────
+    const ttsLanguage = env.voicebotMultilingual
+      ? mapToTtsLanguage(detectedLanguage)   // Multi-language: follow STT detection
+      : "en-IN";                              // English-only: always English TTS
     await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
     const elapsedMs = Date.now() - utteranceStartedAt;
     logVoiceStage(log, "utterance.completed", {
@@ -828,11 +851,19 @@ async function runVoicebotAskPipeline(
     }));
 
     // Build RAG prompt
+    // ──────────────────────────────────────────────────────────────
+    // TEMPORARY FIX: When VOICEBOT_MULTILINGUAL=false, add English-only
+    // instruction so LLM never responds in a non-English language.
+    // TODO: Remove the English-only rule when multilingual is enabled.
+    // ──────────────────────────────────────────────────────────────
+    const languageRule = env.voicebotMultilingual
+      ? ""                                                              // Multi-language: no restriction
+      : "\n- ALWAYS respond in English regardless of the question language."; // English-only
     const ragRules = `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- Use ANSWER_NOT_FOUND only when no passage answers the question.`;
+- Use ANSWER_NOT_FOUND only when no passage answers the question.${languageRule}`;
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {

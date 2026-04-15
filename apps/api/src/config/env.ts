@@ -60,6 +60,17 @@ export const env = {
     ttsPace: process.env.SARVAM_TTS_PACE ? parseFloat(process.env.SARVAM_TTS_PACE) : undefined,
   },
 
+  /**
+   * VOICEBOT MULTILINGUAL SUPPORT (TEMPORARY: English-only by default)
+   *
+   * When `false` (default): STT is forced to English (`en-IN`), TTS always uses English.
+   * When `true`: STT auto-detects language, TTS follows detected language (all Indian languages).
+   *
+   * Set VOICEBOT_MULTILINGUAL=true in .env when ready to support all Indian languages.
+   * See: artifacts/voicebot_language_fix_analysis.md for context on why this was disabled.
+   */
+  voicebotMultilingual: process.env.VOICEBOT_MULTILINGUAL === "false",
+
   /** Set to `false` to disable verbose RAG pipeline logs (embeddings, OpenAI payloads). */
   logRagTrace: process.env.LOG_RAG_TRACE !== "false",
 
