@@ -69,7 +69,7 @@ export const env = {
    * Set VOICEBOT_MULTILINGUAL=true in .env when ready to support all Indian languages.
    * See: artifacts/voicebot_language_fix_analysis.md for context on why this was disabled.
    */
-  voicebotMultilingual: process.env.VOICEBOT_MULTILINGUAL === "false",
+  voicebotMultilingual: process.env.VOICEBOT_MULTILINGUAL === "true",
 
   /** Set to `false` to disable verbose RAG pipeline logs (embeddings, OpenAI payloads). */
   logRagTrace: process.env.LOG_RAG_TRACE !== "false",
