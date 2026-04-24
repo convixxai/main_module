@@ -25,6 +25,7 @@ import {
   createCallSession,
   endCallSession,
   linkChatSessionToCall,
+  updateExotelCallSessionLanguage,
   type ExotelSettings,
 } from "../services/exotel-settings";
 import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
@@ -54,6 +55,7 @@ import {
   redactInboundExotelForLog,
   redactOutboundExotelForLog,
 } from "../services/voicebot-trace";
+import { getCustomerSettings } from "../services/customer-settings";
 
 // ============================================================
 // Constants
@@ -94,6 +96,27 @@ function pcmRmsEnergy(pcm: Buffer): number {
 
 /** If Exotel never sends inbound `mark` after our outbound audio, unblock STT after this slack past estimated play time. */
 const PLAYBACK_MARK_FALLBACK_SLACK_MS = 2500;
+
+/** Load `customer_settings` voice flags onto the session (DB only; per customer). */
+async function applyCustomerVoiceSettingsToSession(
+  session: VoicebotSession
+): Promise<void> {
+  const cs = await getCustomerSettings(session.customerId);
+  session.voicebotMultilingualEffective = cs?.voicebot_multilingual === true;
+  const d = cs?.default_language_code?.trim();
+  session.defaultLanguageCode = d && d.length > 0 ? d : "en-IN";
+}
+
+/** Multilingual is driven only by `customer_settings.voicebot_multilingual` (set at `start`). */
+async function resolveVoicebotMultilingual(
+  session: VoicebotSession
+): Promise<boolean> {
+  if (session.voicebotMultilingualEffective !== undefined) {
+    return session.voicebotMultilingualEffective;
+  }
+  await applyCustomerVoiceSettingsToSession(session);
+  return session.voicebotMultilingualEffective === true;
+}
 
 function clearPlaybackMarkFallback(session: VoicebotSession): void {
   if (session.playbackFallbackTimer) {
@@ -558,6 +581,8 @@ async function processUtterance(
     duration_ms: (combinedPcm.length / 2 / session.mediaFormat.sample_rate) * 1000,
   }, "voicebot processing utterance");
 
+  const multilingual = await resolveVoicebotMultilingual(session);
+
   voiceTrace(log, "pipeline.stt.request", {
     customerId: session.customerId,
     stream_sid: session.streamSid,
@@ -573,14 +598,10 @@ async function processUtterance(
     const wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
 
     // ──────────────────────────────────────────────────────────────
-    // TEMPORARY FIX: Force English STT when VOICEBOT_MULTILINGUAL=false (default).
-    // Sarvam auto-detection on 8kHz telephony audio is unreliable (misdetects
-    // English as Gujarati/other languages with <25% confidence).
-    //
-    // TODO: When ready for all Indian languages, set VOICEBOT_MULTILINGUAL=true
-    // in .env — this will remove the language_code hint and let Sarvam auto-detect.
+    // English-only STT when customer_settings.voicebot_multilingual is false.
+    // When true, omit language_code so Sarvam auto-detects (8k telephony can be flaky).
     // ──────────────────────────────────────────────────────────────
-    const sttLanguageHint = env.voicebotMultilingual
+    const sttLanguageHint = multilingual
       ? undefined          // Multi-language: let Sarvam auto-detect
       : "en-IN";           // English-only: force English transcription
 
@@ -608,6 +629,12 @@ async function processUtterance(
     const sttBody = stt.body as { transcript?: string; language_code?: string };
     const transcript = sttBody.transcript?.trim();
     const detectedLanguage = sttBody.language_code || "en-IN";
+    if (session.callSessionDbId) {
+      await updateExotelCallSessionLanguage(
+        session.callSessionDbId,
+        detectedLanguage
+      );
+    }
     logVoiceStage(log, "stt.done", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -682,14 +709,10 @@ async function processUtterance(
 
     // === Step 3: TTS + Send ===
     // ──────────────────────────────────────────────────────────────
-    // TEMPORARY FIX: Force English TTS when VOICEBOT_MULTILINGUAL=false (default).
-    // When STT misdetects the language (e.g. gu-IN for English speech),
-    // TTS receives English text with wrong language code → garbled audio.
-    //
-    // TODO: When VOICEBOT_MULTILINGUAL=true, the old mapToTtsLanguage()
-    // will be used again so TTS follows the STT-detected language.
+    // English-only TTS when customer_settings.voicebot_multilingual is false.
+    // When true, mapToTtsLanguage follows STT-detected language.
     // ──────────────────────────────────────────────────────────────
-    const ttsLanguage = env.voicebotMultilingual
+    const ttsLanguage = multilingual
       ? mapToTtsLanguage(detectedLanguage)   // Multi-language: follow STT detection
       : "en-IN";                              // English-only: always English TTS
     await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
@@ -879,11 +902,10 @@ async function runVoicebotAskPipeline(
 
     // Build RAG prompt
     // ──────────────────────────────────────────────────────────────
-    // TEMPORARY FIX: When VOICEBOT_MULTILINGUAL=false, add English-only
-    // instruction so LLM never responds in a non-English language.
-    // TODO: Remove the English-only rule when multilingual is enabled.
+    // When customer_settings.voicebot_multilingual is false, force English LLM replies.
     // ──────────────────────────────────────────────────────────────
-    const languageRule = env.voicebotMultilingual
+    const multilingual = session.voicebotMultilingualEffective === true;
+    const languageRule = multilingual
       ? ""                                                              // Multi-language: no restriction
       : "\n- ALWAYS respond in English regardless of the question language."; // English-only
     const ragRules = `--- RAG rules ---
@@ -1101,6 +1123,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               // One chat_sessions row for this call; link via exotel_call_sessions.chat_session_id
               try {
                 await bootstrapVoicebotChatSession(session, log);
+                await applyCustomerVoiceSettingsToSession(session);
                 session.callSessionDbId = await createCallSession({
                   customerId,
                   callSid: details.call_sid,
@@ -1113,6 +1136,9 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     media_format: details.media_format,
                     custom_parameters: details.custom_parameters,
                   },
+                  voicebotMultilingual: session.voicebotMultilingualEffective,
+                  defaultLanguageCode: session.defaultLanguageCode,
+                  currentLanguageCode: session.defaultLanguageCode,
                 });
                 await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
                 voiceTrace(log, "call.session_ready", {
@@ -1133,7 +1159,17 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   stream_sid: session.streamSid,
                   call_sid: session.callSid,
                 });
-                await speakToExotel(socket, session, session.greetingText || GREETING_TEXT, "en-IN", log);
+                const greetingLang =
+                  session.voicebotMultilingualEffective === true
+                    ? session.defaultLanguageCode || "en-IN"
+                    : "en-IN";
+                await speakToExotel(
+                  socket,
+                  session,
+                  session.greetingText || GREETING_TEXT,
+                  greetingLang,
+                  log
+                );
                 logVoiceStage(log, "greeting.sent", {
                   customerId,
                   stream_sid: session.streamSid,

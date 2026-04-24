@@ -63,6 +63,14 @@ export interface VoicebotSession {
   customParameters: Record<string, string>;
   /** True if the session is being cleaned up. */
   isClosing: boolean;
+  /**
+   * From `customer_settings.voicebot_multilingual` (DB only). Set at call `start`.
+   */
+  voicebotMultilingualEffective?: boolean;
+  /**
+   * From `customer_settings.default_language_code` at call `start` (BCP-47).
+   */
+  defaultLanguageCode?: string;
 }
 
 /**

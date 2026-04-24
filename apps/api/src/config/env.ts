@@ -61,13 +61,8 @@ export const env = {
   },
 
   /**
-   * VOICEBOT MULTILINGUAL SUPPORT (TEMPORARY: English-only by default)
-   *
-   * When `false` (default): STT is forced to English (`en-IN`), TTS always uses English.
-   * When `true`: STT auto-detects language, TTS follows detected language (all Indian languages).
-   *
-   * Set VOICEBOT_MULTILINGUAL=true in .env when ready to support all Indian languages.
-   * See: artifacts/voicebot_language_fix_analysis.md for context on why this was disabled.
+   * Legacy env flag; **Exotel Voicebot ignores this** — use `customer_settings.voicebot_multilingual`
+   * per tenant instead. Kept for any future non-voice use.
    */
   voicebotMultilingual: process.env.VOICEBOT_MULTILINGUAL === "true",
 

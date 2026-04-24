@@ -90,6 +90,9 @@ export interface ExotelCallSession {
   started_at: Date;
   ended_at: Date | null;
   metadata: Record<string, unknown> | null;
+  voicebot_multilingual: boolean | null;
+  default_language_code: string | null;
+  current_language_code: string | null;
 }
 
 /**
@@ -104,12 +107,18 @@ export async function createCallSession(params: {
   toNumber: string | null;
   chatSessionId: string | null;
   metadata?: Record<string, unknown>;
+  /** Snapshot from customer_settings */
+  voicebotMultilingual?: boolean;
+  defaultLanguageCode?: string | null;
+  /** Usually same as default until first STT updates it */
+  currentLanguageCode?: string | null;
 }): Promise<string> {
   const result = await pool.query(
     `INSERT INTO exotel_call_sessions
        (customer_id, exotel_call_sid, exotel_stream_sid, direction,
-        from_number, to_number, status, chat_session_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8)
+        from_number, to_number, status, chat_session_id, metadata,
+        voicebot_multilingual, default_language_code, current_language_code)
+     VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10, $11)
      RETURNING id`,
     [
       params.customerId,
@@ -120,9 +129,27 @@ export async function createCallSession(params: {
       params.toNumber,
       params.chatSessionId,
       params.metadata ? JSON.stringify(params.metadata) : null,
+      params.voicebotMultilingual ?? null,
+      params.defaultLanguageCode ?? null,
+      params.currentLanguageCode ?? params.defaultLanguageCode ?? null,
     ]
   );
   return result.rows[0].id;
+}
+
+/** Update last STT language for a call (migration 006 columns). Fails softly if columns missing. */
+export async function updateExotelCallSessionLanguage(
+  callSessionId: string,
+  currentLanguageCode: string
+): Promise<void> {
+  await pool
+    .query(
+      `UPDATE exotel_call_sessions
+       SET current_language_code = $1
+       WHERE id = $2`,
+      [currentLanguageCode, callSessionId]
+    )
+    .catch(() => {});
 }
 
 /**

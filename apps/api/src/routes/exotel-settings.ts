@@ -188,7 +188,8 @@ export async function exotelSettingsRoutes(app: FastifyInstance): Promise<void> 
       const dbSessions = await pool.query(
         `SELECT id, exotel_call_sid, exotel_stream_sid, direction,
                 from_number, to_number, status,
-                chat_session_id, started_at, ended_at
+                chat_session_id, started_at, ended_at,
+                voicebot_multilingual, default_language_code, current_language_code
          FROM exotel_call_sessions
          WHERE customer_id = $1
          ORDER BY started_at DESC
