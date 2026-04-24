@@ -71,6 +71,14 @@ export interface VoicebotSession {
    * From `customer_settings.default_language_code` at call `start` (BCP-47).
    */
   defaultLanguageCode?: string;
+  /**
+   * From `customer_settings.allowed_language_codes` at call `start` (BCP-47 tags).
+   */
+  allowedLanguageCodes?: string[];
+  /**
+   * Set during each utterance after STT + tenant allowlist clamp; used for TTS and RAG hints.
+   */
+  effectiveSttLanguageThisTurn?: string;
 }
 
 /**

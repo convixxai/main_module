@@ -105,6 +105,98 @@ async function applyCustomerVoiceSettingsToSession(
   session.voicebotMultilingualEffective = cs?.voicebot_multilingual === true;
   const d = cs?.default_language_code?.trim();
   session.defaultLanguageCode = d && d.length > 0 ? d : "en-IN";
+  const raw = cs?.allowed_language_codes;
+  session.allowedLanguageCodes = Array.isArray(raw)
+    ? raw.map((c) => String(c).trim()).filter((x) => x.length > 0)
+    : [];
+}
+
+/** Normalize to `xx-YY` (e.g. en-IN). */
+function normalizeBcp47Tag(code: string): string {
+  const t = code.trim();
+  if (!t) return "en-IN";
+  const parts = t.split(/[-_]/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0].toLowerCase()}-${parts[1].toUpperCase()}`;
+  }
+  return parts[0].toLowerCase();
+}
+
+/** Non-empty allowlist; if DB list empty, use `[fallback]`. */
+function normalizeAllowedLangList(
+  fromSession: string[] | undefined,
+  fallback: string
+): string[] {
+  const fb = normalizeBcp47Tag(fallback);
+  const raw = fromSession?.length ? fromSession : [fb];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const c of raw) {
+    const n = normalizeBcp47Tag(c);
+    if (!seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out.length > 0 ? out : [fb];
+}
+
+/**
+ * If Sarvam STT guesses a language outside the tenant allowlist (e.g. ta-IN),
+ * snap to the tenant default so TTS/LLM stay within policy.
+ */
+function clampLanguageToAllowed(
+  detectedRaw: string,
+  allowed: string[],
+  fallback: string
+): string {
+  if (allowed.length === 0) return normalizeBcp47Tag(fallback);
+  const d = normalizeBcp47Tag(detectedRaw);
+  if (allowed.includes(d)) return d;
+  const primary = d.split("-")[0]?.toLowerCase() ?? "";
+  const byPrimary = allowed.find(
+    (a) => a.split("-")[0]?.toLowerCase() === primary
+  );
+  if (byPrimary) return byPrimary;
+  return normalizeBcp47Tag(fallback);
+}
+
+const LANG_LABEL: Record<string, string> = {
+  "en-IN": "English",
+  "hi-IN": "Hindi",
+  "mr-IN": "Marathi",
+  "bn-IN": "Bengali",
+  "gu-IN": "Gujarati",
+  "kn-IN": "Kannada",
+  "ml-IN": "Malayalam",
+  "od-IN": "Odia",
+  "pa-IN": "Punjabi",
+  "ta-IN": "Tamil",
+  "te-IN": "Telugu",
+};
+
+function humanizeAllowedList(allowed: string[]): string {
+  return allowed
+    .map((c) => LANG_LABEL[c] ?? c)
+    .join(", ");
+}
+
+/** Extra RAG / system rules when `voicebot_multilingual` is true (DB). */
+function multilingualVoicePolicyRules(
+  allowed: string[],
+  defaultLang: string
+): string {
+  const def = normalizeBcp47Tag(defaultLang);
+  const listTags = allowed.join(", ");
+  const listHuman = humanizeAllowedList(allowed);
+  return `
+--- Voice language policy (this phone call; mandatory) ---
+- You MUST reply only in these languages (tags: ${listTags}) — in practice: ${listHuman}.
+- Prefer matching the user's language when it is clearly one of these. Default when ambiguous: ${def} (${LANG_LABEL[def] ?? def}).
+- If the user asks to switch language (e.g. "speak Hindi", "मराठीत बोला"), comply immediately using one of the allowed languages only. Confirm briefly in the language you switched to.
+- NEVER say you cannot speak, or apologize for not speaking, any language that is in the allowed list above (including Hindi, Marathi, English when they appear in the list). Just answer in that language.
+- Do NOT use Tamil, Gujarati, Bengali, Kannada, Telugu, Malayalam, Odia, Punjabi, or any language whose tag is NOT in [${listTags}]. If the user seems to use another language, reply in ${def} and briefly ask them to continue in one of: ${listHuman}.
+`;
 }
 
 /** Multilingual is driven only by `customer_settings.voicebot_multilingual` (set at `start`). */
@@ -582,6 +674,10 @@ async function processUtterance(
   }, "voicebot processing utterance");
 
   const multilingual = await resolveVoicebotMultilingual(session);
+  const allowedNorm = normalizeAllowedLangList(
+    session.allowedLanguageCodes,
+    session.defaultLanguageCode || "en-IN"
+  );
 
   voiceTrace(log, "pipeline.stt.request", {
     customerId: session.customerId,
@@ -628,17 +724,26 @@ async function processUtterance(
 
     const sttBody = stt.body as { transcript?: string; language_code?: string };
     const transcript = sttBody.transcript?.trim();
-    const detectedLanguage = sttBody.language_code || "en-IN";
+    const detectedRaw = sttBody.language_code || "en-IN";
+    const effectiveLanguage = multilingual
+      ? clampLanguageToAllowed(
+          detectedRaw,
+          allowedNorm,
+          session.defaultLanguageCode || "en-IN"
+        )
+      : "en-IN";
+    session.effectiveSttLanguageThisTurn = effectiveLanguage;
     if (session.callSessionDbId) {
       await updateExotelCallSessionLanguage(
         session.callSessionDbId,
-        detectedLanguage
+        effectiveLanguage
       );
     }
     logVoiceStage(log, "stt.done", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
-      language: detectedLanguage,
+      language: effectiveLanguage,
+      stt_detected: detectedRaw,
       transcript_chars: transcript?.length ?? 0,
     });
 
@@ -648,7 +753,8 @@ async function processUtterance(
       call_sid: session.callSid,
       exotel_call_session_id: session.callSessionDbId,
       transcript: transcript || "",
-      language: detectedLanguage,
+      language: effectiveLanguage,
+      stt_detected_raw: detectedRaw,
       raw: safeJsonForLog(stt.body),
     });
 
@@ -671,7 +777,8 @@ async function processUtterance(
     log?.info({
       stream_sid: session.streamSid,
       transcript,
-      language: detectedLanguage,
+      language: effectiveLanguage,
+      stt_detected_raw: detectedRaw,
     }, "voicebot STT result");
 
     voiceTrace(log, "pipeline.rag.start", {
@@ -693,7 +800,7 @@ async function processUtterance(
       await appendVoiceTurnToChat(session, transcript, session.errorText || ERROR_AUDIO_TEXT, {
         assistantSource: "pipeline_error",
       });
-      await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, detectedLanguage, log);
+      await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, effectiveLanguage, log);
       logVoiceStage(log, "pipeline.fallback_error_audio", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
@@ -713,7 +820,7 @@ async function processUtterance(
     // When true, mapToTtsLanguage follows STT-detected language.
     // ──────────────────────────────────────────────────────────────
     const ttsLanguage = multilingual
-      ? mapToTtsLanguage(detectedLanguage)   // Multi-language: follow STT detection
+      ? mapToTtsLanguage(effectiveLanguage)   // After tenant allowlist clamp
       : "en-IN";                              // English-only: always English TTS
     await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
     const elapsedMs = Date.now() - utteranceStartedAt;
@@ -902,12 +1009,26 @@ async function runVoicebotAskPipeline(
 
     // Build RAG prompt
     // ──────────────────────────────────────────────────────────────
-    // When customer_settings.voicebot_multilingual is false, force English LLM replies.
-    // ──────────────────────────────────────────────────────────────
     const multilingual = session.voicebotMultilingualEffective === true;
-    const languageRule = multilingual
-      ? ""                                                              // Multi-language: no restriction
-      : "\n- ALWAYS respond in English regardless of the question language."; // English-only
+    const allowedNorm = normalizeAllowedLangList(
+      session.allowedLanguageCodes,
+      session.defaultLanguageCode || "en-IN"
+    );
+    let languageRule: string;
+    if (multilingual) {
+      languageRule = multilingualVoicePolicyRules(
+        allowedNorm,
+        session.defaultLanguageCode || "en-IN"
+      );
+      const turn = session.effectiveSttLanguageThisTurn;
+      if (turn) {
+        const label = LANG_LABEL[turn] ?? turn;
+        languageRule += `\n- This user turn is handled as **${turn}** (${label}) after tenant language policy; prefer that language for your reply when it matches the user's intent and KB.\n`;
+      }
+    } else {
+      languageRule =
+        "\n- ALWAYS respond in English regardless of the question language.";
+    }
     const ragRules = `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
