@@ -7,6 +7,7 @@ import { kbRoutes } from "./routes/kb";
 import { askRoutes } from "./routes/ask";
 import { chatRoutes } from "./routes/chat";
 import { agentRoutes } from "./routes/agents";
+import { avatarRoutes } from "./routes/avatars";
 import { voiceRoutes } from "./routes/voice";
 import { settingsRoutes } from "./routes/settings";
 import { exotelVoicebotRoutes } from "./routes/exotel-voicebot";
@@ -34,6 +35,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(customerRoutes);
   app.register(settingsRoutes);
   app.register(agentRoutes);
+  app.register(avatarRoutes);
   app.register(kbRoutes);
   app.register(askRoutes);
   app.register(chatRoutes);

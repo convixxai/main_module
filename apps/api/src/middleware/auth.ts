@@ -5,7 +5,7 @@ import { env } from "../config/env";
 export interface AuthenticatedRequest extends FastifyRequest {
   customerId?: string;
   customerPrompt?: string;
-  /** When true, RAG uses OpenAI only (no self-hosted LLM). From `customers.rag_use_openai_only`. */
+  /** When true, RAG uses OpenAI only (no self-hosted LLM). From `customer_settings` / `customers`. */
   ragUseOpenaiOnly?: boolean;
 }
 
@@ -20,9 +20,13 @@ export async function apiKeyAuth(
   }
 
   const result = await pool.query(
-    `SELECT ak.customer_id, c.system_prompt, c.rag_use_openai_only
+    `SELECT ak.customer_id,
+            c.system_prompt,
+            c.rag_use_openai_only           AS legacy_rag_openai_only,
+            cs.rag_use_openai_only          AS settings_rag_openai_only
      FROM api_keys ak
      JOIN customers c ON c.id = ak.customer_id
+     LEFT JOIN customer_settings cs ON cs.customer_id = ak.customer_id
      WHERE ak.key = $1 AND ak.is_active = TRUE`,
     [apiKey]
   );
@@ -31,10 +35,14 @@ export async function apiKeyAuth(
     return reply.status(401).send({ error: "Invalid or inactive API key" });
   }
 
-  request.customerId = result.rows[0].customer_id;
-  request.customerPrompt = result.rows[0].system_prompt;
+  const row = result.rows[0];
+  request.customerId = row.customer_id;
+  request.customerPrompt = row.system_prompt;
+  // Prefer the new customer_settings row; fall back to legacy `customers` column
+  // for databases where migration 005 has not been applied yet.
   request.ragUseOpenaiOnly =
-    result.rows[0].rag_use_openai_only === true;
+    row.settings_rag_openai_only === true ||
+    (row.settings_rag_openai_only == null && row.legacy_rag_openai_only === true);
 }
 
 export async function adminAuth(

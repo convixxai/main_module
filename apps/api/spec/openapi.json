@@ -38,7 +38,11 @@
     },
     {
       "name": "Settings",
-      "description": "Customer preferences such as RAG mode (`x-api-key`)."
+      "description": "Per-customer runtime tunables stored in the `customer_settings` table. Tenant-editable GET/PATCH `/settings` (`x-api-key`). Admin-only GET/PATCH `/admin/customers/{customerId}/settings` and reset (`x-admin-token`). See docs/SETTINGS_AND_FEATURES_CATALOG.md for the full field list, scope, and defaults."
+    },
+    {
+      "name": "Avatars",
+      "description": "Per-customer reusable voice personas. Bundles TTS provider, model, speaker and pace/pitch/loudness, with an optional per-language override map. Agents reference an avatar via `avatar_id`. Tenant-scoped (`x-api-key`)."
     },
     {
       "name": "Ask",
@@ -74,6 +78,268 @@
         "in": "header",
         "name": "x-api-key",
         "description": "Customer API key. Scopes KB, agents, ask, chat, voice to that customer."
+      }
+    },
+    "schemas": {
+      "CustomerSettings": {
+        "type": "object",
+        "description": "Full customer_settings row. See docs/SETTINGS_AND_FEATURES_CATALOG.md for field-by-field scope and defaults.",
+        "properties": {
+          "customer_id": { "type": "string", "format": "uuid" },
+
+          "voicebot_enabled": { "type": "boolean", "default": false, "description": "Admin-only. Master on/off switch for the voicebot on this tenant." },
+          "voicebot_multilingual": { "type": "boolean", "default": false, "description": "If true, STT returns language tags and TTS can pick a voice per language (via avatars.language_voice_map)." },
+          "default_language_code": { "type": "string", "default": "en-IN", "description": "BCP-47 code (e.g. en-IN, hi-IN, mr-IN) used when the caller's language cannot be detected." },
+          "allowed_language_codes": { "type": "array", "items": { "type": "string" }, "default": ["en-IN"], "description": "List of BCP-47 codes offered to the caller." },
+
+          "stt_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"], "default": "sarvam", "description": "Admin-only today; current code always uses Sarvam STT." },
+          "stt_model": { "type": "string", "default": "saaras:v3", "description": "Admin-only. Sarvam STT model identifier." },
+          "stt_streaming_enabled": { "type": "boolean", "default": false, "description": "Enable streaming STT (roadmap)." },
+
+          "tts_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"], "default": "sarvam" },
+          "tts_model": { "type": "string", "default": "bulbul:v2", "description": "Admin-only. Sarvam TTS model (e.g. bulbul:v2, bulbul:v3)." },
+          "tts_default_speaker": { "type": "string", "nullable": true, "description": "Sarvam speaker id used when agent/avatar has none." },
+          "tts_default_pace": { "type": "number", "format": "float", "minimum": 0.5, "maximum": 2.0, "nullable": true },
+          "tts_default_pitch": { "type": "number", "format": "float", "nullable": true },
+          "tts_default_loudness": { "type": "number", "format": "float", "nullable": true },
+          "tts_default_sample_rate": { "type": "integer", "default": 22050, "description": "Admin-only. Must be 8000 for Exotel voicebot." },
+          "tts_output_codec": { "type": "string", "enum": ["wav", "mp3"], "default": "wav", "description": "Admin-only." },
+          "tts_streaming_enabled": { "type": "boolean", "default": false, "description": "Enable streaming TTS (roadmap)." },
+
+          "rag_use_openai_only": { "type": "boolean", "default": false, "description": "If true, RAG uses OpenAI only (no self-hosted LLM)." },
+          "rag_top_k": { "type": "integer", "default": 3, "minimum": 1, "description": "Number of KB chunks retrieved." },
+          "rag_use_history": { "type": "boolean", "default": true },
+          "rag_history_max_turns": { "type": "integer", "nullable": true, "description": "Cap on chat-history turns appended to the RAG prompt. null = no cap." },
+          "rag_distance_threshold": { "type": "number", "format": "float", "nullable": true, "description": "Vector distance cutoff (null = use code default)." },
+          "rag_streaming_enabled": { "type": "boolean", "default": false, "description": "Stream LLM tokens back to the client (roadmap)." },
+          "llm_model_override": { "type": "string", "nullable": true, "description": "Admin-only. Override OLLAMA/LLM model id." },
+          "llm_max_tokens": { "type": "integer", "default": 150 },
+          "llm_temperature": { "type": "number", "format": "float", "default": 0.25, "minimum": 0, "maximum": 2 },
+          "llm_top_p": { "type": "number", "format": "float", "nullable": true, "minimum": 0, "maximum": 1 },
+          "llm_verification_enabled": { "type": "boolean", "default": false },
+          "llm_verification_threshold": { "type": "number", "format": "float", "default": 0.8, "minimum": 0, "maximum": 1 },
+          "llm_fallback_to_openai": { "type": "boolean", "default": true },
+          "openai_model": { "type": "string", "default": "gpt-4o-mini", "description": "Admin-only." },
+          "no_kb_fallback_instruction": { "type": "string", "nullable": true, "description": "Sentence used when the KB returns no match." },
+
+          "vad_silence_timeout_ms": { "type": "integer", "default": 1500, "description": "Admin-only." },
+          "vad_energy_threshold": { "type": "integer", "default": 200, "description": "Admin-only. PCM energy level below which audio counts as silence." },
+          "vad_min_speech_ms": { "type": "integer", "default": 200, "description": "Admin-only." },
+          "max_utterance_buffer_bytes": { "type": "integer", "default": 5242880, "description": "Admin-only. Hard ceiling on inbound audio buffer size." },
+          "max_utterance_seconds": { "type": "integer", "nullable": true, "description": "Admin-only. Not enforced in current code path; buffer-byte ceiling is used instead." },
+          "echo_cancel_level": { "type": "string", "enum": ["off", "soft", "aggressive"], "default": "off", "description": "Admin-only." },
+
+          "barge_in_enabled": { "type": "boolean", "default": false },
+          "barge_in_mode": { "type": "string", "enum": ["immediate", "finish_then_answer", "finish_turn"], "default": "finish_then_answer" },
+          "barge_in_min_speech_ms": { "type": "integer", "default": 400, "description": "Admin-only." },
+          "barge_in_energy_threshold": { "type": "integer", "default": 250, "description": "Admin-only." },
+
+          "allow_language_switch": { "type": "boolean", "default": false },
+          "language_switch_trigger_keywords": { "type": "array", "items": { "type": "string" } },
+          "language_switch_confirm_prompt": { "type": "string" },
+          "language_switch_options_prompt": { "type": "string" },
+          "language_switch_yes_words": { "type": "array", "items": { "type": "string" } },
+          "language_switch_no_words": { "type": "array", "items": { "type": "string" } },
+          "language_switch_timeout_ms": { "type": "integer", "default": 6000, "description": "Admin-only." },
+          "language_switch_max_attempts": { "type": "integer", "default": 2, "description": "Admin-only." },
+
+          "stop_words": { "type": "array", "items": { "type": "string" }, "description": "Keywords that end the current turn or trigger menu/operator." },
+
+          "ivr_enabled": { "type": "boolean", "default": false },
+          "ivr_welcome_menu_id": { "type": "string", "format": "uuid", "nullable": true },
+          "ivr_input_timeout_ms": { "type": "integer", "default": 5000 },
+          "ivr_max_retries": { "type": "integer", "default": 3 },
+          "ivr_speech_input_enabled": { "type": "boolean", "default": true },
+          "ivr_fallback_to_agent": { "type": "boolean", "default": true },
+
+          "max_call_duration_seconds": { "type": "integer", "nullable": true, "description": "Admin-only. null = no cap." },
+          "max_concurrent_calls": { "type": "integer", "default": 10, "description": "Admin-only." },
+          "call_transcript_enabled": { "type": "boolean", "default": true },
+          "end_call_keywords": { "type": "array", "items": { "type": "string" }, "default": ["goodbye", "bye"] },
+          "end_call_silence_timeout_sec": { "type": "integer", "default": 20, "description": "Admin-only." },
+          "handoff_to_human_enabled": { "type": "boolean", "default": false },
+          "human_agent_transfer_number": { "type": "string", "nullable": true, "description": "E.164 number to transfer to." },
+          "business_hours": { "type": "object", "description": "Weekly schedule (e.g. {\"mon\": [\"09:00-18:00\"], \"tue\": [\"09:00-18:00\"]}). Empty object = always on." },
+          "holiday_calendar": { "type": "array", "items": { "type": "object" }, "description": "Array of {date, label} objects, e.g. [{\"date\":\"2026-01-26\",\"label\":\"Republic Day\"}]." },
+
+          "outbound_enabled": { "type": "boolean", "default": false, "description": "Admin-only." },
+
+          "webhook_url_call_start": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_call_end": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_transcript": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_ivr_event": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_language_event": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_secret": { "type": "string", "nullable": true, "description": "Admin-only. Shared HMAC secret used to sign outbound webhooks." },
+          "webhook_retry_attempts": { "type": "integer", "default": 3, "description": "Admin-only." },
+          "email_notify_call_end": { "type": "boolean", "default": false },
+          "email_recipients": { "type": "array", "items": { "type": "string", "format": "email" } },
+          "slack_webhook_url": { "type": "string", "format": "uri", "nullable": true },
+
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CustomerSettingsPatch": {
+        "type": "object",
+        "description": "Partial update. Every field is OPTIONAL. On the tenant endpoint, admin-only fields (`voicebot_enabled`, `stt_model`, `tts_model`, `tts_default_sample_rate`, `tts_output_codec`, `llm_model_override`, `openai_model`, `vad_*`, `max_utterance_*`, `echo_cancel_level`, `barge_in_min_speech_ms`, `barge_in_energy_threshold`, `language_switch_timeout_ms`, `language_switch_max_attempts`, `max_call_duration_seconds`, `max_concurrent_calls`, `end_call_silence_timeout_sec`, `outbound_enabled`, `webhook_secret`, `webhook_retry_attempts`) return 403. On the admin endpoint, every field is accepted.",
+        "additionalProperties": false,
+        "properties": {
+          "voicebot_enabled": { "type": "boolean" },
+          "voicebot_multilingual": { "type": "boolean" },
+          "default_language_code": { "type": "string", "example": "en-IN" },
+          "allowed_language_codes": { "type": "array", "items": { "type": "string" }, "example": ["en-IN", "hi-IN"] },
+          "stt_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"] },
+          "stt_model": { "type": "string" },
+          "stt_streaming_enabled": { "type": "boolean" },
+          "tts_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"] },
+          "tts_model": { "type": "string" },
+          "tts_default_speaker": { "type": "string", "nullable": true },
+          "tts_default_pace": { "type": "number", "minimum": 0.5, "maximum": 2.0, "nullable": true },
+          "tts_default_pitch": { "type": "number", "nullable": true },
+          "tts_default_loudness": { "type": "number", "nullable": true },
+          "tts_default_sample_rate": { "type": "integer" },
+          "tts_output_codec": { "type": "string", "enum": ["wav", "mp3"] },
+          "tts_streaming_enabled": { "type": "boolean" },
+          "rag_use_openai_only": { "type": "boolean" },
+          "rag_top_k": { "type": "integer", "minimum": 1 },
+          "rag_use_history": { "type": "boolean" },
+          "rag_history_max_turns": { "type": "integer", "nullable": true },
+          "rag_distance_threshold": { "type": "number", "minimum": 0, "maximum": 2, "nullable": true },
+          "rag_streaming_enabled": { "type": "boolean" },
+          "llm_model_override": { "type": "string", "nullable": true },
+          "llm_max_tokens": { "type": "integer", "minimum": 1 },
+          "llm_temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+          "llm_top_p": { "type": "number", "minimum": 0, "maximum": 1, "nullable": true },
+          "llm_verification_enabled": { "type": "boolean" },
+          "llm_verification_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+          "llm_fallback_to_openai": { "type": "boolean" },
+          "openai_model": { "type": "string" },
+          "no_kb_fallback_instruction": { "type": "string", "nullable": true },
+          "vad_silence_timeout_ms": { "type": "integer", "minimum": 0 },
+          "vad_energy_threshold": { "type": "integer", "minimum": 0 },
+          "vad_min_speech_ms": { "type": "integer", "minimum": 0 },
+          "max_utterance_buffer_bytes": { "type": "integer", "minimum": 1 },
+          "max_utterance_seconds": { "type": "integer", "minimum": 1, "nullable": true },
+          "echo_cancel_level": { "type": "string", "enum": ["off", "soft", "aggressive"] },
+          "barge_in_enabled": { "type": "boolean" },
+          "barge_in_mode": { "type": "string", "enum": ["immediate", "finish_then_answer", "finish_turn"] },
+          "barge_in_min_speech_ms": { "type": "integer", "minimum": 0 },
+          "barge_in_energy_threshold": { "type": "integer", "minimum": 0 },
+          "allow_language_switch": { "type": "boolean" },
+          "language_switch_trigger_keywords": { "type": "array", "items": { "type": "string" } },
+          "language_switch_confirm_prompt": { "type": "string" },
+          "language_switch_options_prompt": { "type": "string" },
+          "language_switch_yes_words": { "type": "array", "items": { "type": "string" } },
+          "language_switch_no_words": { "type": "array", "items": { "type": "string" } },
+          "language_switch_timeout_ms": { "type": "integer", "minimum": 1 },
+          "language_switch_max_attempts": { "type": "integer", "minimum": 1 },
+          "stop_words": { "type": "array", "items": { "type": "string" } },
+          "ivr_enabled": { "type": "boolean" },
+          "ivr_welcome_menu_id": { "type": "string", "format": "uuid", "nullable": true },
+          "ivr_input_timeout_ms": { "type": "integer", "minimum": 1 },
+          "ivr_max_retries": { "type": "integer", "minimum": 0 },
+          "ivr_speech_input_enabled": { "type": "boolean" },
+          "ivr_fallback_to_agent": { "type": "boolean" },
+          "max_call_duration_seconds": { "type": "integer", "minimum": 1, "nullable": true },
+          "max_concurrent_calls": { "type": "integer", "minimum": 1 },
+          "call_transcript_enabled": { "type": "boolean" },
+          "end_call_keywords": { "type": "array", "items": { "type": "string" } },
+          "end_call_silence_timeout_sec": { "type": "integer", "minimum": 1 },
+          "handoff_to_human_enabled": { "type": "boolean" },
+          "human_agent_transfer_number": { "type": "string", "nullable": true },
+          "business_hours": { "type": "object" },
+          "holiday_calendar": { "type": "array", "items": { "type": "object" } },
+          "outbound_enabled": { "type": "boolean" },
+          "webhook_url_call_start": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_call_end": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_transcript": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_ivr_event": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_url_language_event": { "type": "string", "format": "uri", "nullable": true },
+          "webhook_secret": { "type": "string", "nullable": true },
+          "webhook_retry_attempts": { "type": "integer", "minimum": 0 },
+          "email_notify_call_end": { "type": "boolean" },
+          "email_recipients": { "type": "array", "items": { "type": "string", "format": "email" } },
+          "slack_webhook_url": { "type": "string", "format": "uri", "nullable": true }
+        }
+      },
+      "LanguageVoiceMapEntry": {
+        "type": "object",
+        "description": "Per-language override for an avatar. Any omitted field falls back to the avatar's top-level value, then to `customer_settings`.",
+        "additionalProperties": false,
+        "properties": {
+          "tts_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"] },
+          "tts_model": { "type": "string", "nullable": true },
+          "tts_speaker": { "type": "string", "nullable": true },
+          "tts_pace": { "type": "number", "minimum": 0.5, "maximum": 2.0, "nullable": true },
+          "tts_pitch": { "type": "number", "nullable": true },
+          "tts_loudness": { "type": "number", "nullable": true },
+          "tts_sample_rate": { "type": "integer", "minimum": 1, "nullable": true }
+        }
+      },
+      "Avatar": {
+        "type": "object",
+        "description": "A reusable voice persona scoped to the customer. Agents may reference one via `agents.avatar_id`.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "customer_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "example": "Friendly Asha" },
+          "description": { "type": "string", "example": "Warm Hindi/English receptionist voice." },
+          "tone": { "type": "string", "nullable": true, "example": "friendly", "description": "Free-form label (e.g. friendly, formal, energetic, calm)." },
+          "tts_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"], "default": "sarvam" },
+          "tts_model": { "type": "string", "nullable": true, "example": "bulbul:v3" },
+          "tts_speaker": { "type": "string", "nullable": true, "example": "asha", "description": "Sarvam speaker id OR ElevenLabs voice id." },
+          "tts_pace": { "type": "number", "nullable": true, "example": 0.95, "minimum": 0.5, "maximum": 2.0 },
+          "tts_pitch": { "type": "number", "nullable": true },
+          "tts_loudness": { "type": "number", "nullable": true },
+          "tts_sample_rate": { "type": "integer", "nullable": true, "example": 8000, "description": "Optional override. Voicebot requires 8000." },
+          "language_voice_map": {
+            "type": "object",
+            "description": "BCP-47 code → per-language override. See `LanguageVoiceMapEntry`.",
+            "additionalProperties": { "$ref": "#/components/schemas/LanguageVoiceMapEntry" }
+          },
+          "is_default": { "type": "boolean", "default": false, "description": "At most one default avatar per customer." },
+          "is_active": { "type": "boolean", "default": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "AvatarCreate": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string" },
+          "tone": { "type": "string", "nullable": true, "example": "friendly" },
+          "tts_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"], "default": "sarvam" },
+          "tts_model": { "type": "string", "nullable": true },
+          "tts_speaker": { "type": "string", "nullable": true },
+          "tts_pace": { "type": "number", "minimum": 0.5, "maximum": 2.0, "nullable": true },
+          "tts_pitch": { "type": "number", "nullable": true },
+          "tts_loudness": { "type": "number", "nullable": true },
+          "tts_sample_rate": { "type": "integer", "nullable": true },
+          "language_voice_map": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/LanguageVoiceMapEntry" } },
+          "is_default": { "type": "boolean", "default": false },
+          "is_active": { "type": "boolean", "default": true }
+        }
+      },
+      "AvatarUpdate": {
+        "type": "object",
+        "description": "Partial update — every field is optional.",
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string" },
+          "tone": { "type": "string", "nullable": true },
+          "tts_provider": { "type": "string", "enum": ["sarvam", "elevenlabs"] },
+          "tts_model": { "type": "string", "nullable": true },
+          "tts_speaker": { "type": "string", "nullable": true },
+          "tts_pace": { "type": "number", "minimum": 0.5, "maximum": 2.0, "nullable": true },
+          "tts_pitch": { "type": "number", "nullable": true },
+          "tts_loudness": { "type": "number", "nullable": true },
+          "tts_sample_rate": { "type": "integer", "nullable": true },
+          "language_voice_map": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/LanguageVoiceMapEntry" } },
+          "is_default": { "type": "boolean" },
+          "is_active": { "type": "boolean" }
+        }
       }
     }
   },
@@ -2360,6 +2626,304 @@
               }
             }
           }
+        }
+      }
+    },
+    "/settings": {
+      "get": {
+        "tags": ["Settings"],
+        "summary": "Get full customer settings",
+        "description": "Returns the full `customer_settings` row for the authenticated customer. Defaults are guaranteed — every customer has a row (auto-created on customer insert, or backfilled by migration 005).",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Full customer settings",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CustomerSettings" }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found",
+            "content": { "application/json": { "example": { "error": "Customer not found" } } }
+          }
+        }
+      },
+      "patch": {
+        "tags": ["Settings"],
+        "summary": "Update customer settings (tenant scope)",
+        "description": "Partial update of `customer_settings`. Admin-only fields (see `CustomerSettingsPatch` description) are rejected with 403. Send only the fields you want to change — omitted fields are left untouched.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CustomerSettingsPatch" },
+              "example": {
+                "voicebot_multilingual": true,
+                "default_language_code": "hi-IN",
+                "allowed_language_codes": ["hi-IN", "en-IN", "mr-IN"],
+                "rag_use_openai_only": true,
+                "rag_top_k": 4,
+                "barge_in_enabled": true,
+                "barge_in_mode": "immediate",
+                "allow_language_switch": true,
+                "stop_words": ["stop", "operator", "main menu"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated settings",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CustomerSettings" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": { "application/json": { "example": { "error": { "formErrors": [], "fieldErrors": { "rag_top_k": ["Expected number, received string"] } } } } }
+          },
+          "403": {
+            "description": "One or more fields are admin-only",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Some fields are admin-only",
+                  "admin_only_fields": ["tts_model", "vad_silence_timeout_ms"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/customers/{customerId}/settings": {
+      "get": {
+        "tags": ["Settings"],
+        "summary": "Admin: get customer settings",
+        "description": "Admin view of `customer_settings` for any customer. Requires `x-admin-token`.",
+        "security": [{ "AdminToken": [] }],
+        "parameters": [
+          { "name": "customerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full customer settings",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CustomerSettings" } } }
+          },
+          "404": { "description": "Customer not found", "content": { "application/json": { "example": { "error": "Customer not found" } } } }
+        }
+      },
+      "patch": {
+        "tags": ["Settings"],
+        "summary": "Admin: update any customer settings field",
+        "description": "Partial update of `customer_settings` with no scope check — admins may edit every field, including admin-only ones.",
+        "security": [{ "AdminToken": [] }],
+        "parameters": [
+          { "name": "customerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CustomerSettingsPatch" },
+              "example": {
+                "voicebot_enabled": true,
+                "tts_model": "bulbul:v3",
+                "tts_default_sample_rate": 8000,
+                "vad_silence_timeout_ms": 1200,
+                "max_utterance_buffer_bytes": 10485760,
+                "max_concurrent_calls": 50,
+                "webhook_secret": "whsec_XXXXXXXXXXXX",
+                "webhook_retry_attempts": 5
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated settings",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CustomerSettings" } } }
+          },
+          "400": { "description": "Validation error" },
+          "404": { "description": "Customer not found" }
+        }
+      }
+    },
+    "/admin/customers/{customerId}/settings/reset": {
+      "post": {
+        "tags": ["Settings"],
+        "summary": "Admin: reset settings to defaults",
+        "description": "Deletes the customer's `customer_settings` row and re-inserts a fresh one, so every column reverts to its database default (see `CustomerSettings` schema).",
+        "security": [{ "AdminToken": [] }],
+        "parameters": [
+          { "name": "customerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fresh (default) settings",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CustomerSettings" } } }
+          },
+          "404": { "description": "Customer not found" }
+        }
+      }
+    },
+    "/avatars": {
+      "get": {
+        "tags": ["Avatars"],
+        "summary": "List avatars",
+        "description": "Returns every avatar belonging to the authenticated customer, default first.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Array of avatars",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Avatar" } },
+                "example": [
+                  {
+                    "id": "d1e2f3a4-b5c6-7890-abcd-ef1234567890",
+                    "customer_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    "name": "Friendly Asha",
+                    "description": "Warm Hindi/English receptionist voice.",
+                    "tone": "friendly",
+                    "tts_provider": "sarvam",
+                    "tts_model": "bulbul:v3",
+                    "tts_speaker": "asha",
+                    "tts_pace": 0.95,
+                    "tts_pitch": null,
+                    "tts_loudness": null,
+                    "tts_sample_rate": 8000,
+                    "language_voice_map": {
+                      "hi-IN": { "tts_speaker": "asha", "tts_pace": 0.95 },
+                      "en-IN": { "tts_speaker": "meera", "tts_pace": 1.0 }
+                    },
+                    "is_default": true,
+                    "is_active": true,
+                    "created_at": "2026-04-24T10:00:00.000Z",
+                    "updated_at": "2026-04-24T10:00:00.000Z"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Avatars"],
+        "summary": "Create avatar",
+        "description": "Creates a new avatar for the authenticated customer. If `is_default=true`, any previous default is demoted atomically.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AvatarCreate" },
+              "example": {
+                "name": "Friendly Asha",
+                "description": "Warm Hindi/English receptionist voice.",
+                "tone": "friendly",
+                "tts_provider": "sarvam",
+                "tts_model": "bulbul:v3",
+                "tts_speaker": "asha",
+                "tts_pace": 0.95,
+                "tts_sample_rate": 8000,
+                "language_voice_map": {
+                  "hi-IN": { "tts_speaker": "asha", "tts_pace": 0.95 },
+                  "en-IN": { "tts_speaker": "meera", "tts_pace": 1.0 }
+                },
+                "is_default": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Avatar created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Avatar" } } }
+          },
+          "400": { "description": "Validation error" },
+          "409": {
+            "description": "An avatar with that name already exists for this customer",
+            "content": { "application/json": { "example": { "error": "Avatar with this name already exists for this customer" } } }
+          }
+        }
+      }
+    },
+    "/avatars/{id}": {
+      "get": {
+        "tags": ["Avatars"],
+        "summary": "Get avatar",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Avatar", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Avatar" } } } },
+          "404": { "description": "Avatar not found" }
+        }
+      },
+      "put": {
+        "tags": ["Avatars"],
+        "summary": "Update avatar",
+        "description": "Partial update. Setting `is_default` to true demotes any previous default atomically.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AvatarUpdate" },
+              "example": {
+                "tts_speaker": "meera",
+                "tts_pace": 1.05,
+                "language_voice_map": {
+                  "hi-IN": { "tts_speaker": "asha", "tts_pace": 0.95 },
+                  "mr-IN": { "tts_speaker": "meera", "tts_pace": 1.0 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Updated avatar", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Avatar" } } } },
+          "400": { "description": "Validation error" },
+          "404": { "description": "Avatar not found" },
+          "409": { "description": "Name conflict with another avatar for this customer" }
+        }
+      },
+      "delete": {
+        "tags": ["Avatars"],
+        "summary": "Delete avatar",
+        "description": "Deletes the avatar. Any agents referencing it have `agents.avatar_id` set to NULL via FK `ON DELETE SET NULL`.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Deleted", "content": { "application/json": { "example": { "message": "Avatar deleted", "id": "d1e2f3a4-b5c6-7890-abcd-ef1234567890" } } } },
+          "404": { "description": "Avatar not found" }
+        }
+      }
+    },
+    "/avatars/{id}/set-default": {
+      "post": {
+        "tags": ["Avatars"],
+        "summary": "Mark avatar as default",
+        "description": "Sets this avatar as the default for the customer. The previous default (if any) is demoted atomically. At most one default avatar exists per customer (enforced by a partial unique index).",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Avatar set as default", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Avatar" } } } },
+          "404": { "description": "Avatar not found" }
         }
       }
     }
