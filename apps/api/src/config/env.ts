@@ -4,10 +4,7 @@ import path from "path";
 /** API package root (`apps/api`), stable regardless of PM2 `cwd`. */
 const API_ROOT = path.resolve(__dirname, "../..");
 
-// `override: true` so values from `apps/api/.env` win over empty or stale
-// variables already present in the process (e.g. PM2 / shell). Without this,
-// a blank `OPENAI_API_KEY` in the environment blocks the real key in `.env`.
-dotenv.config({ path: path.resolve(API_ROOT, ".env"), override: true });
+dotenv.config({ path: path.resolve(API_ROOT, ".env") });
 
 export const env = {
   port: parseInt(process.env.PORT || "8080", 10),
@@ -22,12 +19,12 @@ export const env = {
 
   llm: {
     baseUrl: process.env.LLM_BASE_URL!,
-    apiKey: (process.env.LLM_API_KEY || "").trim(),
+    apiKey: process.env.LLM_API_KEY!,
     model: process.env.LLM_MODEL || "phi3:mini",
   },
 
   openai: {
-    apiKey: (process.env.OPENAI_API_KEY || "").trim(),
+    apiKey: process.env.OPENAI_API_KEY!,
     model: process.env.OPENAI_MODEL || "gpt-4o-mini",
     /**
      * Used only for RAG chat completions (`chatOpenAI` in ask pipeline).
