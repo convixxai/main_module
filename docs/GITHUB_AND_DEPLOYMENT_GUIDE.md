@@ -426,7 +426,9 @@ After confirming the new system works:
 
 ## Part 3: Updating the Deployed App
 
-When you push new code to GitHub:
+### 3.1 Production update from `main` (default)
+
+When you merge to **`main`** on GitHub and want the **main server** to run that code:
 
 ```bash
 cd /var/www/main_module
@@ -443,6 +445,83 @@ pm2 restart convixx-api
 
 ---
 
+### 3.2 Deploy from a GitHub sub-branch to the main server
+
+Use this when the code you want on the server lives on a **branch other than `main`** (for example `feature/settings`, `release/2026-04`, or `hotfix/exotel`). The server will **track that branch** until you switch back to `main`.
+
+**Recommended pattern for real production:** merge the branch into **`main`** on GitHub (via Pull Request), then use **§3.1** so production always tracks `main`. Use **direct branch checkout on the server** only when you intentionally want the server to run a pre-merge branch (staging, customer pilot, or emergency test).
+
+**On the server (SSH), from the repo root:**
+
+```bash
+cd /var/www/main_module
+
+# Download latest refs from GitHub (all branches)
+git fetch origin
+
+# Switch to your branch (replace BRANCH_NAME)
+git checkout BRANCH_NAME
+
+# Update that branch to match GitHub (fast-forward or merge as configured)
+git pull origin BRANCH_NAME
+
+# Rebuild and restart the API
+cd apps/api
+npm install
+npm run build
+pm2 restart convixx-api --update-env
+```
+
+**First time this branch is used on this machine:** after `git fetch origin`, if `git checkout BRANCH_NAME` says the branch does not exist locally, create a local branch that tracks the remote:
+
+```bash
+git fetch origin
+git checkout -b BRANCH_NAME origin/BRANCH_NAME
+```
+
+**If you see `fatal: a branch named '…' already exists`:** do not use `-b`. The branch is already on the server; switch and update:
+
+```bash
+git fetch origin
+git checkout BRANCH_NAME
+git pull origin BRANCH_NAME
+```
+
+**Check which branch the server is on before and after:**
+
+```bash
+cd /var/www/main_module
+git branch --show-current
+git status -sb
+```
+
+**Switch the main server back to `main` after testing a branch:**
+
+```bash
+cd /var/www/main_module
+git fetch origin
+git checkout main
+git pull origin main
+
+cd apps/api
+npm install
+npm run build
+pm2 restart convixx-api --update-env
+```
+
+**Avoid `sudo git pull` if you can:** it makes new files owned by `root` and can break `npm install` for your deploy user. Prefer fixing repo ownership once (`sudo chown -R YOUR_USER:YOUR_USER /var/www/main_module`) and run `git` as that user. If you already used `sudo`, see **EACCES** in Part 5.
+
+**If you have local edits on the server** (never ideal), `git pull` may fail. Either discard them (only if you are sure they are not needed):
+
+```bash
+cd /var/www/main_module
+git reset --hard origin/BRANCH_NAME
+```
+
+…or stash them: `git stash`, pull, then `git stash pop` (advanced). Prefer deploying only from a clean clone and changing code only on GitHub.
+
+---
+
 ## Part 4: Quick Reference Commands
 
 | Task                | Command                                        |
@@ -452,7 +531,8 @@ pm2 restart convixx-api
 | Restart app        | `pm2 restart convixx-api`                      |
 | Test health        | `curl http://localhost:8080/health`            |
 | Check Nginx        | `sudo nginx -t && sudo systemctl status nginx` |
-| Update from GitHub | `cd /var/www/main_module && git pull && cd apps/api && npm run build && pm2 restart convixx-api` |
+| Update from GitHub (`main`) | `cd /var/www/main_module && git pull origin main && cd apps/api && npm install && npm run build && pm2 restart convixx-api --update-env` |
+| Update from a **branch** | `cd /var/www/main_module && git fetch origin && git checkout BRANCH_NAME && git pull origin BRANCH_NAME && cd apps/api && npm install && npm run build && pm2 restart convixx-api --update-env` |
 
 ---
 
@@ -464,7 +544,43 @@ pm2 restart convixx-api
 | "502 Bad Gateway"          | See **502 Bad Gateway** below (upstream not reachable — not specific to `/docs`). |
 | "Database connection" error | Is PostgreSQL reachable? Check PG_HOST, firewall, pg_hba.conf |
 | Old Python still responding| Ensure old service is stopped and Nginx serves only new config |
-| **EACCES on npm install**  | Files owned by root after `sudo git pull`. Run: `sudo chown -R ubuntu:ubuntu /var/www/main_module` |
+| **EACCES on npm install**  | Files owned by root after `sudo git pull`. Run: `sudo chown -R YOUR_USER:YOUR_GROUP /var/www/main_module` (e.g. `convixx-main:convixx-main`) |
+| **`insufficient permission for adding an object to repository database .git/objects`** | Same cause: repo or `.git` owned by `root`. Fix ownership (below), then `git fetch` again. |
+
+### Git: `insufficient permission` / `failed to write object` on `git fetch`
+
+This almost always means the repository was created or updated with **`sudo`** (`sudo git clone`, `sudo git pull`), so **`root` owns `.git/objects`** and your deploy user (e.g. `convixx-main`) cannot write new objects.
+
+**Fix (run once, or after any accidental `sudo git` in this folder):**
+
+```bash
+sudo chown -R convixx-main:convixx-main /var/www/main_module
+```
+
+Use your real Linux username if it is not `convixx-main`. Then:
+
+```bash
+cd /var/www/main_module
+git fetch origin
+```
+
+**Why `git checkout Milestone-4` said “pathspec did not match”:** `git fetch` never completed, so Git never downloaded the branch list. After `fetch` succeeds, list remote branches and match the exact name (case-sensitive):
+
+```bash
+git branch -r | grep -i milestone
+```
+
+Then either:
+
+```bash
+git checkout Milestone-4
+```
+
+or, if the branch only exists on the remote:
+
+```bash
+git checkout -b Milestone-4 origin/Milestone-4
+```
 
 ### 502 Bad Gateway on `/docs`, `/health`, or every URL
 
@@ -506,7 +622,7 @@ After Node responds on `curl http://127.0.0.1:8080/health`, reload Nginx (`sudo 
 
 ### EACCES: permission denied on package-lock.json
 
-If `npm install` fails with `EACCES: permission denied` on `package-lock.json`, the directory was likely updated with `sudo git pull`, so root owns the files and the `ubuntu` user cannot write. Fix ownership, then retry:
+If `npm install` fails with `EACCES: permission denied` on `package-lock.json`, or `git fetch` fails with **insufficient permission** under `.git/objects`, the directory was likely updated with `sudo git pull` / `sudo git clone`, so root owns the files and your deploy user cannot write. Fix ownership, then retry:
 
 ```bash
 sudo chown -R convixx-main:convixx-main /var/www/main_module
@@ -515,7 +631,7 @@ npm install
 npm run build
 ```
 
-To avoid this after future updates, either run `git pull` without sudo (if the repo is owned by ubuntu), or run the chown command after every `sudo git pull`.
+To avoid this after future updates, run **`git fetch` / `git pull` / `git checkout` without `sudo`** once the tree is owned by your deploy user. If you must use `sudo` for some other reason, run **`chown` again** afterward.
 
 ---
 
@@ -530,3 +646,4 @@ To avoid this after future updates, either run `git pull` without sudo (if the r
 - [ ] Nginx configured and domain pointing to server
 - [ ] Old Python system stopped
 - [ ] HTTPS configured (optional but recommended)
+- [ ] Know how to deploy: from `main` (§3.1) or from a feature branch (§3.2); production usually stays on `main` after merge
