@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { env } from "../config/env";
 import { getCachedEmbedding, setCachedEmbedding } from "./cache";
 import type { RagTraceFn } from "./rag-trace";
+import { sarvamTranslateToEnglishForSearch } from "./sarvam";
 
 export const selfHostedLLM = new OpenAI({
   baseURL: env.llm.baseUrl,
@@ -182,4 +183,70 @@ export async function generateEmbedding(
   });
   setCachedEmbedding(text, embedding);
   return embedding;
+}
+
+/** True when tag is missing, empty, or primary language is English (en, en-IN, …). */
+export function isEnglishLanguageTag(tag: string | undefined | null): boolean {
+  if (tag == null) return true;
+  const t = String(tag).trim().toLowerCase().replace(/_/g, "-");
+  if (!t) return true;
+  return t === "en" || t.startsWith("en-");
+}
+
+function inferNonEnglishLanguageHint(question: string): string | null {
+  if (/\p{Script=Devanagari}/u.test(question)) return "hi-IN";
+  return null;
+}
+
+/**
+ * For multilingual users, English-centric KB embeddings (nomic) match poorly against
+ * Hindi (etc.) transcripts. Translate to concise English **only for vector search**;
+ * callers should still pass the original `question` into chat/history.
+ */
+export async function prepareQuestionForKbEmbedding(
+  question: string,
+  opts: {
+    multilingual: boolean;
+    languageTag?: string | null;
+    trace?: RagTraceFn;
+  }
+): Promise<{ textForEmbedding: string; translatedForSearch: boolean }> {
+  const q = question.trim();
+  if (!q) return { textForEmbedding: q, translatedForSearch: false };
+
+  if (!opts.multilingual) {
+    return { textForEmbedding: q, translatedForSearch: false };
+  }
+
+  const explicit = opts.languageTag?.trim() || null;
+  const inferred = explicit == null ? inferNonEnglishLanguageHint(q) : null;
+  const effectiveTag = explicit ?? inferred;
+
+  if (isEnglishLanguageTag(effectiveTag)) {
+    return { textForEmbedding: q, translatedForSearch: false };
+  }
+
+  try {
+    opts.trace?.("kb_search_translate_request", {
+      provider: "sarvam",
+      language: effectiveTag,
+      question_preview: q.slice(0, 500),
+    });
+    const { ok, text } = await sarvamTranslateToEnglishForSearch(q, effectiveTag);
+    if (!ok || !text) {
+      opts.trace?.("kb_search_translate_response", {
+        used_fallback: true,
+        reason: "sarvam_translate_failed_or_empty",
+      });
+      return { textForEmbedding: q, translatedForSearch: false };
+    }
+    opts.trace?.("kb_search_translate_response", {
+      translated_preview: text.slice(0, 500),
+      used_fallback: false,
+    });
+    return { textForEmbedding: text, translatedForSearch: true };
+  } catch (err) {
+    opts.trace?.("kb_search_translate_error", { err: String(err) });
+    return { textForEmbedding: q, translatedForSearch: false };
+  }
 }

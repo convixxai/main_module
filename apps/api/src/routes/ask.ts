@@ -5,10 +5,12 @@ import { pool } from "../config/db";
 import { env } from "../config/env";
 import {
   generateEmbedding,
+  prepareQuestionForKbEmbedding,
   chatSelfHosted,
   chatOpenAI,
   formatOpenAIClientError,
 } from "../services/llm";
+import { getCustomerSettings } from "../services/customer-settings";
 import {
   createRagTrace,
   type RagTraceFn,
@@ -24,6 +26,8 @@ const askSchema = z.object({
   question: z.string().min(1),
   session_id: z.string().uuid().optional().nullable().default(null),
   agent_id: z.string().uuid().optional().nullable().default(null),
+  /** BCP-47; when tenant is multilingual, non-English improves KB vector search vs English-only chunks. */
+  question_language_code: z.string().optional().nullable().default(null),
 });
 
 interface ResolvedAgent {
@@ -341,6 +345,8 @@ async function runAskPipeline(params: {
   ragOpenaiOnly?: boolean;
   /** Pass `createRagTrace(request.log)` from `/ask` and `/ask/voice` for `[rag:*]` logs. */
   trace?: RagTraceFn;
+  /** STT or client-supplied BCP-47 tag; used only to align KB embedding with English entries when multilingual. */
+  embeddingLanguageHint?: string | null;
 }): Promise<AskPipelineResult> {
   const {
     customerId,
@@ -352,6 +358,7 @@ async function runAskPipeline(params: {
     sequentialLlm,
     ragOpenaiOnly,
     trace,
+    embeddingLanguageHint,
   } = params;
   const start = Date.now();
 
@@ -365,30 +372,54 @@ async function runAskPipeline(params: {
   });
 
   const tParallel0 = Date.now();
-  const [sessionId, embedding, sessionAgent] = await Promise.all([
+  const [sessionId, sessionAgent, custSettings] = await Promise.all([
     getOrCreateSession(customerId, inputSessionId),
-    generateEmbedding(question, trace),
     resolveAgentFromSession(inputSessionId),
+    getCustomerSettings(customerId),
   ]);
+  const multilingual = custSettings?.voicebot_multilingual === true;
+  const tEmbedAgent0 = Date.now();
+  let resolveAgentMs = 0;
+  const [embedBundle, agent] = await Promise.all([
+    (async () => {
+      const { textForEmbedding, translatedForSearch } =
+        await prepareQuestionForKbEmbedding(question, {
+          multilingual,
+          languageTag: embeddingLanguageHint ?? null,
+          trace,
+        });
+      const embedding = await generateEmbedding(textForEmbedding, trace);
+      return { textForEmbedding, translatedForSearch, embedding };
+    })(),
+    (async () => {
+      const t0 = Date.now();
+      if (inputAgentId) {
+        const a = await resolveAgent(customerId, inputAgentId, question);
+        resolveAgentMs = Date.now() - t0;
+        return a;
+      }
+      if (sessionAgent) {
+        resolveAgentMs = Date.now() - t0;
+        return sessionAgent;
+      }
+      const a = await resolveAgent(customerId, null, question);
+      resolveAgentMs = Date.now() - t0;
+      return a;
+    })(),
+  ]);
+  const { textForEmbedding, translatedForSearch, embedding } = embedBundle;
+  const embedAgentWallMs = Date.now() - tEmbedAgent0;
   const parallelInitMs = Date.now() - tParallel0;
 
   trace?.("parallel_init_done", {
     session_id: sessionId,
     embedding_dim: embedding.length,
     parallel_init_ms: parallelInitMs,
+    embed_and_agent_ms: embedAgentWallMs,
     has_session_agent_from_db: sessionAgent != null,
+    kb_search_translated: translatedForSearch,
+    embedding_search_preview: textForEmbedding.slice(0, 240),
   });
-
-  const tAgent0 = Date.now();
-  let agent: ResolvedAgent | null = null;
-  if (inputAgentId) {
-    agent = await resolveAgent(customerId, inputAgentId, question);
-  } else if (sessionAgent) {
-    agent = sessionAgent;
-  } else {
-    agent = await resolveAgent(customerId, null, question);
-  }
-  const resolveAgentMs = Date.now() - tAgent0;
 
   const systemPrompt = agent?.systemPrompt || customerPrompt;
   const agentId = agent?.id || null;
@@ -812,8 +843,12 @@ export async function askRoutes(app: FastifyInstance) {
 
       const customerId = request.customerId!;
       const customerDefaultPrompt = request.customerPrompt!;
-      const { question, session_id: inputSessionId, agent_id: inputAgentId } =
-        body.data;
+      const {
+        question,
+        session_id: inputSessionId,
+        agent_id: inputAgentId,
+        question_language_code: questionLanguageCode,
+      } = body.data;
 
       const trace = createRagTrace(request.log);
       return await runAskPipeline({
@@ -822,6 +857,7 @@ export async function askRoutes(app: FastifyInstance) {
         question,
         inputSessionId: inputSessionId ?? null,
         inputAgentId: inputAgentId ?? null,
+        embeddingLanguageHint: questionLanguageCode ?? null,
         ragOpenaiOnly: request.ragUseOpenaiOnly === true,
         trace,
       });
@@ -993,6 +1029,7 @@ export async function askRoutes(app: FastifyInstance) {
           question,
           inputSessionId,
           inputAgentId,
+          embeddingLanguageHint: sttLanguageCode,
           includeTimings: true,
           sequentialLlm: voiceFastLlm && !request.ragUseOpenaiOnly,
           ragOpenaiOnly: request.ragUseOpenaiOnly === true,

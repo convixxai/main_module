@@ -56,6 +56,7 @@ import {
   redactOutboundExotelForLog,
 } from "../services/voicebot-trace";
 import { getCustomerSettings } from "../services/customer-settings";
+import { createRagTrace } from "../services/rag-trace";
 
 // ============================================================
 // Constants
@@ -194,8 +195,8 @@ function multilingualVoicePolicyRules(
 - You MUST reply only in these languages (tags: ${listTags}) — in practice: ${listHuman}.
 - Prefer matching the user's language when it is clearly one of these. Default when ambiguous: ${def} (${LANG_LABEL[def] ?? def}).
 - If the user asks to switch language (e.g. "speak Hindi", "मराठीत बोला"), comply immediately using one of the allowed languages only. Confirm briefly in the language you switched to.
-- NEVER say you cannot speak, or apologize for not speaking, any language that is in the allowed list above (including Hindi, Marathi, English when they appear in the list). Just answer in that language.
-- Do NOT use Tamil, Gujarati, Bengali, Kannada, Telugu, Malayalam, Odia, Punjabi, or any language whose tag is NOT in [${listTags}]. If the user seems to use another language, reply in ${def} and briefly ask them to continue in one of: ${listHuman}.
+- NEVER say you cannot speak, or apologize for not speaking, any language whose tag appears in the allowed list above. Just answer in that language.
+- Do not use any language whose tag is not in [${listTags}]. If the user seems to use another language, reply in ${def} and briefly ask them to continue in one of: ${listHuman}.
 `;
 }
 
@@ -896,7 +897,8 @@ async function runVoicebotAskPipeline(
 ): Promise<{ answer: string; source: string; session_id: string } | null> {
   try {
     // Import the pipeline function lazily to avoid circular deps
-    const { generateEmbedding, chatOpenAI } = await import("../services/llm");
+    const { generateEmbedding, prepareQuestionForKbEmbedding, chatOpenAI } =
+      await import("../services/llm");
 
     // Get customer system prompt and default fallback
     const customerResult = await pool.query(
@@ -907,6 +909,38 @@ async function runVoicebotAskPipeline(
 
     const customerPrompt = customerResult.rows[0].system_prompt;
     const defaultFallbackInstruction = customerResult.rows[0].default_no_kb_fallback_instruction;
+
+    const ragTrace = createRagTrace(log);
+    // Overlap KB translate+embed (Sarvam + self-hosted nomic) with session/agent DB work
+    const embedPipeline = (async () => {
+      voiceTrace(log, "pipeline.rag.embedding", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        exotel_call_session_id: session.callSessionDbId,
+        question_len: question.length,
+      });
+      const { textForEmbedding, translatedForSearch } =
+        await prepareQuestionForKbEmbedding(question, {
+          multilingual: session.voicebotMultilingualEffective === true,
+          languageTag: session.effectiveSttLanguageThisTurn,
+          trace: ragTrace,
+        });
+      voiceTrace(log, "pipeline.rag.embedding_query", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        exotel_call_session_id: session.callSessionDbId,
+        translated_for_search: translatedForSearch,
+        original_preview: question.slice(0, 240),
+        embedding_text_preview: textForEmbedding.slice(0, 240),
+      });
+      const embedding = await generateEmbedding(textForEmbedding, ragTrace);
+      logVoiceStage(log, "rag.embedding.done", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        vector_dims: embedding.length,
+      });
+      return { textForEmbedding, translatedForSearch, embedding };
+    })();
 
     await ensureVoicebotChatSessionForUtterance(session, log);
 
@@ -934,20 +968,7 @@ async function runVoicebotAskPipeline(
       || defaultFallbackInstruction 
       || 'respond with a polite message like "I don\'t have an answer for that right now" then ask 1-2 follow-up questions related to the conversation context to keep the discussion going and explore sales opportunities.';
 
-    voiceTrace(log, "pipeline.rag.embedding", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      exotel_call_session_id: session.callSessionDbId,
-      question_len: question.length,
-    });
-
-    // Generate embedding for the question
-    const embedding = await generateEmbedding(question);
-    logVoiceStage(log, "rag.embedding.done", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      vector_dims: embedding.length,
-    });
+    const { embedding } = await embedPipeline;
 
     // KB vector search
     const embeddingStr = `[${embedding.join(",")}]`;

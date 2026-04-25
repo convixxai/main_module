@@ -1696,6 +1696,10 @@
                   "agent_id": {
                     "type": "string",
                     "format": "uuid"
+                  },
+                  "question_language_code": {
+                    "type": "string",
+                    "description": "Optional BCP-47 tag (e.g. hi-IN). When the tenant has voicebot_multilingual enabled, non-English values are translated to English via Sarvam Translate for KB vector search only; the original question is still used for the LLM and chat history. Devanagari text without this field may still be detected for the same purpose."
                   }
                 }
               }
