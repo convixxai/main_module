@@ -145,6 +145,82 @@ export async function chatOpenAI(
   };
 }
 
+/**
+ * OpenAI chat with `stream: true`. Invokes `onTextDelta` for each content delta (for incremental TTS).
+ * Aggregated full text is returned; usage is included when the API sends it (stream_options).
+ */
+export async function streamChatOpenAI(
+  messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  maxTokens: number,
+  onTextDelta: (token: string) => void | Promise<void>,
+  trace?: RagTraceFn,
+  ragOptions?: ChatOpenAIRagOptions
+): Promise<OpenAIUsageResult> {
+  const temperature =
+    ragOptions?.temperature ?? env.openai.ragTemperature;
+  const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
+
+  trace?.("openai_chat_stream_request", {
+    provider: "openai",
+    model: env.openai.model,
+    max_tokens: maxTokens,
+    temperature,
+    top_p: top_p ?? null,
+    messages,
+  });
+
+  const stream = await openaiClient.chat.completions.create({
+    model: env.openai.model,
+    messages,
+    temperature,
+    ...(top_p != null && top_p !== 1 ? { top_p } : {}),
+    max_tokens: maxTokens,
+    stream: true,
+    stream_options: { include_usage: true },
+  });
+
+  let raw = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  let model = env.openai.model;
+
+  for await (const part of stream) {
+    if (part.usage) {
+      const u = part.usage;
+      promptTokens = u.prompt_tokens ?? 0;
+      completionTokens = u.completion_tokens ?? 0;
+      totalTokens = u.total_tokens ?? 0;
+    }
+    if (part.model) model = part.model;
+    const t = part.choices[0]?.delta?.content ?? "";
+    if (t) {
+      raw += t;
+      await onTextDelta(t);
+    }
+  }
+
+  const answer = raw.trim();
+  if (promptTokens === 0 && completionTokens === 0) {
+    completionTokens = Math.ceil(answer.length / 4);
+  }
+
+  trace?.("openai_chat_stream_response", {
+    model,
+    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+    raw_reply: answer,
+  });
+
+  return {
+    answer,
+    promptTokens,
+    completionTokens,
+    totalTokens: totalTokens || promptTokens + completionTokens,
+    model,
+    costUsd: estimateCost(model, promptTokens, completionTokens),
+  };
+}
+
 export async function generateEmbedding(
   text: string,
   trace?: RagTraceFn

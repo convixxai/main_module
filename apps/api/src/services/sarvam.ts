@@ -194,6 +194,7 @@ export async function sarvamTranslateToEnglishForSearch(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
   });
 
   const raw = await readJsonBody(res);

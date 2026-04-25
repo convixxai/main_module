@@ -74,6 +74,9 @@ const ERROR_AUDIO_TEXT = "Sorry, I was unable to process that. Please try again.
 /** Greeting text for new calls. */
 const GREETING_TEXT = "Hello! How can I help you today?";
 
+/** Same as `DIRECT_MATCH_THRESHOLD` in ask.ts (pgvector distance). Skips LLM on first user turn when match is strong. */
+const VOICEBOT_DIRECT_KB_DISTANCE = 0.3;
+
 /** Energy threshold for voice activity detection.
  *  PCM chunks with RMS energy below this are treated as silence.
  *  Telephony audio (8kHz) typically has noise floor ~50-150.
@@ -110,6 +113,15 @@ async function applyCustomerVoiceSettingsToSession(
   session.allowedLanguageCodes = Array.isArray(raw)
     ? raw.map((c) => String(c).trim()).filter((x) => x.length > 0)
     : [];
+  const m = cs?.llm_max_tokens != null ? Number(cs.llm_max_tokens) : 150;
+  session.llmMaxTokensForVoice = Math.min(512, Math.max(8, Number.isFinite(m) ? Math.floor(m) : 150));
+  session.ragStreamingForVoice = cs?.rag_streaming_enabled === true;
+  const lt = cs?.llm_temperature != null ? Number(cs.llm_temperature) : null;
+  session.llmTemperatureVoice =
+    lt != null && Number.isFinite(lt) ? lt : null;
+  const ltp = cs?.llm_top_p != null ? Number(cs.llm_top_p) : null;
+  session.llmTopPVoice =
+    ltp != null && Number.isFinite(ltp) ? ltp : null;
 }
 
 /** Normalize to `xx-YY` (e.g. en-IN). */
@@ -308,6 +320,22 @@ async function ensureVoicebotChatSessionForUtterance(
 
 async function touchChatSession(sessionId: string): Promise<void> {
   await pool.query(`UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1`, [sessionId]);
+}
+
+async function loadVoicebotChatHistory(
+  session: VoicebotSession
+): Promise<{ role: string; content: string }[]> {
+  if (!session.chatSessionId) return [];
+  const { decrypt } = await import("../services/crypto");
+  const historyResult = await pool.query(
+    `SELECT role, content FROM chat_messages
+     WHERE session_id = $1 ORDER BY created_at ASC`,
+    [session.chatSessionId]
+  );
+  return historyResult.rows.map((r: { role: string; content: string }) => ({
+    role: r.role,
+    content: decrypt(r.content),
+  }));
 }
 
 function exotelCallIdForMessages(session: VoicebotSession): string | null {
@@ -529,7 +557,7 @@ async function speakToExotel(
     const ttsPayload: SarvamTtsBody = {
       text: text.slice(0, 2500),
       target_language_code: languageCode,
-      model: session.ttsModel || env.sarvam.ttsModel || "bulbul:v3",
+      model: session.ttsModel || env.sarvam.ttsModel || "bulbul:v2",
       speech_sample_rate: (session.ttsSampleRate || env.sarvam.ttsSpeechSampleRate || "8000").toString(),
       output_audio_codec: "wav",
     };
@@ -633,6 +661,57 @@ async function speakToExotel(
   }
 }
 
+/** Index of last char of a speakable slice, or -1 (buffer more). */
+function findNextSpeakCut(s: string): number {
+  if (s.length === 0) return -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch && ".!?\n।".includes(ch)) {
+      if (i === s.length - 1 || /\s/.test(s[i + 1]!)) return i;
+    }
+  }
+  if (s.length >= 140) {
+    const lim = 100;
+    const sp = s.lastIndexOf(" ", lim);
+    if (sp > 30) return sp - 1;
+    return lim - 1;
+  }
+  return -1;
+}
+
+/**
+ * Buffers LLM token deltas and calls `speakToExotel` per sentence (or ~100 chars) so audio can start before the full reply finishes.
+ */
+function createStreamingVoiceTts(
+  ws: WebSocket,
+  session: VoicebotSession,
+  ttsLanguage: string,
+  log?: FastifyRequest["log"]
+) {
+  let buffer = "";
+  return {
+    async pushDelta(text: string): Promise<void> {
+      buffer += text;
+      for (;;) {
+        const cut = findNextSpeakCut(buffer);
+        if (cut < 0) break;
+        const piece = buffer.slice(0, cut + 1).trim();
+        buffer = buffer.slice(cut + 1).replace(/^\s+/, "");
+        if (piece.length > 0) {
+          await speakToExotel(ws, session, piece, ttsLanguage, log);
+        }
+      }
+    },
+    async flushRest(): Promise<void> {
+      const rest = buffer.trim();
+      buffer = "";
+      if (rest.length > 0) {
+        await speakToExotel(ws, session, rest, ttsLanguage, log);
+      }
+    },
+  };
+}
+
 /**
  * Process accumulated inbound audio: STT → Pipeline → TTS → Send to Exotel.
  * This is the core voice agent pipeline for a single utterance.
@@ -675,6 +754,9 @@ async function processUtterance(
   }, "voicebot processing utterance");
 
   const multilingual = await resolveVoicebotMultilingual(session);
+  if (session.llmMaxTokensForVoice === undefined) {
+    await applyCustomerVoiceSettingsToSession(session);
+  }
   const allowedNorm = normalizeAllowedLangList(
     session.allowedLanguageCodes,
     session.defaultLanguageCode || "en-IN"
@@ -735,10 +817,10 @@ async function processUtterance(
       : "en-IN";
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
     if (session.callSessionDbId) {
-      await updateExotelCallSessionLanguage(
+      void updateExotelCallSessionLanguage(
         session.callSessionDbId,
         effectiveLanguage
-      );
+      ).catch(() => {});
     }
     logVoiceStage(log, "stt.done", {
       customerId: session.customerId,
@@ -789,12 +871,21 @@ async function processUtterance(
       question_preview: transcript.slice(0, 500),
     });
 
+    // TTS language for this turn (also used for incremental TTS when RAG streaming is on)
+    const ttsLanguage = multilingual
+      ? mapToTtsLanguage(effectiveLanguage)
+      : "en-IN";
+    const streamToCall =
+      session.ragStreamingForVoice === true
+        ? { ws, ttsLanguage }
+        : undefined;
+
     // === Step 2: Run RAG/Ask Pipeline ===
-    // Reuse the existing ask pipeline via internal function call
     const askResult = await runVoicebotAskPipeline(
       session,
       transcript,
-      log
+      log,
+      streamToCall
     );
 
     if (!askResult || !askResult.answer) {
@@ -815,15 +906,10 @@ async function processUtterance(
       source: askResult.source,
     }, "voicebot pipeline result");
 
-    // === Step 3: TTS + Send ===
-    // ──────────────────────────────────────────────────────────────
-    // English-only TTS when customer_settings.voicebot_multilingual is false.
-    // When true, mapToTtsLanguage follows STT-detected language.
-    // ──────────────────────────────────────────────────────────────
-    const ttsLanguage = multilingual
-      ? mapToTtsLanguage(effectiveLanguage)   // After tenant allowlist clamp
-      : "en-IN";                              // English-only: always English TTS
-    await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
+    // === Step 3: TTS + Send (skip if RAG already streamed audio sentence-by-sentence) ===
+    if (!askResult.spokeIncrementally) {
+      await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
+    }
     const elapsedMs = Date.now() - utteranceStartedAt;
     logVoiceStage(log, "utterance.completed", {
       customerId: session.customerId,
@@ -893,25 +979,47 @@ function mapToTtsLanguage(lang: string): string {
 async function runVoicebotAskPipeline(
   session: VoicebotSession,
   question: string,
-  log?: FastifyRequest["log"]
-): Promise<{ answer: string; source: string; session_id: string } | null> {
+  log?: FastifyRequest["log"],
+  streamCall?: { ws: WebSocket; ttsLanguage: string }
+): Promise<{
+  answer: string;
+  source: string;
+  session_id: string;
+  /** True when TTS was already sent in chunks (RAG stream); skip final speak. */
+  spokeIncrementally?: boolean;
+} | null> {
   try {
-    // Import the pipeline function lazily to avoid circular deps
-    const { generateEmbedding, prepareQuestionForKbEmbedding, chatOpenAI } =
-      await import("../services/llm");
+    const {
+      generateEmbedding,
+      prepareQuestionForKbEmbedding,
+      chatOpenAI,
+      streamChatOpenAI,
+      isEnglishLanguageTag,
+    } = await import("../services/llm");
 
-    // Get customer system prompt and default fallback
-    const customerResult = await pool.query(
-      `SELECT system_prompt, rag_use_openai_only, default_no_kb_fallback_instruction FROM customers WHERE id = $1`,
-      [session.customerId]
-    );
-    if (customerResult.rows.length === 0) return null;
+    let customerPrompt: string;
+    let defaultFallbackInstruction: string | null;
 
-    const customerPrompt = customerResult.rows[0].system_prompt;
-    const defaultFallbackInstruction = customerResult.rows[0].default_no_kb_fallback_instruction;
+    if (session.voiceRagCustomerCache) {
+      customerPrompt = session.voiceRagCustomerCache.systemPrompt;
+      defaultFallbackInstruction = session.voiceRagCustomerCache.defaultNoKb;
+    } else {
+      const customerResult = await pool.query(
+        `SELECT system_prompt, default_no_kb_fallback_instruction FROM customers WHERE id = $1`,
+        [session.customerId]
+      );
+      if (customerResult.rows.length === 0) return null;
+      customerPrompt = customerResult.rows[0].system_prompt;
+      defaultFallbackInstruction =
+        customerResult.rows[0].default_no_kb_fallback_instruction;
+      session.voiceRagCustomerCache = {
+        systemPrompt: customerPrompt,
+        defaultNoKb: defaultFallbackInstruction,
+      };
+    }
 
     const ragTrace = createRagTrace(log);
-    // Overlap KB translate+embed (Sarvam + self-hosted nomic) with session/agent DB work
+    // Overlap: translate+embed || chat history (no dependency between them)
     const embedPipeline = (async () => {
       voiceTrace(log, "pipeline.rag.embedding", {
         customerId: session.customerId,
@@ -943,6 +1051,9 @@ async function runVoicebotAskPipeline(
     })();
 
     await ensureVoicebotChatSessionForUtterance(session, log);
+    if (!session.chatSessionId) return null;
+
+    const historyP = loadVoicebotChatHistory(session);
 
     let agentPrompt = customerPrompt;
     let agentFallbackInstruction: string | null = null;
@@ -968,7 +1079,8 @@ async function runVoicebotAskPipeline(
       || defaultFallbackInstruction 
       || 'respond with a polite message like "I don\'t have an answer for that right now" then ask 1-2 follow-up questions related to the conversation context to keep the discussion going and explore sales opportunities.';
 
-    const { embedding } = await embedPipeline;
+    const [embedBundle, history] = await Promise.all([embedPipeline, historyP]);
+    const { embedding } = embedBundle;
 
     // KB vector search
     const embeddingStr = `[${embedding.join(",")}]`;
@@ -1011,26 +1123,48 @@ async function runVoicebotAskPipeline(
       };
     }
 
+    const top = kbResult.rows[0] as {
+      question: string;
+      answer: string;
+      distance: number | string;
+    };
+    const dist = Number(top.distance);
+    const priorUserTurns = history.filter((h) => h.role === "user").length;
+    const multilingual = session.voicebotMultilingualEffective === true;
+    const canDirectKb =
+      Number.isFinite(dist) &&
+      dist < VOICEBOT_DIRECT_KB_DISTANCE &&
+      priorUserTurns === 0 &&
+      (!multilingual ||
+        isEnglishLanguageTag(session.effectiveSttLanguageThisTurn));
+
+    if (canDirectKb) {
+      const direct = String(top.answer).trim();
+      if (direct.length > 0) {
+        voiceTrace(log, "pipeline.rag.kb_direct", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          exotel_call_session_id: session.callSessionDbId,
+          distance: dist,
+        });
+        await appendVoiceTurnToChat(session, question, direct, {
+          assistantSource: "kb-direct",
+        });
+        return {
+          answer: direct,
+          source: "kb-direct",
+          session_id: session.chatSessionId || "",
+        };
+      }
+    }
+
     // Build context
     const context = kbResult.rows
       .map((m: any, i: number) => `Q${i + 1}: ${m.question}\nA${i + 1}: ${m.answer}`)
       .join("\n\n");
 
-    // Get chat history
-    const { decrypt } = await import("../services/crypto");
-    const historyResult = await pool.query(
-      `SELECT role, content FROM chat_messages
-       WHERE session_id = $1 ORDER BY created_at ASC`,
-      [session.chatSessionId]
-    );
-    const history = historyResult.rows.map((r: any) => ({
-      role: r.role,
-      content: decrypt(r.content),
-    }));
-
     // Build RAG prompt
     // ──────────────────────────────────────────────────────────────
-    const multilingual = session.voicebotMultilingualEffective === true;
     const allowedNorm = normalizeAllowedLangList(
       session.allowedLanguageCodes,
       session.defaultLanguageCode || "en-IN"
@@ -1074,13 +1208,84 @@ async function runVoicebotAskPipeline(
       user_preview: question.slice(0, 300),
     });
 
-    // Call OpenAI (faster for voice)
-    const llmResult = await chatOpenAI(messages, 150);
-    const answer = llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
+    const maxTok = session.llmMaxTokensForVoice ?? 150;
+    const tTop = session.llmTopPVoice;
+    const voiceRagOpts = {
+      temperature: session.llmTemperatureVoice ?? 0.2,
+      top_p:
+        tTop != null && tTop < 1
+          ? tTop
+          : 0.95,
+    };
+    const useLlmStream =
+      streamCall != null &&
+      session.ragStreamingForVoice === true;
+
+    if (useLlmStream) {
+      voiceTrace(log, "pipeline.rag.llm_stream", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        max_tokens: maxTok,
+      });
+      const ttsq = createStreamingVoiceTts(
+        streamCall!.ws,
+        session,
+        streamCall!.ttsLanguage,
+        log
+      );
+      const llmResult = await streamChatOpenAI(
+        messages,
+        maxTok,
+        (d) => ttsq.pushDelta(d),
+        ragTrace,
+        voiceRagOpts
+      );
+      await ttsq.flushRest();
+      const answer =
+        llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
+
+      logVoiceStage(log, "rag.llm.done", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        provider: "openai",
+        mode: "stream",
+        answer_chars: answer.length,
+        cost_usd: llmResult.costUsd,
+      });
+      voiceTrace(log, "pipeline.rag.llm_response", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        exotel_call_session_id: session.callSessionDbId,
+        answer_preview: answer.slice(0, 400),
+        cost_usd: llmResult.costUsd,
+        mode: "stream",
+      });
+      await appendVoiceTurnToChat(session, question, answer, {
+        assistantSource: "openai",
+        openaiCostUsd: llmResult.costUsd,
+      });
+      return {
+        answer,
+        source: "openai",
+        session_id: session.chatSessionId || "",
+        spokeIncrementally: true,
+      };
+    }
+
+    const llmResult = await chatOpenAI(
+      messages,
+      maxTok,
+      ragTrace,
+      voiceRagOpts
+    );
+    const answer =
+      llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
+
     logVoiceStage(log, "rag.llm.done", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
       provider: "openai",
+      mode: "complete",
       answer_chars: answer.length,
       cost_usd: llmResult.costUsd,
     });

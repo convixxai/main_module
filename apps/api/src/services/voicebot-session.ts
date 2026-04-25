@@ -79,6 +79,25 @@ export interface VoicebotSession {
    * Set during each utterance after STT + tenant allowlist clamp; used for TTS and RAG hints.
    */
   effectiveSttLanguageThisTurn?: string;
+  /**
+   * From `customer_settings.llm_max_tokens` at `start` (RAG / voice answer length cap).
+   */
+  llmMaxTokensForVoice?: number;
+  /**
+   * From `customer_settings.rag_streaming_enabled` — stream LLM tokens to TTS in sentence chunks.
+   */
+  ragStreamingForVoice?: boolean;
+  /** From `customer_settings.llm_temperature` (voice RAG). */
+  llmTemperatureVoice?: number | null;
+  /** From `customer_settings.llm_top_p` (voice RAG). */
+  llmTopPVoice?: number | null;
+  /**
+   * Cached from first `runVoicebotAskPipeline` customer row in this call (skip repeated PG round-trips).
+   */
+  voiceRagCustomerCache?: {
+    systemPrompt: string;
+    defaultNoKb: string | null;
+  };
 }
 
 /**
