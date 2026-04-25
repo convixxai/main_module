@@ -5,6 +5,7 @@
 // ============================================================
 
 import type { ExotelMediaFormat } from "../types/exotel-ws";
+import type { CustomerSettings } from "./customer-settings";
 import { PcmChunkBuffer } from "./pcm-audio";
 
 /** State of a single live voicebot call. */
@@ -98,6 +99,14 @@ export interface VoicebotSession {
     systemPrompt: string;
     defaultNoKb: string | null;
   };
+  /**
+   * Full tenant row from `getCustomerSettings` at `start` — drives VAD, RAG caps, webhooks, etc.
+   */
+  customerSettingsSnapshot?: CustomerSettings | null;
+  /** Fired once when `max_call_duration_seconds` elapses. */
+  maxCallDurationTimer?: ReturnType<typeof setTimeout> | null;
+  /** Avoid duplicate `call_end` webhooks when both `stop` and `close` fire. */
+  callEndNotified?: boolean;
 }
 
 /**
@@ -162,6 +171,10 @@ export function removeSession(streamSid: string): void {
     if (session.playbackFallbackTimer) {
       clearTimeout(session.playbackFallbackTimer);
       session.playbackFallbackTimer = null;
+    }
+    if (session.maxCallDurationTimer) {
+      clearTimeout(session.maxCallDurationTimer);
+      session.maxCallDurationTimer = null;
     }
   }
   activeSessions.delete(streamSid);

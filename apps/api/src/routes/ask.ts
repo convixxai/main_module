@@ -10,7 +10,10 @@ import {
   chatOpenAI,
   formatOpenAIClientError,
 } from "../services/llm";
-import { getCustomerSettings } from "../services/customer-settings";
+import {
+  getCustomerSettings,
+  type CustomerSettings,
+} from "../services/customer-settings";
 import {
   createRagTrace,
   type RagTraceFn,
@@ -34,6 +37,7 @@ interface ResolvedAgent {
   id: string;
   name: string;
   systemPrompt: string;
+  noKbFallbackInstruction: string | null;
 }
 
 interface KBMatch {
@@ -49,6 +53,54 @@ interface ChatMessage {
 
 const DIRECT_MATCH_THRESHOLD = 0.3;
 
+function ragTopKAsk(cs: CustomerSettings | null): number {
+  const v = cs?.rag_top_k;
+  if (v != null && Number.isFinite(v))
+    return Math.min(20, Math.max(1, Math.floor(Number(v))));
+  return 3;
+}
+
+function ragDirectThresholdAsk(cs: CustomerSettings | null): number {
+  const v = cs?.rag_distance_threshold;
+  if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2)
+    return Number(v);
+  return DIRECT_MATCH_THRESHOLD;
+}
+
+function trimAskHistoryForRag(
+  cs: CustomerSettings | null,
+  history: ChatMessage[]
+): ChatMessage[] {
+  if (!cs || !cs.rag_use_history) return [];
+  const maxTurns = cs.rag_history_max_turns;
+  const capPairs = maxTurns != null && maxTurns > 0 ? maxTurns : 50;
+  return history.slice(-(capPairs * 2));
+}
+
+function llmMaxTokensAsk(cs: CustomerSettings | null): number {
+  const v = cs?.llm_max_tokens;
+  const n = v != null && Number.isFinite(v) ? Math.floor(Number(v)) : 150;
+  return Math.min(4096, Math.max(8, n));
+}
+
+function openAiRagOptsFromCs(cs: CustomerSettings | null) {
+  const temperature =
+    cs?.llm_temperature != null && Number.isFinite(Number(cs.llm_temperature))
+      ? Number(cs.llm_temperature)
+      : 0.25;
+  const topP =
+    cs?.llm_top_p != null && Number.isFinite(Number(cs.llm_top_p))
+      ? Number(cs.llm_top_p)
+      : undefined;
+  const model =
+    cs?.llm_model_override?.trim() || cs?.openai_model?.trim() || undefined;
+  return {
+    temperature,
+    ...(topP != null && topP < 1 ? { top_p: topP } : {}),
+    ...(model ? { model } : {}),
+  };
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   return Promise.race([
     promise,
@@ -63,7 +115,7 @@ async function resolveAgent(
 ): Promise<ResolvedAgent | null> {
   if (agentId) {
     const result = await pool.query(
-      `SELECT id, name, system_prompt FROM agents
+      `SELECT id, name, system_prompt, no_kb_fallback_instruction FROM agents
        WHERE id = $1 AND customer_id = $2 AND is_active = TRUE`,
       [agentId, customerId]
     );
@@ -72,11 +124,12 @@ async function resolveAgent(
       id: result.rows[0].id,
       name: result.rows[0].name,
       systemPrompt: result.rows[0].system_prompt,
+      noKbFallbackInstruction: result.rows[0].no_kb_fallback_instruction ?? null,
     };
   }
 
   const agents = await pool.query(
-    `SELECT id, name, description, system_prompt FROM agents
+    `SELECT id, name, description, system_prompt, no_kb_fallback_instruction FROM agents
      WHERE customer_id = $1 AND is_active = TRUE
      ORDER BY created_at ASC`,
     [customerId]
@@ -85,7 +138,12 @@ async function resolveAgent(
   if (agents.rows.length === 0) return null;
   if (agents.rows.length === 1) {
     const a = agents.rows[0];
-    return { id: a.id, name: a.name, systemPrompt: a.system_prompt };
+    return {
+      id: a.id,
+      name: a.name,
+      systemPrompt: a.system_prompt,
+      noKbFallbackInstruction: a.no_kb_fallback_instruction ?? null,
+    };
   }
 
   const agentList = agents.rows
@@ -115,6 +173,7 @@ async function resolveAgent(
           id: matched.id,
           name: matched.name,
           systemPrompt: matched.system_prompt,
+          noKbFallbackInstruction: matched.no_kb_fallback_instruction ?? null,
         };
       }
     }
@@ -125,6 +184,7 @@ async function resolveAgent(
     id: fallback.id,
     name: fallback.name,
     systemPrompt: fallback.system_prompt,
+    noKbFallbackInstruction: fallback.no_kb_fallback_instruction ?? null,
   };
 }
 
@@ -133,7 +193,7 @@ async function resolveAgentFromSession(
 ): Promise<ResolvedAgent | null> {
   if (!sessionId) return null;
   const result = await pool.query(
-    `SELECT a.id, a.name, a.system_prompt FROM chat_sessions cs
+    `SELECT a.id, a.name, a.system_prompt, a.no_kb_fallback_instruction FROM chat_sessions cs
      JOIN agents a ON a.id = cs.agent_id AND a.is_active = TRUE
      WHERE cs.id = $1`,
     [sessionId]
@@ -143,6 +203,7 @@ async function resolveAgentFromSession(
     id: result.rows[0].id,
     name: result.rows[0].name,
     systemPrompt: result.rows[0].system_prompt,
+    noKbFallbackInstruction: result.rows[0].no_kb_fallback_instruction ?? null,
   };
 }
 
@@ -235,13 +296,18 @@ function buildRAGMessages(
   systemPrompt: string,
   context: string,
   history: ChatMessage[],
-  question: string
+  question: string,
+  noKbFallback?: string | null
 ) {
+  const noKbLine =
+    noKbFallback && noKbFallback.trim().length > 0
+      ? `\n- If no passage answers the question: ${noKbFallback.trim()}`
+      : "";
   const messages: { role: "system" | "user" | "assistant"; content: string }[] =
     [
       {
         role: "system",
-        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
+        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}${noKbLine}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
       },
     ];
 
@@ -439,11 +505,15 @@ async function runAskPipeline(params: {
     ).catch(() => {});
   }
 
+  const kbLimit = ragTopKAsk(custSettings ?? null);
+  const directTh = ragDirectThresholdAsk(custSettings ?? null);
+
   const tVec0 = Date.now();
   const [matches, history] = await Promise.all([
-    vectorSearchWithDistance(customerId, embedding),
+    vectorSearchWithDistance(customerId, embedding, kbLimit),
     getChatHistory(sessionId),
   ]);
+  const historyForRag = trimAskHistoryForRag(custSettings ?? null, history);
   const vectorHistoryMs = Date.now() - tVec0;
 
   trace?.("vector_search_and_history", {
@@ -454,8 +524,10 @@ async function runAskPipeline(params: {
       kb_question_preview: m.question.slice(0, 300),
       kb_answer_preview: m.answer.slice(0, 300),
     })),
-    direct_match_threshold: DIRECT_MATCH_THRESHOLD,
+    direct_match_threshold: directTh,
+    rag_top_k: kbLimit,
     history_message_count: history.length,
+    history_for_rag_count: historyForRag.length,
     history_preview: history.map((h) => ({
       role: h.role,
       content_preview: h.content.slice(0, 400),
@@ -493,7 +565,7 @@ async function runAskPipeline(params: {
 
   const topMatch = matches[0];
 
-  if (topMatch.distance < DIRECT_MATCH_THRESHOLD && history.length === 0) {
+  if (topMatch.distance < directTh && history.length === 0) {
     trace?.("pipeline_exit", {
       branch: "kb_direct",
       distance: topMatch.distance,
@@ -514,12 +586,25 @@ async function runAskPipeline(params: {
   }
 
   const context = buildContext(matches);
+  const mergedNoKbFallback =
+    agent?.noKbFallbackInstruction?.trim() ||
+    custSettings?.no_kb_fallback_instruction?.trim() ||
+    null;
   const ragMessages = buildRAGMessages(
     systemPrompt,
     context,
-    history,
-    question
+    historyForRag,
+    question,
+    mergedNoKbFallback
   );
+
+  const maxTok = llmMaxTokensAsk(custSettings ?? null);
+  const openaiOpts = openAiRagOptsFromCs(custSettings ?? null);
+  const selfHostedModelOpts = {
+    model: custSettings?.llm_model_override?.trim() || undefined,
+  };
+  const selfHostedOnly =
+    custSettings?.llm_fallback_to_openai === false && ragOpenaiOnly !== true;
 
   trace?.("rag_prompt_built", {
     context_chars: context.length,
@@ -535,41 +620,61 @@ async function runAskPipeline(params: {
   if (ragOpenaiOnly) {
     trace?.("rag_llm_mode", { mode: "openai_only" });
     try {
-      openaiResult = await chatOpenAI(ragMessages, 150, trace);
+      openaiResult = await chatOpenAI(ragMessages, maxTok, trace, openaiOpts);
     } catch (e) {
       openaiCallError = formatOpenAIClientError(e);
       trace?.("openai_chat_exception", { error: openaiCallError });
       openaiResult = null;
     }
+  } else if (selfHostedOnly) {
+    trace?.("rag_llm_mode", { mode: "self_hosted_only_no_openai_fallback" });
+    selfHostedAnswer = await chatSelfHosted(
+      ragMessages,
+      maxTok,
+      trace,
+      selfHostedModelOpts
+    ).catch((e) => {
+      trace?.("self_hosted_llm_failed", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return "";
+    });
   } else if (sequentialLlm) {
     trace?.("rag_llm_mode", { mode: "sequential_self_hosted_then_openai" });
-    selfHostedAnswer = await chatSelfHosted(ragMessages, 150, trace).catch(
-      (e) => {
-        trace?.("self_hosted_llm_failed", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-        return "";
-      }
-    );
+    selfHostedAnswer = await chatSelfHosted(
+      ragMessages,
+      maxTok,
+      trace,
+      selfHostedModelOpts
+    ).catch((e) => {
+      trace?.("self_hosted_llm_failed", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return "";
+    });
     const shFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
     if (shFailed) {
-      openaiResult = await chatOpenAI(ragMessages, 150, trace).catch((e) => {
-        trace?.("openai_chat_failed", {
-          error: formatOpenAIClientError(e),
-        });
-        return null;
-      });
+      openaiResult = await chatOpenAI(ragMessages, maxTok, trace, openaiOpts).catch(
+        (e) => {
+          trace?.("openai_chat_failed", {
+            error: formatOpenAIClientError(e),
+          });
+          return null;
+        }
+      );
     }
   } else {
     trace?.("rag_llm_mode", { mode: "parallel_self_hosted_and_openai" });
     const pair = await Promise.all([
-      chatSelfHosted(ragMessages, 150, trace).catch((e) => {
-        trace?.("self_hosted_llm_failed", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-        return "";
-      }),
-      chatOpenAI(ragMessages, 150, trace).catch((e) => {
+      chatSelfHosted(ragMessages, maxTok, trace, selfHostedModelOpts).catch(
+        (e) => {
+          trace?.("self_hosted_llm_failed", {
+            error: e instanceof Error ? e.message : String(e),
+          });
+          return "";
+        }
+      ),
+      chatOpenAI(ragMessages, maxTok, trace, openaiOpts).catch((e) => {
         trace?.("openai_chat_failed", {
           error: formatOpenAIClientError(e),
         });

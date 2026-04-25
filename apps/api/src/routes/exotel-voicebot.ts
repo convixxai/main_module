@@ -34,6 +34,7 @@ import {
   removeSession,
   nextMarkName,
   getActiveSessionCount,
+  getActiveSessionsForCustomer,
   type VoicebotSession,
 } from "../services/voicebot-session";
 import {
@@ -55,8 +56,12 @@ import {
   redactInboundExotelForLog,
   redactOutboundExotelForLog,
 } from "../services/voicebot-trace";
-import { getCustomerSettings } from "../services/customer-settings";
+import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { createRagTrace } from "../services/rag-trace";
+import {
+  fireTenantWebhook,
+  postSlackIncomingWebhook,
+} from "../services/tenant-webhooks";
 
 // ============================================================
 // Constants
@@ -101,11 +106,20 @@ function pcmRmsEnergy(pcm: Buffer): number {
 /** If Exotel never sends inbound `mark` after our outbound audio, unblock STT after this slack past estimated play time. */
 const PLAYBACK_MARK_FALLBACK_SLACK_MS = 2500;
 
-/** Load `customer_settings` voice flags onto the session (DB only; per customer). */
+function tenantCs(session: VoicebotSession): CustomerSettings | null {
+  return session.customerSettingsSnapshot ?? null;
+}
+
+/** Load full `customer_settings` row onto the session (reuse `prefetched` when already loaded). */
 async function applyCustomerVoiceSettingsToSession(
-  session: VoicebotSession
+  session: VoicebotSession,
+  prefetched?: CustomerSettings | null
 ): Promise<void> {
-  const cs = await getCustomerSettings(session.customerId);
+  const cs =
+    prefetched !== undefined
+      ? prefetched
+      : await getCustomerSettings(session.customerId);
+  session.customerSettingsSnapshot = cs ?? null;
   session.voicebotMultilingualEffective = cs?.voicebot_multilingual === true;
   const d = cs?.default_language_code?.trim();
   session.defaultLanguageCode = d && d.length > 0 ? d : "en-IN";
@@ -122,6 +136,214 @@ async function applyCustomerVoiceSettingsToSession(
   const ltp = cs?.llm_top_p != null ? Number(cs.llm_top_p) : null;
   session.llmTopPVoice =
     ltp != null && Number.isFinite(ltp) ? ltp : null;
+}
+
+function vadSilenceTimeoutMs(session: VoicebotSession): number {
+  const v = tenantCs(session)?.vad_silence_timeout_ms;
+  if (v != null && Number.isFinite(v) && v >= 300 && v <= 30_000) return Math.floor(v);
+  return VAD_SILENCE_TIMEOUT_MS;
+}
+
+function vadEnergyThresholdForListening(session: VoicebotSession): number {
+  const v = tenantCs(session)?.vad_energy_threshold;
+  if (v != null && Number.isFinite(v) && v >= 50 && v <= 5000) return Math.floor(v);
+  return VAD_ENERGY_THRESHOLD;
+}
+
+function maxInboundBufferBytes(session: VoicebotSession): number {
+  const v = tenantCs(session)?.max_utterance_buffer_bytes;
+  if (v != null && Number.isFinite(v) && v >= 64_000 && v <= 50 * 1024 * 1024) return Math.floor(v);
+  return MAX_INBOUND_BUFFER_BYTES;
+}
+
+/** Minimum PCM16 mono bytes to treat as a real utterance (from `vad_min_speech_ms`). */
+function minUtterancePcmBytes(session: VoicebotSession): number {
+  const sr = session.mediaFormat.sample_rate;
+  const ms = tenantCs(session)?.vad_min_speech_ms;
+  const m = ms != null && Number.isFinite(ms) ? Math.max(50, Math.min(10_000, Number(ms))) : 200;
+  return Math.max(320, Math.floor(sr * 2 * (m / 1000)));
+}
+
+function ragTopK(session: VoicebotSession): number {
+  const v = tenantCs(session)?.rag_top_k;
+  if (v != null && Number.isFinite(v)) return Math.min(20, Math.max(1, Math.floor(Number(v))));
+  return 5;
+}
+
+function ragDirectKbDistanceThreshold(session: VoicebotSession): number {
+  const v = tenantCs(session)?.rag_distance_threshold;
+  if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2) return Number(v);
+  return VOICEBOT_DIRECT_KB_DISTANCE;
+}
+
+function resolvedOpenAiModelForVoice(session: VoicebotSession): string | undefined {
+  const cs = tenantCs(session);
+  const o = cs?.llm_model_override?.trim() || cs?.openai_model?.trim();
+  return o && o.length > 0 ? o : undefined;
+}
+
+function notifyCallStartFromSession(session: VoicebotSession): void {
+  const cs = tenantCs(session);
+  if (!cs) return;
+  fireTenantWebhook(
+    cs.webhook_url_call_start,
+    cs.webhook_secret,
+    {
+      event: "call_start",
+      customer_id: session.customerId,
+      call_sid: session.callSid,
+      stream_sid: session.streamSid,
+      from: session.from,
+      to: session.to,
+      chat_session_id: session.chatSessionId,
+      exotel_call_session_id: session.callSessionDbId,
+    },
+    cs.webhook_retry_attempts
+  );
+}
+
+function notifyCallEndOnce(session: VoicebotSession, reason: string): void {
+  if (session.callEndNotified) return;
+  session.callEndNotified = true;
+  notifyCallEndFromSession(session, reason);
+}
+
+function notifyCallEndFromSession(
+  session: VoicebotSession,
+  reason: string
+): void {
+  const cs = tenantCs(session);
+  if (!cs) return;
+  const payload: Record<string, unknown> = {
+    event: "call_end",
+    reason,
+    customer_id: session.customerId,
+    call_sid: session.callSid,
+    stream_sid: session.streamSid,
+    chat_session_id: session.chatSessionId,
+    exotel_call_session_id: session.callSessionDbId,
+  };
+  if (cs.email_notify_call_end && cs.email_recipients.length > 0) {
+    payload.email_notify_call_end = true;
+    payload.email_recipients = cs.email_recipients;
+  }
+  fireTenantWebhook(
+    cs.webhook_url_call_end,
+    cs.webhook_secret,
+    payload,
+    cs.webhook_retry_attempts
+  );
+  void postSlackIncomingWebhook(
+    cs.slack_webhook_url,
+    `Voicebot call end (${reason}): ${session.callSid} · ${session.from} → ${session.to}`
+  );
+}
+
+function fireTranscriptWebhookIfEnabled(
+  session: VoicebotSession,
+  turn: { user: string; assistant: string; source?: string }
+): void {
+  const cs = tenantCs(session);
+  if (!cs || !cs.call_transcript_enabled) return;
+  fireTenantWebhook(
+    cs.webhook_url_transcript,
+    cs.webhook_secret,
+    {
+      event: "transcript_turn",
+      customer_id: session.customerId,
+      call_sid: session.callSid,
+      stream_sid: session.streamSid,
+      exotel_call_session_id: session.callSessionDbId,
+      user: turn.user,
+      assistant: turn.assistant,
+      assistant_source: turn.source ?? null,
+    },
+    cs.webhook_retry_attempts
+  );
+}
+
+function trimRagHistory(
+  session: VoicebotSession,
+  history: { role: string; content: string }[]
+): { role: string; content: string }[] {
+  const cs = tenantCs(session);
+  if (!cs || !cs.rag_use_history) return [];
+  const maxTurns = cs.rag_history_max_turns;
+  const capPairs = maxTurns != null && maxTurns > 0 ? maxTurns : 50;
+  const maxMsgs = Math.min(history.length, capPairs * 2);
+  return history.slice(-maxMsgs);
+}
+
+function textMatchesAnyPhrase(text: string, phrases: string[]): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  for (const p of phrases) {
+    const s = String(p).trim().toLowerCase();
+    if (s && t.includes(s)) return true;
+  }
+  return false;
+}
+
+function tryImmediateBargeInReset(
+  session: VoicebotSession,
+  energy: number,
+  log?: FastifyRequest["log"]
+): boolean {
+  const cs = tenantCs(session);
+  if (!cs?.barge_in_enabled || cs.barge_in_mode !== "immediate") return false;
+  const th =
+    cs.barge_in_energy_threshold != null && Number.isFinite(cs.barge_in_energy_threshold)
+      ? Math.max(50, Math.floor(Number(cs.barge_in_energy_threshold)))
+      : VAD_ENERGY_THRESHOLD;
+  if (energy <= th) return false;
+  if (!session.ttsInProgress && session.pendingMarks.size === 0) return false;
+
+  voiceTrace(log, "pipeline.barge_in.immediate", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    energy,
+    threshold: th,
+  });
+  clearPlaybackMarkFallback(session);
+  session.pendingMarks.clear();
+  session.isSpeaking = false;
+  session.ttsInProgress = false;
+  session.inboundPcm = [];
+  session.inboundBytes = 0;
+  return true;
+}
+
+function scheduleMaxCallDurationTimer(
+  session: VoicebotSession,
+  socket: WebSocket,
+  log?: FastifyRequest["log"]
+): void {
+  const cs = tenantCs(session);
+  const sec = cs?.max_call_duration_seconds;
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return;
+  const ms = Math.min(24 * 3600_000, Math.max(1000, Math.floor(Number(sec) * 1000)));
+  if (session.maxCallDurationTimer) {
+    clearTimeout(session.maxCallDurationTimer);
+    session.maxCallDurationTimer = null;
+  }
+  session.maxCallDurationTimer = setTimeout(() => {
+    session.maxCallDurationTimer = null;
+    log?.warn(
+      { stream_sid: session.streamSid, max_call_duration_seconds: sec },
+      "voicebot: max call duration reached"
+    );
+    voiceTrace(log, "call.max_duration", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      max_call_duration_seconds: sec,
+    });
+    notifyCallEndOnce(session, "max_call_duration");
+    try {
+      socket.close(1000, "max_call_duration");
+    } catch {
+      /* ignore */
+    }
+  }, ms);
 }
 
 /** Normalize to `xx-YY` (e.g. en-IN). */
@@ -390,6 +612,11 @@ async function appendVoiceTurnToChat(
     );
   }
   await touchChatSession(session.chatSessionId);
+  fireTranscriptWebhookIfEnabled(session, {
+    user: userText,
+    assistant: assistantText,
+    source: opts?.assistantSource ?? undefined,
+  });
 }
 
 /** Assistant-only line (e.g. greeting). */
@@ -535,6 +762,63 @@ async function speakToExotel(
 ): Promise<boolean> {
   session.ttsInProgress = true;
   try {
+    const cs = tenantCs(session);
+    const tenantCodec =
+      cs?.tts_output_codec === "mp3" || cs?.tts_output_codec === "wav"
+        ? cs.tts_output_codec
+        : "wav";
+    const codec = tenantCodec === "mp3" ? "wav" : tenantCodec;
+    if (tenantCodec === "mp3") {
+      voiceTrace(log, "pipeline.tts.codec_downgrade", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        requested: "mp3",
+        using: "wav",
+        note: "Exotel PCM path requires WAV from Sarvam",
+      });
+    }
+    const ttsPayload: SarvamTtsBody = {
+      text: text.slice(0, 2500),
+      target_language_code: languageCode,
+      model:
+        session.ttsModel?.trim() ||
+        cs?.tts_model?.trim() ||
+        env.sarvam.ttsModel ||
+        "bulbul:v2",
+      speech_sample_rate: (
+        session.ttsSampleRate ||
+        cs?.tts_default_sample_rate ||
+        parseInt(env.sarvam.ttsSpeechSampleRate, 10) ||
+        22050
+      ).toString(),
+      output_audio_codec: codec,
+    };
+    if (session.ttsSpeaker?.trim()) {
+      ttsPayload.speaker = session.ttsSpeaker.trim();
+    } else if (cs?.tts_default_speaker?.trim()) {
+      ttsPayload.speaker = cs.tts_default_speaker.trim();
+    } else if (env.sarvam.ttsSpeaker) {
+      ttsPayload.speaker = env.sarvam.ttsSpeaker;
+    }
+
+    const pace =
+      session.ttsPace ??
+      (cs?.tts_default_pace != null ? Number(cs.tts_default_pace) : null) ??
+      env.sarvam.ttsPace;
+    if (pace != null && !Number.isNaN(pace)) {
+      ttsPayload.pace = pace;
+    }
+    const pitch =
+      cs?.tts_default_pitch != null ? Number(cs.tts_default_pitch) : null;
+    if (pitch != null && Number.isFinite(pitch)) {
+      ttsPayload.pitch = pitch;
+    }
+    const loudness =
+      cs?.tts_default_loudness != null ? Number(cs.tts_default_loudness) : null;
+    if (loudness != null && Number.isFinite(loudness)) {
+      ttsPayload.loudness = loudness;
+    }
+
     logVoiceStage(log, "tts.start", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -542,6 +826,11 @@ async function speakToExotel(
       exotel_call_session_id: session.callSessionDbId,
       text_chars: text.length,
       languageCode,
+      speech_sample_rate: ttsPayload.speech_sample_rate,
+      tts_model: ttsPayload.model,
+      tts_speaker: ttsPayload.speaker ?? null,
+      tts_pace: ttsPayload.pace ?? null,
+      tts_output_codec: ttsPayload.output_audio_codec ?? null,
     });
     voiceTrace(log, "pipeline.tts.request", {
       customerId: session.customerId,
@@ -551,26 +840,15 @@ async function speakToExotel(
       text_chars: text.length,
       text_preview: text.slice(0, 400),
       languageCode,
-      sample_rate: session.mediaFormat.sample_rate,
+      speech_sample_rate: ttsPayload.speech_sample_rate,
+      tts_model: ttsPayload.model,
+      tts_speaker: ttsPayload.speaker ?? null,
+      tts_pace: ttsPayload.pace ?? null,
+      tts_pitch: ttsPayload.pitch ?? null,
+      tts_loudness: ttsPayload.loudness ?? null,
+      tts_output_codec: ttsPayload.output_audio_codec ?? null,
+      exotel_stream_sample_rate: session.mediaFormat.sample_rate,
     });
-
-    const ttsPayload: SarvamTtsBody = {
-      text: text.slice(0, 2500),
-      target_language_code: languageCode,
-      model: session.ttsModel || env.sarvam.ttsModel || "bulbul:v2",
-      speech_sample_rate: (session.ttsSampleRate || env.sarvam.ttsSpeechSampleRate || "8000").toString(),
-      output_audio_codec: "wav",
-    };
-    if (session.ttsSpeaker) {
-      ttsPayload.speaker = session.ttsSpeaker;
-    } else if (env.sarvam.ttsSpeaker) {
-      ttsPayload.speaker = env.sarvam.ttsSpeaker;
-    }
-    
-    const pace = session.ttsPace ?? env.sarvam.ttsPace;
-    if (pace != null && !Number.isNaN(pace)) {
-      ttsPayload.pace = pace;
-    }
 
     const tts = await sarvamTextToSpeech(ttsPayload);
 
@@ -731,12 +1009,13 @@ async function processUtterance(
   session.inboundBytes = 0;
 
   const combinedPcm = Buffer.concat(pcmChunks);
-  if (combinedPcm.length < 1600) {
+  const minBytes = minUtterancePcmBytes(session);
+  if (combinedPcm.length < minBytes) {
     voiceTrace(log, "pipeline.skip_short_utterance", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
       pcm_bytes: combinedPcm.length,
-      min_required: 1600,
+      min_required: minBytes,
     });
     return;
   }
@@ -784,11 +1063,31 @@ async function processUtterance(
       ? undefined          // Multi-language: let Sarvam auto-detect
       : "en-IN";           // English-only: force English transcription
 
+    const csUtterance = tenantCs(session);
+    if (csUtterance?.stt_provider === "elevenlabs") {
+      voiceTrace(log, "pipeline.stt.unsupported_provider", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        stt_provider: csUtterance.stt_provider,
+      });
+      await speakToExotel(
+        ws,
+        session,
+        session.errorText ||
+          "Speech recognition is not available for this account configuration.",
+        "en-IN",
+        log
+      );
+      return;
+    }
+    const sttModel =
+      csUtterance?.stt_model?.trim() || "saaras:v3";
+
     const stt = await sarvamSpeechToText({
       fileBuffer: wavBuffer,
       filename: "utterance.wav",
       mimeType: "audio/wav",
-      model: "saaras:v3",
+      model: sttModel,
       mode: "transcribe",
       language_code: sttLanguageHint,
     });
@@ -875,6 +1174,39 @@ async function processUtterance(
     const ttsLanguage = multilingual
       ? mapToTtsLanguage(effectiveLanguage)
       : "en-IN";
+
+    const csTurn = tenantCs(session);
+    if (
+      csTurn?.stop_words?.length &&
+      textMatchesAnyPhrase(transcript, csTurn.stop_words)
+    ) {
+      voiceTrace(log, "pipeline.stop_word", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        transcript_preview: transcript.slice(0, 200),
+      });
+      return;
+    }
+    if (
+      csTurn?.end_call_keywords?.length &&
+      textMatchesAnyPhrase(transcript, csTurn.end_call_keywords)
+    ) {
+      const bye =
+        csTurn.handoff_to_human_enabled && csTurn.human_agent_transfer_number
+          ? "Thank you for calling. Connecting you to a team member now."
+          : "Thank you for calling. Goodbye.";
+      voiceTrace(log, "pipeline.end_call_keyword", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        transcript_preview: transcript.slice(0, 200),
+      });
+      await appendVoiceTurnToChat(session, transcript, bye, {
+        assistantSource: "end_call_keyword",
+      });
+      await speakToExotel(ws, session, bye, ttsLanguage, log);
+      return;
+    }
+
     const streamToCall =
       session.ragStreamingForVoice === true
         ? { ws, ttsLanguage }
@@ -1074,23 +1406,36 @@ async function runVoicebotAskPipeline(
       }
     }
 
-    // Use agent-specific fallback, or customer default, or system default
-    const noKbFallbackInstruction = agentFallbackInstruction 
-      || defaultFallbackInstruction 
-      || 'respond with a polite message like "I don\'t have an answer for that right now" then ask 1-2 follow-up questions related to the conversation context to keep the discussion going and explore sales opportunities.';
+    const csRag = tenantCs(session);
+    const noKbFallbackInstruction =
+      agentFallbackInstruction?.trim() ||
+      csRag?.no_kb_fallback_instruction?.trim() ||
+      defaultFallbackInstruction?.trim() ||
+      'respond with a polite message like "I don\'t have an answer for that right now" then ask 1-2 follow-up questions related to the conversation context to keep the discussion going and explore sales opportunities.';
 
-    const [embedBundle, history] = await Promise.all([embedPipeline, historyP]);
-    const { embedding } = embedBundle;
+    const [embedBundle, historyRaw] = await Promise.all([embedPipeline, historyP]);
+    const history = trimRagHistory(session, historyRaw);
+    const { embedding, textForEmbedding, translatedForSearch } = embedBundle;
 
     // KB vector search
     const embeddingStr = `[${embedding.join(",")}]`;
+    const kbLimit = ragTopK(session);
     const kbResult = await pool.query(
       `SELECT question, answer, (embedding <=> $2) AS distance
        FROM kb_entries
        WHERE customer_id = $1
        ORDER BY embedding <=> $2
-       LIMIT 3`,
-      [session.customerId, embeddingStr]
+       LIMIT $3`,
+      [session.customerId, embeddingStr, kbLimit]
+    );
+
+    const kbMatchesForLog = kbResult.rows.map(
+      (r: { question?: string; answer?: string; distance?: number | string }, i: number) => ({
+        rank: i + 1,
+        distance: Number(r.distance),
+        question_preview: String(r.question ?? "").slice(0, 200),
+        answer_preview: String(r.answer ?? "").slice(0, 200),
+      })
     );
 
     voiceTrace(log, "pipeline.rag.kb_hit", {
@@ -1098,7 +1443,15 @@ async function runVoicebotAskPipeline(
       stream_sid: session.streamSid,
       exotel_call_session_id: session.callSessionDbId,
       rows: kbResult.rows.length,
-      top_distances: kbResult.rows.map((r: { distance?: number }) => r.distance),
+      top_distances: kbMatchesForLog.map((r) => r.distance),
+      direct_kb_threshold: ragDirectKbDistanceThreshold(session),
+      rag_top_k: kbLimit,
+      translated_for_search: translatedForSearch,
+      question_original_preview: question.slice(0, 240),
+      embedding_text_preview: textForEmbedding.slice(0, 240),
+      stt_language: session.effectiveSttLanguageThisTurn ?? null,
+      multilingual: session.voicebotMultilingualEffective === true,
+      matches: kbMatchesForLog,
     });
 
     if (kbResult.rows.length === 0) {
@@ -1108,6 +1461,11 @@ async function runVoicebotAskPipeline(
         customerId: session.customerId,
         stream_sid: session.streamSid,
         exotel_call_session_id: session.callSessionDbId,
+        translated_for_search: translatedForSearch,
+        question_original_preview: question.slice(0, 240),
+        embedding_text_preview: textForEmbedding.slice(0, 240),
+        stt_language: session.effectiveSttLanguageThisTurn ?? null,
+        multilingual: session.voicebotMultilingualEffective === true,
       });
       await appendVoiceTurnToChat(session, question, noKbAnswer, {
         assistantSource: "kb-empty",
@@ -1131,9 +1489,10 @@ async function runVoicebotAskPipeline(
     const dist = Number(top.distance);
     const priorUserTurns = history.filter((h) => h.role === "user").length;
     const multilingual = session.voicebotMultilingualEffective === true;
+    const directTh = ragDirectKbDistanceThreshold(session);
     const canDirectKb =
       Number.isFinite(dist) &&
-      dist < VOICEBOT_DIRECT_KB_DISTANCE &&
+      dist < directTh &&
       priorUserTurns === 0 &&
       (!multilingual ||
         isEnglishLanguageTag(session.effectiveSttLanguageThisTurn));
@@ -1216,6 +1575,7 @@ async function runVoicebotAskPipeline(
         tTop != null && tTop < 1
           ? tTop
           : 0.95,
+      model: resolvedOpenAiModelForVoice(session),
     };
     const useLlmStream =
       streamCall != null &&
@@ -1347,6 +1707,11 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         return reply.status(404).send({ error: "Voicebot not configured for this tenant" });
       }
 
+      const csBoot = await getCustomerSettings(customerId);
+      if (!csBoot || !csBoot.voicebot_enabled) {
+        return reply.status(403).send({ error: "Voicebot disabled for this tenant" });
+      }
+
       const { voicebot_wss_url: wssUrl } = voicebotUrlsForCustomer(customerId, request);
 
       return reply.send({ url: wssUrl });
@@ -1396,6 +1761,20 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         return;
       }
 
+      let csConn: CustomerSettings | null = null;
+      try {
+        csConn = await getCustomerSettings(customerId);
+      } catch (err) {
+        log.error({ err }, "failed to load customer_settings for voicebot");
+        socket.close(4500, "Internal error");
+        return;
+      }
+      if (!csConn || !csConn.voicebot_enabled) {
+        log.warn({ customerId }, "voicebot disabled in customer_settings");
+        socket.close(4403, "Voicebot disabled");
+        return;
+      }
+
       log.info({ customerId }, "exotel voicebot connection accepted");
 
       // ---- State for this connection ----
@@ -1437,6 +1816,29 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               const startMsg = msg as ExotelStartMessage;
               const details = startMsg.start;
 
+              let csStart: CustomerSettings | null = null;
+              try {
+                csStart = await getCustomerSettings(customerId);
+              } catch (err) {
+                log.error({ err }, "voicebot: customer_settings load failed on start");
+                socket.close(4500, "Internal error");
+                break;
+              }
+              if (!csStart || !csStart.voicebot_enabled) {
+                log.warn({ customerId }, "voicebot start rejected: disabled");
+                socket.close(4403, "Voicebot disabled");
+                break;
+              }
+              const activeForTenant = getActiveSessionsForCustomer(customerId).length;
+              if (activeForTenant >= csStart.max_concurrent_calls) {
+                log.warn(
+                  { customerId, activeForTenant, max: csStart.max_concurrent_calls },
+                  "voicebot start rejected: concurrent limit"
+                );
+                socket.close(4409, "Too many concurrent calls");
+                break;
+              }
+
               session = createSession({
                 streamSid: details.stream_sid,
                 callSid: details.call_sid,
@@ -1470,7 +1872,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               // One chat_sessions row for this call; link via exotel_call_sessions.chat_session_id
               try {
                 await bootstrapVoicebotChatSession(session, log);
-                await applyCustomerVoiceSettingsToSession(session);
+                await applyCustomerVoiceSettingsToSession(session, csStart);
                 session.callSessionDbId = await createCallSession({
                   customerId,
                   callSid: details.call_sid,
@@ -1487,6 +1889,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   defaultLanguageCode: session.defaultLanguageCode,
                   currentLanguageCode: session.defaultLanguageCode,
                 });
+                notifyCallStartFromSession(session);
+                scheduleMaxCallDurationTimer(session, socket, log);
                 await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
                 voiceTrace(log, "call.session_ready", {
                   customerId,
@@ -1545,18 +1949,20 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               const mediaMsg = msg as ExotelMediaMessage;
               const pcm = decodeBase64Pcm(mediaMsg.media.payload);
 
+              const energy = pcmRmsEnergy(pcm);
               // While agent audio is generating or Exotel has not yet ack'd playback via `mark`,
-              // do not buffer inbound for STT/VAD — discard caller audio during playback.
+              // discard inbound unless immediate barge-in clears playback state.
               if (session.ttsInProgress || session.pendingMarks.size > 0) {
-                break;
+                if (!tryImmediateBargeInReset(session, energy, log)) {
+                  break;
+                }
               }
 
               // --- Energy-based VAD ---
               // Exotel sends media chunks every 20ms continuously, even during silence.
               // A simple timeout-based VAD would never fire because chunks always arrive.
               // Instead, measure the audio energy (loudness) to distinguish speech from silence.
-              const energy = pcmRmsEnergy(pcm);
-              const isSpeech = energy > VAD_ENERGY_THRESHOLD;
+              const isSpeech = energy > vadEnergyThresholdForListening(session);
 
               if (isSpeech) {
                 // Caller is speaking — buffer this chunk
@@ -1576,7 +1982,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 session.inboundBytes += pcm.length;
 
                 // Start the silence timer if not already running —
-                // if silence continues for VAD_SILENCE_TIMEOUT_MS, process the utterance.
+                // if silence continues for tenant VAD timeout, process the utterance.
                 // Do NOT reset the timer on subsequent silence chunks;
                 // let it count down from when silence first began.
                 if (!vadTimer) {
@@ -1599,13 +2005,13 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     } finally {
                       isProcessing = false;
                     }
-                  }, VAD_SILENCE_TIMEOUT_MS);
+                  }, vadSilenceTimeoutMs(session));
                 }
               }
               // else: silence and no buffered speech — caller hasn't spoken yet, ignore
 
               // Safety: if buffer is too large, force-process
-              if (session.inboundBytes >= MAX_INBOUND_BUFFER_BYTES) {
+              if (session.inboundBytes >= maxInboundBufferBytes(session)) {
                 if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
                 if (!isProcessing) {
                   isProcessing = true;
@@ -1663,6 +2069,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               if (vadTimer) clearTimeout(vadTimer);
 
               if (session) {
+                notifyCallEndOnce(session, `stopped:${reason}`);
                 if (session.inboundBytes > 0) {
                   log?.warn(
                     {
@@ -1698,6 +2105,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         }, "voicebot: WebSocket closed");
 
         if (session) {
+          notifyCallEndOnce(session, `ws_closed:${code}`);
           if (session.callSessionDbId) {
             endCallSession(session.callSessionDbId, `ws_closed:${code}`).catch(() => {});
           }

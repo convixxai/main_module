@@ -40,17 +40,19 @@ export function formatOpenAIClientError(err: unknown): string {
 export async function chatSelfHosted(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
   maxTokens = 150,
-  trace?: RagTraceFn
+  trace?: RagTraceFn,
+  opts?: { model?: string | null }
 ): Promise<string> {
+  const model = (opts?.model?.trim() || env.llm.model).trim();
   trace?.("self_hosted_llm_request", {
     provider: "self_hosted",
     base_url: env.llm.baseUrl,
-    model: env.llm.model,
+    model,
     max_tokens: maxTokens,
     messages,
   });
   const res = await selfHostedLLM.chat.completions.create({
-    model: env.llm.model,
+    model,
     messages,
     temperature: 0,
     max_tokens: maxTokens,
@@ -94,6 +96,8 @@ function estimateCost(
 export type ChatOpenAIRagOptions = {
   temperature?: number;
   top_p?: number;
+  /** Per-tenant override from `customer_settings.openai_model` / `llm_model_override`. */
+  model?: string | null;
 };
 
 export async function chatOpenAI(
@@ -105,17 +109,18 @@ export async function chatOpenAI(
   const temperature =
     ragOptions?.temperature ?? env.openai.ragTemperature;
   const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
+  const model = (ragOptions?.model?.trim() || env.openai.model).trim();
 
   trace?.("openai_chat_request", {
     provider: "openai",
-    model: env.openai.model,
+    model,
     max_tokens: maxTokens,
     temperature,
     top_p: top_p ?? null,
     messages,
   });
   const res = await openaiClient.chat.completions.create({
-    model: env.openai.model,
+    model,
     messages,
     temperature,
     ...(top_p != null && top_p !== 1 ? { top_p } : {}),
@@ -125,11 +130,11 @@ export async function chatOpenAI(
   const promptTokens = res.usage?.prompt_tokens || 0;
   const completionTokens = res.usage?.completion_tokens || 0;
   const totalTokens = res.usage?.total_tokens || 0;
-  const model = res.model || env.openai.model;
+  const modelUsed = res.model || model;
   const raw = res.choices[0]?.message?.content?.trim() || "";
 
   trace?.("openai_chat_response", {
-    model,
+    model: modelUsed,
     usage: res.usage,
     raw_reply: raw,
     finish_reason: res.choices[0]?.finish_reason,
@@ -140,8 +145,8 @@ export async function chatOpenAI(
     promptTokens,
     completionTokens,
     totalTokens,
-    model,
-    costUsd: estimateCost(model, promptTokens, completionTokens),
+    model: modelUsed,
+    costUsd: estimateCost(modelUsed, promptTokens, completionTokens),
   };
 }
 
@@ -159,10 +164,11 @@ export async function streamChatOpenAI(
   const temperature =
     ragOptions?.temperature ?? env.openai.ragTemperature;
   const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
+  const model = (ragOptions?.model?.trim() || env.openai.model).trim();
 
   trace?.("openai_chat_stream_request", {
     provider: "openai",
-    model: env.openai.model,
+    model,
     max_tokens: maxTokens,
     temperature,
     top_p: top_p ?? null,
@@ -170,7 +176,7 @@ export async function streamChatOpenAI(
   });
 
   const stream = await openaiClient.chat.completions.create({
-    model: env.openai.model,
+    model,
     messages,
     temperature,
     ...(top_p != null && top_p !== 1 ? { top_p } : {}),
@@ -183,7 +189,7 @@ export async function streamChatOpenAI(
   let promptTokens = 0;
   let completionTokens = 0;
   let totalTokens = 0;
-  let model = env.openai.model;
+  let modelUsed = model;
 
   for await (const part of stream) {
     if (part.usage) {
@@ -192,7 +198,7 @@ export async function streamChatOpenAI(
       completionTokens = u.completion_tokens ?? 0;
       totalTokens = u.total_tokens ?? 0;
     }
-    if (part.model) model = part.model;
+    if (part.model) modelUsed = part.model;
     const t = part.choices[0]?.delta?.content ?? "";
     if (t) {
       raw += t;
@@ -206,7 +212,7 @@ export async function streamChatOpenAI(
   }
 
   trace?.("openai_chat_stream_response", {
-    model,
+    model: modelUsed,
     usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
     raw_reply: answer,
   });
@@ -216,8 +222,8 @@ export async function streamChatOpenAI(
     promptTokens,
     completionTokens,
     totalTokens: totalTokens || promptTokens + completionTokens,
-    model,
-    costUsd: estimateCost(model, promptTokens, completionTokens),
+    model: modelUsed,
+    costUsd: estimateCost(modelUsed, promptTokens, completionTokens),
   };
 }
 
