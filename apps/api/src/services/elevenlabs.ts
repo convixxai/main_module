@@ -232,13 +232,35 @@ export function pcmSampleRateFromElevenOutputFormat(outputFormat: string): numbe
   return 8000;
 }
 
+/** Allowed query keys forwarded to ElevenLabs `GET /v1/voices` (see OpenAPI /docs). */
+const ELEVENLABS_LIST_VOICES_QUERY_KEYS = new Set([
+  "show_legacy",
+  "page_size",
+  "next_page_token",
+]);
+
 /** `GET /v1/voices` — list workspace voices (for UI / speaker picker). */
-export async function elevenLabsListVoices(): Promise<{
+export async function elevenLabsListVoices(
+  query?: Record<string, string | undefined> | null
+): Promise<{
   status: number;
   body: unknown;
 }> {
   const key = requireElevenLabsKey();
-  const res = await fetch(`${ELEVEN_BASE}/v1/voices`, {
+  const params = new URLSearchParams();
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined || v === "") continue;
+      if (!ELEVENLABS_LIST_VOICES_QUERY_KEYS.has(k)) continue;
+      params.set(k, v);
+    }
+  }
+  const qs = params.toString();
+  const url =
+    qs.length > 0
+      ? `${ELEVEN_BASE}/v1/voices?${qs}`
+      : `${ELEVEN_BASE}/v1/voices`;
+  const res = await fetch(url, {
     method: "GET",
     headers: { "xi-api-key": key },
     signal: AbortSignal.timeout(60_000),

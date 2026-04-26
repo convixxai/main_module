@@ -80,9 +80,29 @@ export async function elevenlabsApiRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: langParse?.error.flatten() });
       }
 
+      const forward: Record<string, string> = {};
+      const sl = q.show_legacy;
+      if (sl === true || sl === "true" || sl === "1") forward.show_legacy = "true";
+      if (sl === false || sl === "false" || sl === "0") forward.show_legacy = "false";
+      const ps = q.page_size;
+      if (ps !== undefined && ps !== "") {
+        const n = typeof ps === "number" ? ps : parseInt(String(ps), 10);
+        if (Number.isFinite(n) && n > 0 && n <= 500) {
+          forward.page_size = String(Math.floor(n));
+        } else if (String(ps).trim() !== "") {
+          return reply.status(400).send({
+            error: "page_size must be an integer between 1 and 500",
+          });
+        }
+      }
+      const npt = q.next_page_token;
+      if (typeof npt === "string" && npt.trim()) {
+        forward.next_page_token = npt.trim();
+      }
+
       let listed: { status: number; body: unknown };
       try {
-        listed = await elevenLabsListVoices();
+        listed = await elevenLabsListVoices(forward);
       } catch (err) {
         request.log.error({ err }, "ElevenLabs list voices failed");
         return reply.status(502).send({ error: "ElevenLabs request failed" });

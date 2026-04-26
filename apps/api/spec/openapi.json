@@ -54,7 +54,11 @@
     },
     {
       "name": "Voice",
-      "description": "Sarvam speech-to-text and text-to-speech (`x-api-key`)."
+      "description": "Sarvam speech-to-text and text-to-speech (`x-api-key`). For ElevenLabs workspace voices and avatars, see the **ElevenLabs** tag."
+    },
+    {
+      "name": "ElevenLabs",
+      "description": "ElevenLabs workspace **voices** (speaker picker) and tenant-scoped **ElevenLabs avatars** stored in `elevenlabs_avatars`. Use avatars when `customer_settings.tts_provider` is `elevenlabs`; link an agent with `agents.elevenlabs_avatar_id`. Listing voices uses the server `ELEVENLABS_API_KEY`; all routes require `x-api-key`."
     },
     {
       "name": "Exotel Voicebot",
@@ -339,6 +343,214 @@
           "language_voice_map": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/LanguageVoiceMapEntry" } },
           "is_default": { "type": "boolean" },
           "is_active": { "type": "boolean" }
+        }
+      },
+      "ElevenlabsVoiceSettings": {
+        "type": "object",
+        "description": "Maps to ElevenLabs TTS JSON field `voice_settings` (snake_case). Stored on `elevenlabs_avatars.voice_settings` and optional per-locale in `language_voice_map`.",
+        "additionalProperties": true,
+        "properties": {
+          "stability": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Voice consistency vs expressiveness. Lower values allow more emotional range; higher values sound steadier (typical default ~0.5)."
+          },
+          "similarity_boost": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "How closely synthesis matches the source voice (typical default ~0.75)."
+          },
+          "style": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Style strength; availability depends on the ElevenLabs model."
+          },
+          "speed": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 2,
+            "description": "Playback speed multiplier when the model supports it."
+          },
+          "use_speaker_boost": {
+            "type": "boolean",
+            "description": "If true, increases similarity to the original speaker (may add latency)."
+          }
+        }
+      },
+      "ElevenlabsLanguageVoiceMapEntry": {
+        "type": "object",
+        "description": "Per-language override for an ElevenLabs avatar. Parent object keys are BCP-47 tags (e.g. `hi-IN`, `en-IN`). Omitted fields fall back to the avatar’s top-level `voice_id` / `model_id` / `voice_settings`.",
+        "additionalProperties": false,
+        "properties": {
+          "voice_id": {
+            "type": "string",
+            "description": "ElevenLabs `voice_id` for this locale (from GET `/voice/elevenlabs/voices`)."
+          },
+          "model_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional TTS `model_id` for this locale (e.g. `eleven_multilingual_v2`, `eleven_turbo_v2_5`, `eleven_v3`)."
+          },
+          "voice_settings": {
+            "$ref": "#/components/schemas/ElevenlabsVoiceSettings",
+            "description": "Optional locale-specific tuning; merges over the avatar-level `voice_settings` for TTS calls in that language."
+          }
+        }
+      },
+      "ElevenlabsAvatar": {
+        "type": "object",
+        "description": "Row in `elevenlabs_avatars`. Used when the tenant uses ElevenLabs TTS; agents reference it via `agents.elevenlabs_avatar_id`. Not used for Sarvam — use `/avatars` instead.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "customer_id": { "type": "string", "format": "uuid" },
+          "name": {
+            "type": "string",
+            "description": "Display name unique per customer (e.g. “Support EN/HI”)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional notes for admins (persona, use-case)."
+          },
+          "voice_id": {
+            "type": "string",
+            "description": "Default ElevenLabs voice id for synthesis when no `language_voice_map` entry matches the active locale."
+          },
+          "model_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Default ElevenLabs TTS model id. If null, runtime falls back to `customer_settings.tts_model` or server env default."
+          },
+          "voice_settings": {
+            "$ref": "#/components/schemas/ElevenlabsVoiceSettings",
+            "description": "Default ElevenLabs `voice_settings` object (JSON). Merged with locale entry’s `voice_settings` when present."
+          },
+          "language_voice_map": {
+            "type": "object",
+            "description": "Map of BCP-47 code → `{ voice_id?, model_id?, voice_settings? }` for multilingual calls.",
+            "additionalProperties": { "$ref": "#/components/schemas/ElevenlabsLanguageVoiceMapEntry" }
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "At most one default ElevenLabs avatar per customer (partial unique index)."
+          },
+          "is_active": {
+            "type": "boolean",
+            "description": "Inactive avatars are ignored when resolving persona."
+          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ElevenlabsAvatarCreate": {
+        "type": "object",
+        "required": ["name", "voice_id"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "Unique avatar name per customer."
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Optional internal description."
+          },
+          "voice_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "ElevenLabs voice id (see GET `/voice/elevenlabs/voices`)."
+          },
+          "model_id": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "description": "Default TTS model id; null uses tenant/env default."
+          },
+          "voice_settings": {
+            "$ref": "#/components/schemas/ElevenlabsVoiceSettings",
+            "description": "Optional default `voice_settings` for this persona."
+          },
+          "language_voice_map": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/components/schemas/ElevenlabsLanguageVoiceMapEntry" },
+            "description": "Optional per-locale voice/model/settings overrides."
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "If true, clears other defaults for this customer and sets this row as default."
+          },
+          "is_active": {
+            "type": "boolean",
+            "default": true,
+            "description": "Default true. Set false to retire without deleting."
+          }
+        }
+      },
+      "ElevenlabsAvatarUpdate": {
+        "type": "object",
+        "description": "Partial update — all fields optional; at least one required by the API.",
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 2000 },
+          "voice_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "model_id": { "type": "string", "maxLength": 128, "nullable": true },
+          "voice_settings": { "$ref": "#/components/schemas/ElevenlabsVoiceSettings" },
+          "language_voice_map": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/components/schemas/ElevenlabsLanguageVoiceMapEntry" }
+          },
+          "is_default": { "type": "boolean" },
+          "is_active": { "type": "boolean" }
+        }
+      },
+      "ElevenlabsVoiceSummary": {
+        "type": "object",
+        "description": "Shape follows ElevenLabs `Voice` object; extra fields may be present. Use `voice_id` in avatars and `labels.language` for filtering.",
+        "additionalProperties": true,
+        "properties": {
+          "voice_id": { "type": "string", "description": "Use this value as `voice_id` on avatars / agents." },
+          "name": { "type": "string" },
+          "category": {
+            "type": "string",
+            "description": "e.g. `premade`, `cloned`, `professional`, `generated`."
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Common keys: `language` (ISO-ish code), `accent`, `gender`, `age`, `use_case`, `descriptive`."
+          },
+          "description": { "type": "string", "nullable": true },
+          "preview_url": { "type": "string", "format": "uri", "nullable": true },
+          "high_quality_base_model_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Model ids recommended for this voice."
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Voice default settings from ElevenLabs (if returned)."
+          }
+        }
+      },
+      "ElevenlabsVoicesListResponse": {
+        "type": "object",
+        "description": "Convixx wrapper: forwards ElevenLabs `voices` array, optionally filtered by `language` query param.",
+        "properties": {
+          "voices": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ElevenlabsVoiceSummary" }
+          },
+          "filtered_by_language": {
+            "type": "string",
+            "nullable": true,
+            "description": "BCP-47 tag applied **after** fetch (matches `labels.language` / name); null if no filter."
+          }
         }
       }
     }
@@ -1125,6 +1337,18 @@
                   "tts_sample_rate": {
                     "type": "integer",
                     "description": "Audio sample rate in Hz. Exotel requires 8000."
+                  },
+                  "avatar_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "nullable": true,
+                    "description": "Optional FK to `avatars` (Sarvam-oriented persona). Used when `tts_provider` is `sarvam`."
+                  },
+                  "elevenlabs_avatar_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "nullable": true,
+                    "description": "Optional FK to `elevenlabs_avatars`. Used when `customer_settings.tts_provider` is `elevenlabs`."
                   }
                 }
               }
@@ -1147,6 +1371,8 @@
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
                   "tts_sample_rate": 8000,
+                  "avatar_id": null,
+                  "elevenlabs_avatar_id": null,
                   "is_active": true,
                   "created_at": "2026-02-23T10:00:00.000Z",
                   "updated_at": "2026-02-23T10:00:00.000Z"
@@ -1184,6 +1410,8 @@
                     "tts_model": "bulbul:v3",
                     "tts_speaker": null,
                     "tts_sample_rate": 8000,
+                    "avatar_id": null,
+                    "elevenlabs_avatar_id": null,
                     "is_active": true,
                     "created_at": "2026-02-23T10:00:00.000Z",
                     "updated_at": "2026-02-23T10:00:00.000Z"
@@ -1234,6 +1462,8 @@
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
                   "tts_sample_rate": 8000,
+                  "avatar_id": null,
+                  "elevenlabs_avatar_id": null,
                   "is_active": true,
                   "created_at": "2026-02-23T10:00:00.000Z",
                   "updated_at": "2026-02-23T10:00:00.000Z"
@@ -1306,6 +1536,18 @@
                   "tts_sample_rate": {
                     "type": "integer",
                     "description": "Audio sample rate in Hz. Exotel requires 8000."
+                  },
+                  "avatar_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "nullable": true,
+                    "description": "Optional FK to `avatars` (Sarvam persona)."
+                  },
+                  "elevenlabs_avatar_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "nullable": true,
+                    "description": "Optional FK to `elevenlabs_avatars` (ElevenLabs persona)."
                   }
                 }
               }
@@ -1328,6 +1570,8 @@
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
                   "tts_sample_rate": 8000,
+                  "avatar_id": null,
+                  "elevenlabs_avatar_id": null,
                   "is_active": true,
                   "created_at": "2026-02-23T10:00:00.000Z",
                   "updated_at": "2026-02-23T10:05:00.000Z"
@@ -2928,6 +3172,186 @@
         "responses": {
           "200": { "description": "Avatar set as default", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Avatar" } } } },
           "404": { "description": "Avatar not found" }
+        }
+      }
+    },
+    "/voice/elevenlabs/voices": {
+      "get": {
+        "tags": ["ElevenLabs"],
+        "summary": "List ElevenLabs speakers (voices)",
+        "description": "Proxies ElevenLabs `GET /v1/voices` using the server **ELEVENLABS_API_KEY**. Tenant auth: **x-api-key**.\n\n**Query behavior**\n- `language` — optional BCP-47 tag (e.g. `hi-IN`). When set, the response `voices` array is **filtered client-side** to entries whose `labels.language` or `name` matches (best-effort).\n- `show_legacy`, `page_size`, `next_page_token` — forwarded to ElevenLabs when supported, for pagination and legacy voices.\n\nReturns `{ voices, filtered_by_language }`. Full voice objects may include extra fields from ElevenLabs.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "example": "hi-IN" },
+            "description": "BCP-47 tag. Filters the returned `voices` after fetch (primary language subtag + `labels.language`). Omit to return all voices (subject to ElevenLabs account)."
+          },
+          {
+            "name": "show_legacy",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean", "default": false },
+            "description": "Forwarded to ElevenLabs. If true, include legacy voices in the workspace list."
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 500 },
+            "description": "Forwarded to ElevenLabs for paginated listing when supported."
+          },
+          {
+            "name": "next_page_token",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Forwarded to ElevenLabs to fetch the next page when the upstream response includes pagination tokens."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Voice list (possibly filtered)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ElevenlabsVoicesListResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `language` or `page_size`",
+            "content": { "application/json": { "example": { "error": "Validation details" } } }
+          },
+          "502": {
+            "description": "Upstream ElevenLabs request failed",
+            "content": { "application/json": { "example": { "error": "ElevenLabs request failed" } } }
+          },
+          "503": {
+            "description": "Server missing ELEVENLABS_API_KEY",
+            "content": { "application/json": { "example": { "error": "ELEVENLABS_API_KEY is not configured on this server" } } }
+          }
+        }
+      }
+    },
+    "/elevenlabs-avatars": {
+      "get": {
+        "tags": ["ElevenLabs"],
+        "summary": "List ElevenLabs avatars",
+        "description": "Returns all `elevenlabs_avatars` rows for the authenticated customer (default first, then name). Use with `tts_provider: elevenlabs` and `agents.elevenlabs_avatar_id`.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Array of ElevenLabs avatars",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ElevenlabsAvatar" } }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["ElevenLabs"],
+        "summary": "Create ElevenLabs avatar",
+        "description": "Creates a persona row with default `voice_id`, optional `model_id`, `voice_settings`, and per-locale `language_voice_map`. If `is_default` is true, other defaults for this customer are cleared atomically.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ElevenlabsAvatarCreate" },
+              "example": {
+                "name": "Billing assistant",
+                "description": "English + Hindi, calm delivery",
+                "voice_id": "21m00Tcm4TlvDq8ikWAM",
+                "model_id": "eleven_multilingual_v2",
+                "voice_settings": { "stability": 0.45, "similarity_boost": 0.8, "use_speaker_boost": true },
+                "language_voice_map": {
+                  "hi-IN": { "voice_id": "anotherVoiceId", "model_id": "eleven_multilingual_v2" },
+                  "en-IN": { "voice_settings": { "speed": 1.05 } }
+                },
+                "is_default": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ElevenlabsAvatar" } } }
+          },
+          "400": { "description": "Validation error" },
+          "409": {
+            "description": "Duplicate name for this customer",
+            "content": { "application/json": { "example": { "error": "ElevenLabs avatar with this name already exists for this customer" } } }
+          }
+        }
+      }
+    },
+    "/elevenlabs-avatars/{id}": {
+      "get": {
+        "tags": ["ElevenLabs"],
+        "summary": "Get ElevenLabs avatar",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Avatar", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ElevenlabsAvatar" } } } },
+          "404": { "description": "Not found" }
+        }
+      },
+      "put": {
+        "tags": ["ElevenLabs"],
+        "summary": "Update ElevenLabs avatar",
+        "description": "Partial update. Setting `is_default: true` demotes other defaults atomically.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ElevenlabsAvatarUpdate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Updated", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ElevenlabsAvatar" } } } },
+          "400": { "description": "Validation error" },
+          "404": { "description": "Not found" },
+          "409": { "description": "Name conflict" }
+        }
+      },
+      "delete": {
+        "tags": ["ElevenLabs"],
+        "summary": "Delete ElevenLabs avatar",
+        "description": "Deletes the row. `agents.elevenlabs_avatar_id` is set to NULL for rows that referenced this avatar (`ON DELETE SET NULL`).",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Deleted", "content": { "application/json": { "example": { "ok": true } } } },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/elevenlabs-avatars/{id}/set-default": {
+      "post": {
+        "tags": ["ElevenLabs"],
+        "summary": "Set default ElevenLabs avatar",
+        "description": "Marks this avatar as the customer default (demotes others). At most one default per customer.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Updated avatar", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ElevenlabsAvatar" } } } },
+          "404": { "description": "Not found" }
         }
       }
     }
