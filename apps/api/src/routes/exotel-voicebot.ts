@@ -54,12 +54,14 @@ import {
   elevenLabsSpeechToText,
   elevenLabsSttToSarvamShape,
   elevenLabsTextToSpeech,
-  elevenLabsPcmOutputFormat,
+  elevenLabsWavOutputFormat,
   pcmSampleRateFromElevenOutputFormat,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
   bcp47ToElevenLabsLanguage,
+  ELEVENLABS_RAG_AUDIO_TAGS_RULE,
 } from "../services/elevenlabs";
+import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
   voiceTrace,
   safeJsonForLog,
@@ -530,7 +532,9 @@ async function bootstrapVoicebotChatSession(
   session.chatSessionId = sessionResult.rows[0].id as string;
 
   const agentsResult = await pool.query(
-    `SELECT id, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate FROM agents
+    `SELECT id, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+            avatar_id, elevenlabs_avatar_id
+     FROM agents
      WHERE customer_id = $1 AND is_active = TRUE
      ORDER BY created_at ASC LIMIT 1`,
     [session.customerId]
@@ -818,7 +822,7 @@ async function speakToExotel(
       const modelId = resolveElevenLabsTtsModelId(
         session.ttsModel ?? cs?.tts_model ?? null
       );
-      const outputFormat = elevenLabsPcmOutputFormat(exotelRate);
+      const outputFormat = elevenLabsWavOutputFormat(exotelRate);
 
       logVoiceStage(log, "tts.start", {
         customerId: session.customerId,
@@ -852,6 +856,7 @@ async function speakToExotel(
         text: text.slice(0, 2500),
         modelId,
         outputFormat,
+        voiceSettings: session.elevenlabsVoiceSettings ?? null,
       });
 
       if (elTts.status !== 200) {
@@ -892,9 +897,27 @@ async function speakToExotel(
         stream_sid: session.streamSid,
         pcm_bytes: pcmOut.length,
         tts_provider: "elevenlabs",
+        content_type: elTts.contentType ?? null,
       });
 
-      const srcRate = pcmSampleRateFromElevenOutputFormat(outputFormat);
+      const parsedEl = parseWavPcm16Mono(pcmOut);
+      let srcRate: number;
+      if (parsedEl) {
+        pcmOut = parsedEl.pcm;
+        srcRate = parsedEl.sampleRate;
+      } else {
+        log?.warn(
+          {
+            stream_sid: session.streamSid,
+            output_format: outputFormat,
+            content_type: elTts.contentType ?? null,
+            first_bytes: pcmOut.subarray(0, 16).toString("hex"),
+            body_len: pcmOut.length,
+          },
+          "voicebot: ElevenLabs TTS was not a PCM WAV; treating as raw s16le from output_format"
+        );
+        srcRate = pcmSampleRateFromElevenOutputFormat(outputFormat);
+      }
       if (srcRate !== exotelRate) {
         voiceTrace(log, "pipeline.tts.resample", {
           customerId: session.customerId,
@@ -1300,6 +1323,7 @@ async function processUtterance(
         )
       : "en-IN";
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
+    await applyAgentVoicePersonaToSession(session);
     if (session.callSessionDbId) {
       void updateExotelCallSessionLanguage(
         session.callSessionDbId,
@@ -1575,7 +1599,9 @@ async function runVoicebotAskPipeline(
     let agentFallbackInstruction: string | null = null;
     if (session.agentId) {
       const agentResult = await pool.query(
-        `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction FROM agents WHERE id = $1`,
+        `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
+                avatar_id, elevenlabs_avatar_id
+         FROM agents WHERE id = $1`,
         [session.agentId]
       );
       if (agentResult.rows.length > 0) {
@@ -1587,6 +1613,10 @@ async function runVoicebotAskPipeline(
         session.ttsModel = row.tts_model;
         session.ttsSpeaker = row.tts_speaker;
         session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
+        await applyAgentVoicePersonaToSession(session, {
+          avatarId: row.avatar_id as string | null,
+          elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
+        });
       }
     }
 
@@ -1726,11 +1756,15 @@ async function runVoicebotAskPipeline(
       languageRule =
         "\n- ALWAYS respond in English regardless of the question language.";
     }
+    const elevenLabsTagHint =
+      csRag?.tts_provider === "elevenlabs"
+        ? `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`
+        : "";
     const ragRules = `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}`;
+- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}`;
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {
@@ -2054,8 +2088,11 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
 
               // One chat_sessions row for this call; link via exotel_call_sessions.chat_session_id
               try {
-                await bootstrapVoicebotChatSession(session, log);
                 await applyCustomerVoiceSettingsToSession(session, csStart);
+                await bootstrapVoicebotChatSession(session, log);
+                await applyAgentVoicePersonaToSession(session, {
+                  customerSettings: csStart,
+                });
                 session.callSessionDbId = await createCallSession({
                   customerId,
                   callSid: details.call_sid,

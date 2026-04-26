@@ -13,6 +13,8 @@ const createAgentSchema = z.object({
   tts_model: z.string().optional().nullable(),
   tts_speaker: z.string().optional().nullable(),
   tts_sample_rate: z.number().optional().nullable(),
+  avatar_id: z.string().uuid().optional().nullable(),
+  elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
 });
 
 const updateAgentSchema = z.object({
@@ -25,6 +27,8 @@ const updateAgentSchema = z.object({
   tts_model: z.string().optional().nullable(),
   tts_speaker: z.string().optional().nullable(),
   tts_sample_rate: z.number().optional().nullable(),
+  avatar_id: z.string().uuid().optional().nullable(),
+  elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
 });
 
 export async function agentRoutes(app: FastifyInstance) {
@@ -38,13 +42,43 @@ export async function agentRoutes(app: FastifyInstance) {
       }
 
       const customerId = request.customerId!;
-      const { name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate } = body.data;
+      const {
+        name,
+        description,
+        system_prompt,
+        greeting_text,
+        error_text,
+        tts_pace,
+        tts_model,
+        tts_speaker,
+        tts_sample_rate,
+        avatar_id,
+        elevenlabs_avatar_id,
+      } = body.data;
 
       const result = await pool.query(
-        `INSERT INTO agents (customer_id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING id, customer_id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at`,
-        [customerId, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate]
+        `INSERT INTO agents (
+           customer_id, name, description, system_prompt, greeting_text, error_text,
+           tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, customer_id, name, description, system_prompt, greeting_text, error_text,
+                   tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id,
+                   is_active, created_at, updated_at`,
+        [
+          customerId,
+          name,
+          description,
+          system_prompt,
+          greeting_text,
+          error_text,
+          tts_pace,
+          tts_model,
+          tts_speaker,
+          tts_sample_rate,
+          avatar_id ?? null,
+          elevenlabs_avatar_id ?? null,
+        ]
       );
 
       return reply.status(201).send(result.rows[0]);
@@ -58,7 +92,8 @@ export async function agentRoutes(app: FastifyInstance) {
       const customerId = request.customerId!;
 
       const result = await pool.query(
-        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at
+        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+                avatar_id, elevenlabs_avatar_id, is_active, created_at, updated_at
          FROM agents
          WHERE customer_id = $1
          ORDER BY created_at DESC`,
@@ -77,7 +112,8 @@ export async function agentRoutes(app: FastifyInstance) {
       const { id } = request.params as { id: string };
 
       const result = await pool.query(
-        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at
+        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+                avatar_id, elevenlabs_avatar_id, is_active, created_at, updated_at
          FROM agents
          WHERE id = $1 AND customer_id = $2`,
         [id, customerId]
@@ -102,9 +138,33 @@ export async function agentRoutes(app: FastifyInstance) {
 
       const customerId = request.customerId!;
       const { id } = request.params as { id: string };
-      const { name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate } = body.data;
+      const {
+        name,
+        description,
+        system_prompt,
+        greeting_text,
+        error_text,
+        tts_pace,
+        tts_model,
+        tts_speaker,
+        tts_sample_rate,
+        avatar_id,
+        elevenlabs_avatar_id,
+      } = body.data;
 
-      if (!name && description === undefined && system_prompt === undefined && greeting_text === undefined && error_text === undefined && tts_pace === undefined && tts_model === undefined && tts_speaker === undefined && tts_sample_rate === undefined) {
+      if (
+        !name &&
+        description === undefined &&
+        system_prompt === undefined &&
+        greeting_text === undefined &&
+        error_text === undefined &&
+        tts_pace === undefined &&
+        tts_model === undefined &&
+        tts_speaker === undefined &&
+        tts_sample_rate === undefined &&
+        avatar_id === undefined &&
+        elevenlabs_avatar_id === undefined
+      ) {
         return reply
           .status(400)
           .send({ error: "Provide at least one field to update" });
@@ -159,6 +219,14 @@ export async function agentRoutes(app: FastifyInstance) {
         sets.push(`tts_sample_rate = $${idx++}`);
         values.push(tts_sample_rate);
       }
+      if (avatar_id !== undefined) {
+        sets.push(`avatar_id = $${idx++}`);
+        values.push(avatar_id);
+      }
+      if (elevenlabs_avatar_id !== undefined) {
+        sets.push(`elevenlabs_avatar_id = $${idx++}`);
+        values.push(elevenlabs_avatar_id);
+      }
 
       sets.push(`updated_at = NOW()`);
       values.push(id);
@@ -167,7 +235,8 @@ export async function agentRoutes(app: FastifyInstance) {
       const result = await pool.query(
         `UPDATE agents SET ${sets.join(", ")}
          WHERE id = $${idx++} AND customer_id = $${idx}
-         RETURNING id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate, is_active, created_at, updated_at`,
+         RETURNING id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+                   avatar_id, elevenlabs_avatar_id, is_active, created_at, updated_at`,
         values
       );
 

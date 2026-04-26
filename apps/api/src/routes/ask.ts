@@ -29,6 +29,7 @@ import {
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
   bcp47ToElevenLabsLanguage,
+  ELEVENLABS_RAG_AUDIO_TAGS_RULE,
 } from "../services/elevenlabs";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
@@ -305,17 +306,22 @@ function buildRAGMessages(
   context: string,
   history: ChatMessage[],
   question: string,
-  noKbFallback?: string | null
+  noKbFallback?: string | null,
+  opts?: { elevenlabsAudioTags?: boolean }
 ) {
   const noKbLine =
     noKbFallback && noKbFallback.trim().length > 0
       ? `\n- If no passage answers the question: ${noKbFallback.trim()}`
       : "";
+  const elHint =
+    opts?.elevenlabsAudioTags === true
+      ? `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`
+      : "";
   const messages: { role: "system" | "user" | "assistant"; content: string }[] =
     [
       {
         role: "system",
-        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}${noKbLine}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
+        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}${noKbLine}${elHint}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
       },
     ];
 
@@ -603,7 +609,8 @@ async function runAskPipeline(params: {
     context,
     historyForRag,
     question,
-    mergedNoKbFallback
+    mergedNoKbFallback,
+    { elevenlabsAudioTags: custSettings?.tts_provider === "elevenlabs" }
   );
 
   const maxTok = llmMaxTokensAsk(custSettings ?? null);

@@ -6,6 +6,7 @@
 
 import type { ExotelMediaFormat } from "../types/exotel-ws";
 import type { CustomerSettings } from "./customer-settings";
+import type { ElevenLabsVoiceSettingsPayload } from "./elevenlabs";
 import { PcmChunkBuffer } from "./pcm-audio";
 
 /** State of a single live voicebot call. */
@@ -42,6 +43,8 @@ export interface VoicebotSession {
   ttsSpeaker?: string | null;
   /** TTS sample rate override for this session. */
   ttsSampleRate?: number | null;
+  /** ElevenLabs `voice_settings` when using an elevenlabs avatar / persona. */
+  elevenlabsVoiceSettings?: ElevenLabsVoiceSettingsPayload | null;
   /** Outbound PCM chunk buffer (respects Exotel 320-byte rules). */
   outboundBuffer: PcmChunkBuffer;
   /** Accumulated inbound PCM from caller (for batch STT or VAD). */

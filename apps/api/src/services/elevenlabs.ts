@@ -143,19 +143,40 @@ export function elevenLabsSttToSarvamShape(body: unknown): {
   };
 }
 
+/** Subset of ElevenLabs `voice_settings` JSON (snake_case per API). */
+export type ElevenLabsVoiceSettingsPayload = {
+  stability?: number;
+  similarity_boost?: number;
+  style?: number;
+  use_speaker_boost?: boolean;
+  speed?: number;
+};
+
 export type ElevenLabsTtsParams = {
   voiceId: string;
   text: string;
   modelId: string;
-  /** e.g. pcm_8000, pcm_16000 — see ElevenLabs docs */
+  /** e.g. wav_8000, pcm_16000 — see ElevenLabs docs */
   outputFormat: string;
+  voiceSettings?: ElevenLabsVoiceSettingsPayload | null;
 };
+
+/** Append to RAG system prompts when tenant TTS is ElevenLabs (v3-style audio tags). */
+export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs TTS delivery ---
+Your reply will be read by ElevenLabs text-to-speech. For models that support delivery cues, you may insert short audio tags in square brackets before a phrase, e.g. [warmly], [thoughtful], [excited], [sighs], [whispers], [laughs]. Use sparingly (at most one tag every few sentences), only where it helps empathy or clarity on a phone call. Do not chain many tags. Keep tags in English.`;
 
 export async function elevenLabsTextToSpeech(
   params: ElevenLabsTtsParams
-): Promise<{ status: number; body: Buffer | unknown }> {
+): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
   const key = requireElevenLabsKey();
   const q = new URLSearchParams({ output_format: params.outputFormat });
+  const bodyObj: Record<string, unknown> = {
+    text: params.text.slice(0, 2500),
+    model_id: params.modelId,
+  };
+  const vs = normalizeVoiceSettingsForApi(params.voiceSettings);
+  if (vs) bodyObj.voice_settings = vs;
+
   const res = await fetch(
     `${ELEVEN_BASE}/v1/text-to-speech/${encodeURIComponent(params.voiceId)}?${q}`,
     {
@@ -165,10 +186,7 @@ export async function elevenLabsTextToSpeech(
         "Content-Type": "application/json",
         Accept: "audio/*",
       },
-      body: JSON.stringify({
-        text: params.text.slice(0, 2500),
-        model_id: params.modelId,
-      }),
+      body: JSON.stringify(bodyObj),
       signal: AbortSignal.timeout(60_000),
     }
   );
@@ -176,11 +194,22 @@ export async function elevenLabsTextToSpeech(
   const ct = res.headers.get("content-type") || "";
   if (!res.ok) {
     const errBody = ct.includes("json") ? await readJsonBody(res) : await res.text();
-    return { status: res.status, body: errBody };
+    return { status: res.status, body: errBody, contentType: ct };
   }
 
   const buf = Buffer.from(await res.arrayBuffer());
-  return { status: res.status, body: buf };
+  return { status: res.status, body: buf, contentType: ct };
+}
+
+/** Prefer WAV for telephony: same PCM payload as `pcm_*` but with a RIFF header (matches Sarvam path). */
+export function elevenLabsWavOutputFormat(sampleRate: number): string {
+  if (sampleRate <= 8000) return "wav_8000";
+  if (sampleRate <= 16000) return "wav_16000";
+  if (sampleRate <= 22050) return "wav_22050";
+  if (sampleRate <= 24000) return "wav_24000";
+  if (sampleRate <= 32000) return "wav_32000";
+  if (sampleRate <= 48000) return "wav_48000";
+  return "wav_44100";
 }
 
 /** Pick ElevenLabs `output_format` from desired PCM sample rate (telephony). */
@@ -192,17 +221,57 @@ export function elevenLabsPcmOutputFormat(sampleRate: number): string {
   return "pcm_44100";
 }
 
-/** Sample rate of raw PCM returned for `pcm_*` output_format values. */
+/**
+ * Sample rate of decoded PCM after stripping WAV header, or of raw `pcm_*` / `ulaw_*` payloads.
+ * Uses the numeric suffix from formats like `wav_16000`, `pcm_24000`, `ulaw_8000`.
+ */
 export function pcmSampleRateFromElevenOutputFormat(outputFormat: string): number {
   const f = outputFormat.toLowerCase();
-  if (f === "pcm_8000") return 8000;
-  if (f === "pcm_16000") return 16000;
-  if (f === "pcm_22050") return 22050;
-  if (f === "pcm_24000") return 24000;
-  if (f === "pcm_32000") return 32000;
-  if (f === "pcm_44100") return 44100;
-  if (f === "pcm_48000") return 48000;
+  const m = f.match(/_(\d+)$/);
+  if (m) return parseInt(m[1]!, 10);
   return 8000;
+}
+
+/** `GET /v1/voices` — list workspace voices (for UI / speaker picker). */
+export async function elevenLabsListVoices(): Promise<{
+  status: number;
+  body: unknown;
+}> {
+  const key = requireElevenLabsKey();
+  const res = await fetch(`${ELEVEN_BASE}/v1/voices`, {
+    method: "GET",
+    headers: { "xi-api-key": key },
+    signal: AbortSignal.timeout(60_000),
+  });
+  const body = await readJsonBody(res);
+  return { status: res.status, body };
+}
+
+function normalizeVoiceSettingsForApi(
+  raw: ElevenLabsVoiceSettingsPayload | null | undefined
+): ElevenLabsVoiceSettingsPayload | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o: ElevenLabsVoiceSettingsPayload = {};
+  const r = raw as Record<string, unknown>;
+  const num = (k: string) => {
+    const v = r[k];
+    return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  };
+  const bool = (k: string) => {
+    const v = r[k];
+    return typeof v === "boolean" ? v : undefined;
+  };
+  const stability = num("stability");
+  const similarity_boost = num("similarity_boost");
+  const style = num("style");
+  const speed = num("speed");
+  const use_speaker_boost = bool("use_speaker_boost");
+  if (stability !== undefined) o.stability = stability;
+  if (similarity_boost !== undefined) o.similarity_boost = similarity_boost;
+  if (style !== undefined) o.style = style;
+  if (speed !== undefined) o.speed = speed;
+  if (use_speaker_boost !== undefined) o.use_speaker_boost = use_speaker_boost;
+  return Object.keys(o).length ? o : null;
 }
 
 async function readJsonBody(res: Response): Promise<unknown> {
