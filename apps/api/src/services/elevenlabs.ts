@@ -165,6 +165,43 @@ export type ElevenLabsTtsParams = {
 export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs TTS delivery ---
 Your reply will be read by ElevenLabs text-to-speech. For models that support delivery cues, you may insert short audio tags in square brackets before a phrase, e.g. [warmly], [thoughtful], [excited], [sighs], [whispers], [laughs]. Use sparingly (at most one tag every few sentences), only where it helps empathy or clarity on a phone call. Do not chain many tags. Keep tags in English.`;
 
+/** True when the resolved TTS model id is ElevenLabs v3 (expressive / audio-tag oriented). */
+export function elevenLabsTtsModelIsV3(modelId: string | null | undefined): boolean {
+  const id = (modelId || "").trim().toLowerCase();
+  return id === "eleven_v3";
+}
+
+/**
+ * Extra RAG instructions when TTS uses `eleven_v3`: model should pick tags from user turn + history.
+ */
+export const ELEVENLABS_V3_AUDIO_DELIVERY_RULE = `--- ElevenLabs v3 expressive delivery ---
+Your answer will be spoken with ElevenLabs **v3**, which uses bracketed **audio tags** before a phrase to set tone (e.g. [happy], [sympathetic], [excited], [calm], [warmly], [thoughtful], [curious], [whispers], [laughs], [sighs]).
+
+You must choose tags **yourself** from: (1) the user's latest message, (2) prior turns in this conversation, and (3) the situation implied by the knowledgebase answer — so the voice matches empathy, energy, and clarity.
+
+Rules:
+- Put **one** tag immediately before the sentence or clause it colours, e.g. [happy] That's wonderful to hear. / [sympathetic] I'm sorry you're going through that.
+- **Sparingly**: roughly one tag per one or two short sentences — never a stack of tags or a tag on every clause.
+- **Vary** tags across turns when mood changes; do not repeat the same tag every reply.
+- Tag names in **English** only. Tags are additive: they must not replace accurate RAG content or language rules.`;
+
+/**
+ * Fragment to append under RAG rules when tenant uses ElevenLabs TTS.
+ * Adds v3-specific guidance when the resolved model is `eleven_v3` (from customer/agent \`tts_model\` after {@link resolveElevenLabsTtsModelId}).
+ */
+export function buildElevenLabsRagAudioTagHintForProvider(
+  ttsProvider: string | null | undefined,
+  ttsModelRaw: string | null | undefined
+): string {
+  if (ttsProvider !== "elevenlabs") return "";
+  const resolved = resolveElevenLabsTtsModelId(ttsModelRaw);
+  let s = `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`;
+  if (elevenLabsTtsModelIsV3(resolved)) {
+    s += `\n${ELEVENLABS_V3_AUDIO_DELIVERY_RULE}\n`;
+  }
+  return s;
+}
+
 export async function elevenLabsTextToSpeech(
   params: ElevenLabsTtsParams
 ): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {

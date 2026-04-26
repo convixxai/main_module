@@ -59,7 +59,7 @@ import {
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
   bcp47ToElevenLabsLanguage,
-  ELEVENLABS_RAG_AUDIO_TAGS_RULE,
+  buildElevenLabsRagAudioTagHintForProvider,
 } from "../services/elevenlabs";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
@@ -137,6 +137,27 @@ function voiceTtsCanRun(session: VoicebotSession): boolean {
     );
   }
   return !!env.sarvam.apiKey;
+}
+
+/** Human-readable reason when `voiceTtsCanRun` is false (for ops logs). */
+function voiceTtsBlockingReason(session: VoicebotSession): string {
+  const cs = tenantCs(session);
+  const p = cs?.tts_provider ?? "sarvam";
+  if (p === "elevenlabs") {
+    if (!env.elevenlabs.apiKey) return "ELEVENLABS_API_KEY is not set";
+    if (
+      !(
+        session.ttsSpeaker?.trim() ||
+        cs?.tts_default_speaker?.trim() ||
+        env.elevenlabs.defaultVoiceId
+      )
+    ) {
+      return "no ElevenLabs voice_id (set agent tts_speaker, customer tts_default_speaker, elevenlabs avatar voice, or ELEVENLABS_DEFAULT_VOICE_ID)";
+    }
+    return "ElevenLabs TTS unavailable (check configuration)";
+  }
+  if (!env.sarvam.apiKey) return "SARVAM_API_KEY is not set";
+  return "Sarvam TTS unavailable (check configuration)";
 }
 
 /** Load full `customer_settings` row onto the session (reuse `prefetched` when already loaded). */
@@ -1180,6 +1201,17 @@ async function processUtterance(
 ): Promise<void> {
   if (session.inboundPcm.length === 0 || session.isClosing) return;
   if (session.ttsInProgress || session.pendingMarks.size > 0) return;
+  if (session.greetingPending) {
+    voiceTrace(log, "pipeline.defer_until_greeting", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      dropped_pcm_chunks: session.inboundPcm.length,
+      dropped_bytes: session.inboundBytes,
+    });
+    session.inboundPcm = [];
+    session.inboundBytes = 0;
+    return;
+  }
   const utteranceStartedAt = Date.now();
 
   // Grab all accumulated PCM and reset
@@ -1756,10 +1788,10 @@ async function runVoicebotAskPipeline(
       languageRule =
         "\n- ALWAYS respond in English regardless of the question language.";
     }
-    const elevenLabsTagHint =
-      csRag?.tts_provider === "elevenlabs"
-        ? `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`
-        : "";
+    const elevenLabsTagHint = buildElevenLabsRagAudioTagHintForProvider(
+      csRag?.tts_provider,
+      session.ttsModel ?? csRag?.tts_model ?? null
+    );
     const ragRules = `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
@@ -2123,29 +2155,54 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 log.error({ err }, "voicebot: failed to bootstrap chat/call session rows");
               }
 
-              // Send greeting audio
-              if (voiceTtsCanRun(session)) {
-                logVoiceStage(log, "greeting.sending", {
-                  customerId,
-                  stream_sid: session.streamSid,
-                  call_sid: session.callSid,
-                });
-                const greetingLang =
-                  session.voicebotMultilingualEffective === true
-                    ? session.defaultLanguageCode || "en-IN"
-                    : "en-IN";
-                await speakToExotel(
-                  socket,
-                  session,
-                  session.greetingText || GREETING_TEXT,
-                  greetingLang,
-                  log
-                );
-                logVoiceStage(log, "greeting.sent", {
-                  customerId,
-                  stream_sid: session.streamSid,
-                  call_sid: session.callSid,
-                });
+              try {
+                if (voiceTtsCanRun(session)) {
+                  logVoiceStage(log, "greeting.sending", {
+                    customerId,
+                    stream_sid: session.streamSid,
+                    call_sid: session.callSid,
+                  });
+                  const greetingLang =
+                    session.voicebotMultilingualEffective === true
+                      ? session.defaultLanguageCode || "en-IN"
+                      : "en-IN";
+                  await speakToExotel(
+                    socket,
+                    session,
+                    session.greetingText || GREETING_TEXT,
+                    greetingLang,
+                    log
+                  );
+                  logVoiceStage(log, "greeting.sent", {
+                    customerId,
+                    stream_sid: session.streamSid,
+                    call_sid: session.callSid,
+                  });
+                } else {
+                  log.warn(
+                    {
+                      customerId,
+                      stream_sid: session.streamSid,
+                      call_sid: session.callSid,
+                      tts_provider: session.customerSettingsSnapshot?.tts_provider ?? "sarvam",
+                      has_elevenlabs_key: !!env.elevenlabs.apiKey,
+                      agent_tts_speaker: session.ttsSpeaker?.trim() || null,
+                      customer_tts_default_speaker:
+                        session.customerSettingsSnapshot?.tts_default_speaker?.trim() || null,
+                      env_default_voice_id: env.elevenlabs.defaultVoiceId ?? null,
+                      reason: voiceTtsBlockingReason(session),
+                    },
+                    "voicebot: greeting audio skipped — outbound TTS not configured"
+                  );
+                  logVoiceStage(log, "greeting.skipped_no_tts", {
+                    customerId,
+                    stream_sid: session.streamSid,
+                    call_sid: session.callSid,
+                    reason: voiceTtsBlockingReason(session),
+                  });
+                }
+              } finally {
+                session.greetingPending = false;
               }
               break;
             }

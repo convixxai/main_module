@@ -29,7 +29,7 @@ import {
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
   bcp47ToElevenLabsLanguage,
-  ELEVENLABS_RAG_AUDIO_TAGS_RULE,
+  buildElevenLabsRagAudioTagHintForProvider,
 } from "../services/elevenlabs";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
@@ -47,6 +47,8 @@ interface ResolvedAgent {
   name: string;
   systemPrompt: string;
   noKbFallbackInstruction: string | null;
+  /** Agent row \`tts_model\` (ElevenLabs id); combined with customer_settings for RAG v3 hints. */
+  ttsModel: string | null;
 }
 
 interface KBMatch {
@@ -124,7 +126,7 @@ async function resolveAgent(
 ): Promise<ResolvedAgent | null> {
   if (agentId) {
     const result = await pool.query(
-      `SELECT id, name, system_prompt, no_kb_fallback_instruction FROM agents
+      `SELECT id, name, system_prompt, no_kb_fallback_instruction, tts_model FROM agents
        WHERE id = $1 AND customer_id = $2 AND is_active = TRUE`,
       [agentId, customerId]
     );
@@ -134,11 +136,12 @@ async function resolveAgent(
       name: result.rows[0].name,
       systemPrompt: result.rows[0].system_prompt,
       noKbFallbackInstruction: result.rows[0].no_kb_fallback_instruction ?? null,
+      ttsModel: result.rows[0].tts_model ?? null,
     };
   }
 
   const agents = await pool.query(
-    `SELECT id, name, description, system_prompt, no_kb_fallback_instruction FROM agents
+    `SELECT id, name, description, system_prompt, no_kb_fallback_instruction, tts_model FROM agents
      WHERE customer_id = $1 AND is_active = TRUE
      ORDER BY created_at ASC`,
     [customerId]
@@ -152,6 +155,7 @@ async function resolveAgent(
       name: a.name,
       systemPrompt: a.system_prompt,
       noKbFallbackInstruction: a.no_kb_fallback_instruction ?? null,
+      ttsModel: a.tts_model ?? null,
     };
   }
 
@@ -183,6 +187,7 @@ async function resolveAgent(
           name: matched.name,
           systemPrompt: matched.system_prompt,
           noKbFallbackInstruction: matched.no_kb_fallback_instruction ?? null,
+          ttsModel: matched.tts_model ?? null,
         };
       }
     }
@@ -194,6 +199,7 @@ async function resolveAgent(
     name: fallback.name,
     systemPrompt: fallback.system_prompt,
     noKbFallbackInstruction: fallback.no_kb_fallback_instruction ?? null,
+    ttsModel: fallback.tts_model ?? null,
   };
 }
 
@@ -202,7 +208,7 @@ async function resolveAgentFromSession(
 ): Promise<ResolvedAgent | null> {
   if (!sessionId) return null;
   const result = await pool.query(
-    `SELECT a.id, a.name, a.system_prompt, a.no_kb_fallback_instruction FROM chat_sessions cs
+    `SELECT a.id, a.name, a.system_prompt, a.no_kb_fallback_instruction, a.tts_model FROM chat_sessions cs
      JOIN agents a ON a.id = cs.agent_id AND a.is_active = TRUE
      WHERE cs.id = $1`,
     [sessionId]
@@ -213,6 +219,7 @@ async function resolveAgentFromSession(
     name: result.rows[0].name,
     systemPrompt: result.rows[0].system_prompt,
     noKbFallbackInstruction: result.rows[0].no_kb_fallback_instruction ?? null,
+    ttsModel: result.rows[0].tts_model ?? null,
   };
 }
 
@@ -307,16 +314,20 @@ function buildRAGMessages(
   history: ChatMessage[],
   question: string,
   noKbFallback?: string | null,
-  opts?: { elevenlabsAudioTags?: boolean }
+  opts?: {
+    ttsProvider?: string | null;
+    /** Raw \`tts_model\` from agent or customer (resolved inside hint builder). */
+    ttsModelRaw?: string | null;
+  }
 ) {
   const noKbLine =
     noKbFallback && noKbFallback.trim().length > 0
       ? `\n- If no passage answers the question: ${noKbFallback.trim()}`
       : "";
-  const elHint =
-    opts?.elevenlabsAudioTags === true
-      ? `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`
-      : "";
+  const elHint = buildElevenLabsRagAudioTagHintForProvider(
+    opts?.ttsProvider,
+    opts?.ttsModelRaw ?? null
+  );
   const messages: { role: "system" | "user" | "assistant"; content: string }[] =
     [
       {
@@ -610,7 +621,10 @@ async function runAskPipeline(params: {
     historyForRag,
     question,
     mergedNoKbFallback,
-    { elevenlabsAudioTags: custSettings?.tts_provider === "elevenlabs" }
+    {
+      ttsProvider: custSettings?.tts_provider ?? null,
+      ttsModelRaw: agent?.ttsModel ?? custSettings?.tts_model ?? null,
+    }
   );
 
   const maxTok = llmMaxTokensAsk(custSettings ?? null);

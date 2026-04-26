@@ -59,6 +59,11 @@ export interface VoicebotSession {
   isSpeaking: boolean;
   /** True while Sarvam TTS is in flight (before PCM is sent); inbound should not drive STT/VAD yet. */
   ttsInProgress: boolean;
+  /**
+   * Until cleared after the greeting attempt, `processUtterance` must not run — otherwise VAD/STT
+   * can start during bootstrap `await`s and race ahead of (or replace) the greeting TTS.
+   */
+  greetingPending: boolean;
   /** If Exotel never sends inbound `mark` ack, clear pending playback after this timeout. */
   playbackFallbackTimer: ReturnType<typeof setTimeout> | null;
   /** Timestamp when the stream started. */
@@ -149,6 +154,7 @@ export function createSession(params: {
     pendingMarks: new Set(),
     isSpeaking: false,
     ttsInProgress: false,
+    greetingPending: true,
     playbackFallbackTimer: null,
     startedAt: Date.now(),
     customParameters: params.customParameters || {},
