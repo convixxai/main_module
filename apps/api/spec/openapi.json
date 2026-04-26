@@ -421,7 +421,7 @@
           "model_id": {
             "type": "string",
             "nullable": true,
-            "description": "Default ElevenLabs TTS model id. If null, runtime falls back to `customer_settings.tts_model` or server env default."
+            "description": "Default ElevenLabs TTS model id. If null, runtime falls back to `customer_settings.tts_model` or server env default. Choose from the voice’s `high_quality_base_model_ids` or `verified_languages[].model_id` in GET `/voice/elevenlabs/voices`."
           },
           "voice_settings": {
             "$ref": "#/components/schemas/ElevenlabsVoiceSettings",
@@ -469,7 +469,7 @@
             "type": "string",
             "maxLength": 128,
             "nullable": true,
-            "description": "Default TTS model id; null uses tenant/env default."
+            "description": "Default TTS model id; null uses tenant/env default. Prefer a value from the voice’s `high_quality_base_model_ids`, or from `verified_languages[].model_id` for your primary locale."
           },
           "voice_settings": {
             "$ref": "#/components/schemas/ElevenlabsVoiceSettings",
@@ -508,9 +508,21 @@
           "is_active": { "type": "boolean" }
         }
       },
+      "ElevenlabsVerifiedLanguage": {
+        "type": "object",
+        "description": "Per-language capability for a voice. Use `model_id` when building `elevenlabs_avatars.language_voice_map` (same locale as your BCP-47 key, e.g. hi-IN → pick the row with `locale` hi-IN or language hi).",
+        "additionalProperties": true,
+        "properties": {
+          "language": { "type": "string", "description": "ISO 639-1 code (e.g. en, hi)." },
+          "model_id": { "type": "string", "description": "TTS model ElevenLabs uses for this locale." },
+          "accent": { "type": "string", "nullable": true },
+          "locale": { "type": "string", "nullable": true, "description": "BCP-47 or similar (e.g. hi-IN, en-US)." },
+          "preview_url": { "type": "string", "format": "uri", "nullable": true }
+        }
+      },
       "ElevenlabsVoiceSummary": {
         "type": "object",
-        "description": "Shape follows ElevenLabs `Voice` object; extra fields may be present. Use `voice_id` in avatars and `labels.language` for filtering.",
+        "description": "ElevenLabs `Voice` object (pass-through). For avatars: set `voice_id` from here; set default or per-locale `model_id` using `high_quality_base_model_ids` and especially `verified_languages` (multilingual support is often only visible in the latter).",
         "additionalProperties": true,
         "properties": {
           "voice_id": { "type": "string", "description": "Use this value as `voice_id` on avatars / agents." },
@@ -522,25 +534,35 @@
           "labels": {
             "type": "object",
             "additionalProperties": true,
-            "description": "Common keys: `language` (ISO-ish code), `accent`, `gender`, `age`, `use_case`, `descriptive`."
+            "description": "Metadata; `language` is often the **primary** label only (e.g. en). Do not rely on it alone for Hindi/Tamil etc. — check `verified_languages`."
           },
           "description": { "type": "string", "nullable": true },
           "preview_url": { "type": "string", "format": "uri", "nullable": true },
           "high_quality_base_model_ids": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Model ids recommended for this voice."
+            "description": "Models this voice is tuned for; good defaults for `model_id` when a single model suffices."
+          },
+          "verified_languages": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ElevenlabsVerifiedLanguage" },
+            "description": "Locales this voice can speak; each row suggests a `model_id` for that language. Essential for `language_voice_map` (e.g. hi-IN + eleven_multilingual_v2)."
+          },
+          "fine_tuning": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Per-model fine-tuning state from ElevenLabs (`state`, `progress`, etc.). Informational for debugging; not stored in Convixx avatars."
           },
           "settings": {
             "type": "object",
             "additionalProperties": true,
-            "description": "Voice default settings from ElevenLabs (if returned)."
+            "description": "Voice default settings from ElevenLabs (if returned). Optional reference for `voice_settings` on avatars."
           }
         }
       },
       "ElevenlabsVoicesListResponse": {
         "type": "object",
-        "description": "Convixx wrapper: forwards ElevenLabs `voices` array, optionally filtered by `language` query param.",
+        "description": "Convixx wrapper around ElevenLabs list response: always includes `voices`. Optional `has_more` / `next_page_token` are passed through from ElevenLabs when present. `language` / `supports_model` filters run **after** fetch (per page); for a complete filtered list you may need to page until `has_more` is false.",
         "properties": {
           "voices": {
             "type": "array",
@@ -549,7 +571,20 @@
           "filtered_by_language": {
             "type": "string",
             "nullable": true,
-            "description": "BCP-47 tag applied **after** fetch (matches `labels.language` / name); null if no filter."
+            "description": "BCP-47 tag applied after fetch: matches `labels.language`, **`verified_languages`** (`language` / `locale`), or voice `name`. Null if no filter."
+          },
+          "filtered_by_model_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "When `supports_model` was set: model id used to filter (voice must list it in `high_quality_base_model_ids` or any `verified_languages[].model_id`)."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "From ElevenLabs when returned; more pages may exist."
+          },
+          "next_page_token": {
+            "type": "string",
+            "description": "Pass to `next_page_token` query param for the next page (ElevenLabs)."
           }
         }
       }
@@ -3179,7 +3214,7 @@
       "get": {
         "tags": ["ElevenLabs"],
         "summary": "List ElevenLabs speakers (voices)",
-        "description": "Proxies ElevenLabs `GET /v1/voices` using the server **ELEVENLABS_API_KEY**. Tenant auth: **x-api-key**.\n\n**Query behavior**\n- `language` — optional BCP-47 tag (e.g. `hi-IN`). When set, the response `voices` array is **filtered client-side** to entries whose `labels.language` or `name` matches (best-effort).\n- `show_legacy`, `page_size`, `next_page_token` — forwarded to ElevenLabs when supported, for pagination and legacy voices.\n\nReturns `{ voices, filtered_by_language }`. Full voice objects may include extra fields from ElevenLabs.",
+        "description": "Proxies ElevenLabs `GET /v1/voices` using the server **ELEVENLABS_API_KEY**. Tenant auth: **x-api-key**.\n\n**Query behavior**\n- `language` — optional BCP-47 (e.g. `hi-IN`). Filters **after** fetch: matches `labels.language`, **`verified_languages[].language` / `locale`** (important: many premade voices list only `en` in `labels` but Hindi in `verified_languages`), or voice name.\n- `supports_model` — optional TTS model id (e.g. `eleven_multilingual_v2`). Keeps voices that list it in `high_quality_base_model_ids` or in any `verified_languages[].model_id`.\n- `show_legacy`, `page_size`, `next_page_token` — forwarded to ElevenLabs.\n\n**Response** includes full ElevenLabs voice objects. Use `verified_languages` + `high_quality_base_model_ids` when creating `elevenlabs_avatars` (`model_id` / `language_voice_map`). `has_more` / `next_page_token` are passed through when ElevenLabs returns them.",
         "security": [{ "ApiKey": [] }],
         "parameters": [
           {
@@ -3209,6 +3244,13 @@
             "required": false,
             "schema": { "type": "string" },
             "description": "Forwarded to ElevenLabs to fetch the next page when the upstream response includes pagination tokens."
+          },
+          {
+            "name": "supports_model",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "example": "eleven_multilingual_v2", "maxLength": 128 },
+            "description": "After fetch, keep only voices that support this TTS `model_id` (see `high_quality_base_model_ids` or `verified_languages`)."
           }
         ],
         "responses": {
@@ -3221,7 +3263,7 @@
             }
           },
           "400": {
-            "description": "Invalid `language` or `page_size`",
+            "description": "Invalid `language`, `page_size`, or `supports_model`",
             "content": { "application/json": { "example": { "error": "Validation details" } } }
           },
           "502": {

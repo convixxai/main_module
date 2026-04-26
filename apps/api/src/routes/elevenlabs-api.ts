@@ -46,21 +46,72 @@ function isPgUniqueViolation(err: unknown): boolean {
   return e?.code === "23505";
 }
 
-/** Voices from ElevenLabs `labels.language` are often lowercase ISO (e.g. "hi", "en"). */
+/**
+ * Match requested BCP-47 tag against ElevenLabs metadata.
+ * Important: many premade voices have `labels.language` = `en` only, but support Hindi etc.
+ * via `verified_languages` — filtering must use that array too.
+ */
 function voiceMatchesLanguageFilter(
   voice: Record<string, unknown>,
   want: string
 ): boolean {
   const w = want.trim().toLowerCase();
   const primary = w.split("-")[0] || w;
+
   const labels = voice.labels as Record<string, unknown> | undefined;
-  const lang =
+  const labelLang =
     typeof labels?.language === "string" ? labels.language.toLowerCase() : "";
-  if (lang && (lang === primary || lang === w || w.startsWith(lang))) {
+  if (
+    labelLang &&
+    (labelLang === primary ||
+      labelLang === w ||
+      w.startsWith(`${labelLang}-`) ||
+      primary === labelLang)
+  ) {
     return true;
   }
+
+  const verified = voice.verified_languages;
+  if (Array.isArray(verified)) {
+    for (const entry of verified) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const el =
+        typeof e.language === "string" ? e.language.toLowerCase() : "";
+      const loc =
+        typeof e.locale === "string" ? e.locale.toLowerCase().replace(/_/g, "-") : "";
+      if (el === primary || el === w) return true;
+      if (loc === w) return true;
+      if (loc) {
+        const locPrimary = loc.split("-")[0] || "";
+        if (locPrimary === primary) return true;
+      }
+    }
+  }
+
   const name = typeof voice.name === "string" ? voice.name.toLowerCase() : "";
   return name.includes(primary);
+}
+
+/** Voice lists this model in `high_quality_base_model_ids` or a `verified_languages` row. */
+function voiceSupportsModel(
+  voice: Record<string, unknown>,
+  modelId: string
+): boolean {
+  const m = modelId.trim();
+  if (!m) return true;
+  const hq = voice.high_quality_base_model_ids;
+  if (Array.isArray(hq) && hq.some((x) => String(x) === m)) return true;
+  const verified = voice.verified_languages;
+  if (Array.isArray(verified)) {
+    return verified.some(
+      (x) =>
+        x &&
+        typeof x === "object" &&
+        String((x as Record<string, unknown>).model_id) === m
+    );
+  }
+  return false;
 }
 
 export async function elevenlabsApiRoutes(app: FastifyInstance): Promise<void> {
@@ -100,6 +151,14 @@ export async function elevenlabsApiRoutes(app: FastifyInstance): Promise<void> {
         forward.next_page_token = npt.trim();
       }
 
+      const supportsModelRaw =
+        typeof q.supports_model === "string" ? q.supports_model.trim() : "";
+      if (supportsModelRaw.length > 128) {
+        return reply.status(400).send({
+          error: "supports_model must be at most 128 characters",
+        });
+      }
+
       let listed: { status: number; body: unknown };
       try {
         listed = await elevenLabsListVoices(forward);
@@ -112,8 +171,8 @@ export async function elevenlabsApiRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(listed.status).send(listed.body);
       }
 
-      const body = listed.body as { voices?: unknown[] };
-      let voices = Array.isArray(body.voices) ? body.voices : [];
+      const rawBody = listed.body as Record<string, unknown>;
+      let voices = Array.isArray(rawBody.voices) ? rawBody.voices : [];
       if (langParse?.success) {
         const tag = langParse.data;
         voices = voices.filter(
@@ -123,11 +182,30 @@ export async function elevenlabsApiRoutes(app: FastifyInstance): Promise<void> {
             voiceMatchesLanguageFilter(v as Record<string, unknown>, tag)
         );
       }
+      if (supportsModelRaw) {
+        voices = voices.filter(
+          (v) =>
+            v &&
+            typeof v === "object" &&
+            voiceSupportsModel(v as Record<string, unknown>, supportsModelRaw)
+        );
+      }
 
-      return {
+      const payload: Record<string, unknown> = {
         voices,
         filtered_by_language: langParse?.success ? langParse.data : null,
       };
+      if (supportsModelRaw) {
+        payload.filtered_by_model_id = supportsModelRaw;
+      }
+      if (typeof rawBody.has_more === "boolean") {
+        payload.has_more = rawBody.has_more;
+      }
+      if (typeof rawBody.next_page_token === "string") {
+        payload.next_page_token = rawBody.next_page_token;
+      }
+
+      return payload;
     }
   );
 
