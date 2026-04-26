@@ -22,6 +22,14 @@ import {
   sarvamSpeechToText,
   sarvamTextToSpeech,
 } from "../services/sarvam";
+import {
+  elevenLabsSpeechToText,
+  elevenLabsSttToSarvamShape,
+  elevenLabsTextToSpeech,
+  resolveElevenLabsSttModelId,
+  resolveElevenLabsTtsModelId,
+  bcp47ToElevenLabsLanguage,
+} from "../services/elevenlabs";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
 
@@ -936,6 +944,24 @@ function parseSttBody(body: unknown): { transcript: string; language_code: strin
   };
 }
 
+/** ElevenLabs `output_format` for /ask/voice (WAV/MP3 file response). */
+function elevenLabsAskTtsOutputFormat(
+  codec: string,
+  sampleRateStr: string
+): string {
+  const sr = parseInt(sampleRateStr, 10) || 24000;
+  if (codec === "mp3") {
+    if (sr <= 22050) return "mp3_22050_32";
+    return "mp3_44100_128";
+  }
+  if (sr <= 8000) return "wav_8000";
+  if (sr <= 16000) return "wav_16000";
+  if (sr <= 22050) return "wav_22050";
+  if (sr <= 24000) return "wav_24000";
+  if (sr <= 32000) return "wav_32000";
+  return "wav_44100";
+}
+
 export async function askRoutes(app: FastifyInstance) {
   app.post(
     "/ask",
@@ -978,13 +1004,8 @@ export async function askRoutes(app: FastifyInstance) {
       "/ask/voice",
       { preHandler: apiKeyAuth },
       async (request: AuthenticatedRequest, reply) => {
-        if (!env.sarvam.apiKey) {
-          return reply.status(503).send({
-            error: "Sarvam is not configured (SARVAM_API_KEY)",
-          });
-        }
-
         const voiceRequestStarted = Date.now();
+        const customerIdEarly = request.customerId!;
         let fileBuffer: Buffer | null = null;
         let filename = "audio.wav";
         let mimeType = "audio/wav";
@@ -1056,19 +1077,57 @@ export async function askRoutes(app: FastifyInstance) {
           });
         }
 
-        let stt: Awaited<ReturnType<typeof sarvamSpeechToText>>;
+        const cust = await getCustomerSettings(customerIdEarly);
+        const sttProv = cust?.stt_provider ?? "sarvam";
+        const ttsProv = cust?.tts_provider ?? "sarvam";
+        const needSarvam = sttProv === "sarvam" || ttsProv === "sarvam";
+        const needEleven = sttProv === "elevenlabs" || ttsProv === "elevenlabs";
+        if (needSarvam && !env.sarvam.apiKey.trim()) {
+          return reply.status(503).send({
+            error:
+              "Sarvam is not configured (SARVAM_API_KEY required for this tenant's provider settings).",
+          });
+        }
+        if (needEleven && !env.elevenlabs.apiKey) {
+          return reply.status(503).send({
+            error:
+              "ElevenLabs is not configured (ELEVENLABS_API_KEY required for this tenant's provider settings).",
+          });
+        }
+
+        let stt: { status: number; body: unknown };
         const tStt0 = Date.now();
         try {
-          stt = await sarvamSpeechToText({
-            fileBuffer,
-            filename,
-            mimeType,
-            model: fields.stt_model?.trim() || "saaras:v3",
-            mode: modeRaw as (typeof sttModes)[number],
-            language_code: fields.language_code?.trim() || undefined,
-          });
+          if (sttProv === "elevenlabs") {
+            const elModel = resolveElevenLabsSttModelId(
+              fields.stt_model?.trim()
+            );
+            const hint = fields.language_code?.trim();
+            const elLang = hint
+              ? bcp47ToElevenLabsLanguage(hint, {
+                  multilingual: true,
+                  forceEnglish: false,
+                })
+              : undefined;
+            stt = await elevenLabsSpeechToText({
+              fileBuffer,
+              filename,
+              modelId: elModel,
+              languageCode: elLang,
+            });
+          } else {
+            stt = await sarvamSpeechToText({
+              fileBuffer,
+              filename,
+              mimeType,
+              model: fields.stt_model?.trim() || "saaras:v3",
+              mode: modeRaw as (typeof sttModes)[number],
+              language_code: fields.language_code?.trim() || undefined,
+            });
+          }
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Sarvam STT failed";
+          const msg =
+            err instanceof Error ? err.message : "Speech-to-text request failed";
           request.log.error({ err }, "ask/voice STT failed");
           return reply.status(502).send({
             error: msg,
@@ -1096,9 +1155,12 @@ export async function askRoutes(app: FastifyInstance) {
           });
         }
 
-        const { transcript, language_code: sttLanguageCode } = parseSttBody(
-          stt.body
-        );
+        const sttParsed =
+          sttProv === "elevenlabs"
+            ? elevenLabsSttToSarvamShape(stt.body)
+            : parseSttBody(stt.body);
+        const transcript = sttParsed.transcript;
+        const sttLanguageCode = sttParsed.language_code;
         const question = transcript.trim();
         if (!question) {
           return reply.status(400).send({
@@ -1112,7 +1174,7 @@ export async function askRoutes(app: FastifyInstance) {
           });
         }
 
-        const customerId = request.customerId!;
+        const customerId = customerIdEarly;
         const customerDefaultPrompt = request.customerPrompt!;
 
         const voiceFastLlm = /^(1|true|yes|on)$/i.test(
@@ -1152,8 +1214,9 @@ export async function askRoutes(app: FastifyInstance) {
         const sampleRate = fields.speech_sample_rate?.trim() || "24000";
 
         const sttRequestId =
+          sttProv === "sarvam" &&
           typeof (stt.body as { request_id?: unknown })?.request_id ===
-          "string"
+            "string"
             ? (stt.body as { request_id: string }).request_id
             : null;
 
@@ -1167,19 +1230,52 @@ export async function askRoutes(app: FastifyInstance) {
           server_total_ms: 0,
         };
 
-        let tts: Awaited<ReturnType<typeof sarvamTextToSpeech>>;
+        let tts: { status: number; body: unknown };
         const tTts0 = Date.now();
         try {
-          tts = await sarvamTextToSpeech({
-            text: ttsText,
-            target_language_code: targetLang.data,
-            model: "bulbul:v3",
-            speaker: fields.speaker?.trim() || undefined,
-            speech_sample_rate: sampleRate,
-            output_audio_codec: codec,
-          });
+          if (ttsProv === "elevenlabs") {
+            const voiceId =
+              fields.speaker?.trim() ||
+              cust?.tts_default_speaker?.trim() ||
+              env.elevenlabs.defaultVoiceId ||
+              "";
+            if (!voiceId) {
+              throw new Error(
+                "ElevenLabs TTS needs multipart `speaker` (voice_id), or customer_settings.tts_default_speaker, or ELEVENLABS_DEFAULT_VOICE_ID"
+              );
+            }
+            const modelId = resolveElevenLabsTtsModelId(cust?.tts_model ?? null);
+            const outFmt = elevenLabsAskTtsOutputFormat(codec, sampleRate);
+            const el = await elevenLabsTextToSpeech({
+              voiceId,
+              text: ttsText,
+              modelId,
+              outputFormat: outFmt,
+            });
+            if (el.status === 200 && Buffer.isBuffer(el.body)) {
+              tts = {
+                status: 200,
+                body: {
+                  request_id: null,
+                  audios: [el.body.toString("base64")],
+                },
+              };
+            } else {
+              tts = el;
+            }
+          } else {
+            tts = await sarvamTextToSpeech({
+              text: ttsText,
+              target_language_code: targetLang.data,
+              model: "bulbul:v3",
+              speaker: fields.speaker?.trim() || undefined,
+              speech_sample_rate: sampleRate,
+              output_audio_codec: codec,
+            });
+          }
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Sarvam TTS failed";
+          const msg =
+            err instanceof Error ? err.message : "Text-to-speech failed";
           const tts_ms = Date.now() - tTts0;
           request.log.error({ err }, "ask/voice TTS failed");
           return reply.status(200).send({

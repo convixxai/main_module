@@ -60,6 +60,16 @@ export const env = {
     ttsPace: process.env.SARVAM_TTS_PACE ? parseFloat(process.env.SARVAM_TTS_PACE) : undefined,
   },
 
+  /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
+  elevenlabs: {
+    apiKey: (process.env.ELEVENLABS_API_KEY || "").trim(),
+    /** Optional default `voice_id` when tenant/agent has no `tts_default_speaker` / `tts_speaker`. */
+    defaultVoiceId: (process.env.ELEVENLABS_DEFAULT_VOICE_ID || "").trim() || undefined,
+    /** Default TTS model when `customer_settings.tts_model` is missing or Sarvam-specific. */
+    defaultTtsModelId:
+      (process.env.ELEVENLABS_DEFAULT_TTS_MODEL || "eleven_multilingual_v2").trim(),
+  },
+
   /**
    * Legacy env flag; **Exotel Voicebot ignores this** — use `customer_settings.voicebot_multilingual`
    * per tenant instead. Kept for any future non-voice use.

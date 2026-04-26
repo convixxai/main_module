@@ -51,6 +51,16 @@ import {
   type SarvamTtsBody,
 } from "../services/sarvam";
 import {
+  elevenLabsSpeechToText,
+  elevenLabsSttToSarvamShape,
+  elevenLabsTextToSpeech,
+  elevenLabsPcmOutputFormat,
+  pcmSampleRateFromElevenOutputFormat,
+  resolveElevenLabsSttModelId,
+  resolveElevenLabsTtsModelId,
+  bcp47ToElevenLabsLanguage,
+} from "../services/elevenlabs";
+import {
   voiceTrace,
   safeJsonForLog,
   redactInboundExotelForLog,
@@ -108,6 +118,23 @@ const PLAYBACK_MARK_FALLBACK_SLACK_MS = 2500;
 
 function tenantCs(session: VoicebotSession): CustomerSettings | null {
   return session.customerSettingsSnapshot ?? null;
+}
+
+/** Whether outbound TTS can run for this session (provider key + voice id when ElevenLabs). */
+function voiceTtsCanRun(session: VoicebotSession): boolean {
+  const cs = tenantCs(session);
+  const p = cs?.tts_provider ?? "sarvam";
+  if (p === "elevenlabs") {
+    return (
+      !!env.elevenlabs.apiKey &&
+      !!(
+        session.ttsSpeaker?.trim() ||
+        cs?.tts_default_speaker?.trim() ||
+        env.elevenlabs.defaultVoiceId
+      )
+    );
+  }
+  return !!env.sarvam.apiKey;
 }
 
 /** Load full `customer_settings` row onto the session (reuse `prefetched` when already loaded). */
@@ -750,8 +777,7 @@ function sendAudioToExotel(
 }
 
 /**
- * Convert text to PCM audio via Sarvam TTS, then send to Exotel.
- * Returns true if audio was successfully sent.
+ * Convert text to PCM via tenant STT settings (Sarvam or ElevenLabs), then send to Exotel.
  */
 async function speakToExotel(
   ws: WebSocket,
@@ -763,6 +789,136 @@ async function speakToExotel(
   session.ttsInProgress = true;
   try {
     const cs = tenantCs(session);
+    const ttsProvider = cs?.tts_provider ?? "sarvam";
+    const exotelRate = session.mediaFormat.sample_rate;
+
+    if (ttsProvider === "elevenlabs") {
+      if (!env.elevenlabs.apiKey) {
+        session.ttsInProgress = false;
+        log?.error("voicebot TTS: ELEVENLABS_API_KEY not configured");
+        return false;
+      }
+      const voiceId =
+        session.ttsSpeaker?.trim() ||
+        cs?.tts_default_speaker?.trim() ||
+        env.elevenlabs.defaultVoiceId ||
+        "";
+      if (!voiceId) {
+        session.ttsInProgress = false;
+        log?.error(
+          "voicebot TTS: ElevenLabs needs voice_id (agent/session tts_speaker, customer_settings.tts_default_speaker, or ELEVENLABS_DEFAULT_VOICE_ID)"
+        );
+        voiceTrace(log, "pipeline.tts.error", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          reason: "missing_elevenlabs_voice_id",
+        });
+        return false;
+      }
+      const modelId = resolveElevenLabsTtsModelId(
+        session.ttsModel ?? cs?.tts_model ?? null
+      );
+      const outputFormat = elevenLabsPcmOutputFormat(exotelRate);
+
+      logVoiceStage(log, "tts.start", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        call_sid: session.callSid,
+        exotel_call_session_id: session.callSessionDbId,
+        text_chars: text.length,
+        languageCode,
+        tts_provider: "elevenlabs",
+        tts_model: modelId,
+        tts_voice_id: voiceId,
+        output_format: outputFormat,
+      });
+      voiceTrace(log, "pipeline.tts.request", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        call_sid: session.callSid,
+        exotel_call_session_id: session.callSessionDbId,
+        text_chars: text.length,
+        text_preview: text.slice(0, 400),
+        languageCode,
+        tts_provider: "elevenlabs",
+        tts_model: modelId,
+        tts_voice_id: voiceId,
+        output_format: outputFormat,
+        exotel_stream_sample_rate: exotelRate,
+      });
+
+      const elTts = await elevenLabsTextToSpeech({
+        voiceId,
+        text: text.slice(0, 2500),
+        modelId,
+        outputFormat,
+      });
+
+      if (elTts.status !== 200) {
+        session.ttsInProgress = false;
+        log?.error(
+          { status: elTts.status, body: safeJsonForLog(elTts.body) },
+          "voicebot ElevenLabs TTS failed"
+        );
+        voiceTrace(log, "pipeline.tts.error", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          status: elTts.status,
+          body: safeJsonForLog(elTts.body),
+          tts_provider: "elevenlabs",
+        });
+        logVoiceStage(
+          log,
+          "tts.error",
+          {
+            customerId: session.customerId,
+            stream_sid: session.streamSid,
+            status: elTts.status,
+          },
+          "voicebot ElevenLabs TTS failed"
+        );
+        return false;
+      }
+
+      let pcmOut = elTts.body as Buffer;
+      if (!Buffer.isBuffer(pcmOut) || pcmOut.length === 0) {
+        session.ttsInProgress = false;
+        log?.error("voicebot ElevenLabs TTS returned empty body");
+        return false;
+      }
+
+      voiceTrace(log, "pipeline.tts.response", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        pcm_bytes: pcmOut.length,
+        tts_provider: "elevenlabs",
+      });
+
+      const srcRate = pcmSampleRateFromElevenOutputFormat(outputFormat);
+      if (srcRate !== exotelRate) {
+        voiceTrace(log, "pipeline.tts.resample", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          pcm_bytes_before: pcmOut.length,
+          from_sample_rate: srcRate,
+          to_sample_rate: exotelRate,
+        });
+        pcmOut = resamplePcm16(pcmOut, srcRate, exotelRate);
+      }
+
+      sendAudioToExotel(ws, session, pcmOut, log);
+      session.ttsInProgress = false;
+      schedulePlaybackMarkFallback(session, pcmOut.length, exotelRate, log);
+      logVoiceStage(log, "tts.sent_to_exotel", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        pcm_bytes: pcmOut.length,
+        exotel_sample_rate: exotelRate,
+        tts_provider: "elevenlabs",
+      });
+      return true;
+    }
+
     const tenantCodec =
       cs?.tts_output_codec === "mp3" || cs?.tts_output_codec === "wav"
         ? cs.tts_output_codec
@@ -905,7 +1061,6 @@ async function speakToExotel(
       );
     }
 
-    const exotelRate = session.mediaFormat.sample_rate;
     if (srcRate !== exotelRate) {
       voiceTrace(log, "pipeline.tts.resample", {
         customerId: session.customerId,
@@ -925,6 +1080,7 @@ async function speakToExotel(
       stream_sid: session.streamSid,
       pcm_bytes: pcmData.length,
       exotel_sample_rate: exotelRate,
+      tts_provider: "sarvam",
     });
     return true;
   } catch (err) {
@@ -1041,6 +1197,9 @@ async function processUtterance(
     session.defaultLanguageCode || "en-IN"
   );
 
+  const csUtterance = tenantCs(session);
+  const sttProvider = csUtterance?.stt_provider ?? "sarvam";
+
   voiceTrace(log, "pipeline.stt.request", {
     customerId: session.customerId,
     stream_sid: session.streamSid,
@@ -1048,49 +1207,66 @@ async function processUtterance(
     exotel_call_session_id: session.callSessionDbId,
     wav_pcm_bytes: combinedPcm.length,
     sample_rate: session.mediaFormat.sample_rate,
+    stt_provider: sttProvider,
   });
 
   try {
     // === Step 1: STT ===
-    // Create a minimal WAV header for the raw PCM so Sarvam can process it
     const wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
 
-    // ──────────────────────────────────────────────────────────────
-    // English-only STT when customer_settings.voicebot_multilingual is false.
-    // When true, omit language_code so Sarvam auto-detects (8k telephony can be flaky).
-    // ──────────────────────────────────────────────────────────────
     const sttLanguageHint = multilingual
-      ? undefined          // Multi-language: let Sarvam auto-detect
-      : "en-IN";           // English-only: force English transcription
+      ? undefined
+      : "en-IN";
 
-    const csUtterance = tenantCs(session);
-    if (csUtterance?.stt_provider === "elevenlabs") {
-      voiceTrace(log, "pipeline.stt.unsupported_provider", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        stt_provider: csUtterance.stt_provider,
-      });
-      await speakToExotel(
-        ws,
-        session,
-        session.errorText ||
-          "Speech recognition is not available for this account configuration.",
-        "en-IN",
-        log
-      );
-      return;
+    let stt: { status: number; body: unknown };
+
+    if (sttProvider === "elevenlabs") {
+      if (!env.elevenlabs.apiKey) {
+        log?.error("voicebot STT: ELEVENLABS_API_KEY not configured");
+        await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
+        return;
+      }
+      const elModel = resolveElevenLabsSttModelId(csUtterance?.stt_model);
+      const elLang = multilingual
+        ? undefined
+        : bcp47ToElevenLabsLanguage("en-IN", {
+            multilingual: false,
+            forceEnglish: true,
+          });
+      try {
+        stt = await elevenLabsSpeechToText({
+          fileBuffer: wavBuffer,
+          filename: "utterance.wav",
+          modelId: elModel,
+          languageCode: elLang,
+        });
+      } catch (err) {
+        log?.error({ err }, "voicebot ElevenLabs STT failed");
+        await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
+        return;
+      }
+    } else {
+      if (!env.sarvam.apiKey) {
+        log?.error("voicebot STT: SARVAM_API_KEY not configured");
+        await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
+        return;
+      }
+      const sttModel = csUtterance?.stt_model?.trim() || "saaras:v3";
+      try {
+        stt = await sarvamSpeechToText({
+          fileBuffer: wavBuffer,
+          filename: "utterance.wav",
+          mimeType: "audio/wav",
+          model: sttModel,
+          mode: "transcribe",
+          language_code: sttLanguageHint,
+        });
+      } catch (err) {
+        log?.error({ err }, "voicebot Sarvam STT failed");
+        await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
+        return;
+      }
     }
-    const sttModel =
-      csUtterance?.stt_model?.trim() || "saaras:v3";
-
-    const stt = await sarvamSpeechToText({
-      fileBuffer: wavBuffer,
-      filename: "utterance.wav",
-      mimeType: "audio/wav",
-      model: sttModel,
-      mode: "transcribe",
-      language_code: sttLanguageHint,
-    });
 
     if (stt.status !== 200) {
       log?.error({ status: stt.status, body: safeJsonForLog(stt.body) }, "voicebot STT failed");
@@ -1099,14 +1275,23 @@ async function processUtterance(
         stream_sid: session.streamSid,
         status: stt.status,
         body: safeJsonForLog(stt.body),
+        stt_provider: sttProvider,
       });
       await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
       return;
     }
 
-    const sttBody = stt.body as { transcript?: string; language_code?: string };
-    const transcript = sttBody.transcript?.trim();
-    const detectedRaw = sttBody.language_code || "en-IN";
+    let transcript: string;
+    let detectedRaw: string;
+    if (sttProvider === "elevenlabs") {
+      const shaped = elevenLabsSttToSarvamShape(stt.body);
+      transcript = shaped.transcript;
+      detectedRaw = shaped.language_code;
+    } else {
+      const sttBody = stt.body as { transcript?: string; language_code?: string };
+      transcript = sttBody.transcript?.trim() || "";
+      detectedRaw = sttBody.language_code || "en-IN";
+    }
     const effectiveLanguage = multilingual
       ? clampLanguageToAllowed(
           detectedRaw,
@@ -1902,7 +2087,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               }
 
               // Send greeting audio
-              if (env.sarvam.apiKey) {
+              if (voiceTtsCanRun(session)) {
                 logVoiceStage(log, "greeting.sending", {
                   customerId,
                   stream_sid: session.streamSid,
