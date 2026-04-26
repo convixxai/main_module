@@ -326,7 +326,14 @@ export async function prepareQuestionForKbEmbedding(
       translated_preview: text.slice(0, 500),
       used_fallback: false,
     });
-    return { textForEmbedding: text, translatedForSearch: true };
+    // Keep English (for nomic alignment with KB) plus the raw user wording so
+    // transliterations / proper nouns (e.g. "Chhavani") stay in the embedding.
+    const t = text.trim();
+    const combined =
+      t.toLowerCase() === q.trim().toLowerCase() ? t : `${t}\n${q.trim()}`;
+    const capped =
+      combined.length > 3500 ? `${combined.slice(0, 3500)}…` : combined;
+    return { textForEmbedding: capped, translatedForSearch: true };
   } catch (err) {
     opts.trace?.("kb_search_translate_error", { err: String(err) });
     return { textForEmbedding: q, translatedForSearch: false };

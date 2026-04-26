@@ -1326,7 +1326,6 @@ async function runVoicebotAskPipeline(
       prepareQuestionForKbEmbedding,
       chatOpenAI,
       streamChatOpenAI,
-      isEnglishLanguageTag,
     } = await import("../services/llm");
 
     let customerPrompt: string;
@@ -1488,14 +1487,12 @@ async function runVoicebotAskPipeline(
     };
     const dist = Number(top.distance);
     const priorUserTurns = history.filter((h) => h.role === "user").length;
-    const multilingual = session.voicebotMultilingualEffective === true;
     const directTh = ragDirectKbDistanceThreshold(session);
+    // Same as HTTP `/ask`: allow kb-direct on first user turn whenever the vector
+    // match is strong. Gating this to English-only caused Hindi (etc.) to always
+    // take the LLM path and often pick the wrong passage among top-k chunks.
     const canDirectKb =
-      Number.isFinite(dist) &&
-      dist < directTh &&
-      priorUserTurns === 0 &&
-      (!multilingual ||
-        isEnglishLanguageTag(session.effectiveSttLanguageThisTurn));
+      Number.isFinite(dist) && dist < directTh && priorUserTurns === 0;
 
     if (canDirectKb) {
       const direct = String(top.answer).trim();
@@ -1524,6 +1521,7 @@ async function runVoicebotAskPipeline(
 
     // Build RAG prompt
     // ──────────────────────────────────────────────────────────────
+    const multilingual = session.voicebotMultilingualEffective === true;
     const allowedNorm = normalizeAllowedLangList(
       session.allowedLanguageCodes,
       session.defaultLanguageCode || "en-IN"
