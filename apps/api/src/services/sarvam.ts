@@ -286,12 +286,13 @@ export async function sarvamSpeechToTextWebsocket(params: {
 
     ws.on("open", () => {
       const b64 = params.wavBuffer.toString("base64");
-      // Connection-level sample_rate (8/16 kHz) drives decode; per-message field uses 16 kHz enum when not 8k stream.
+      // Must match the WAV in `data` and `sample_rate` query param (`sr`); Exotel is 8 kHz s16le mono.
+      const perMessageRate = String(sr) as "8000" | "16000";
       const audioMsg = {
         audio: {
           data: b64,
           encoding: "audio/wav",
-          sample_rate: "16000",
+          sample_rate: perMessageRate,
         },
       };
       try {
