@@ -60,6 +60,7 @@ import {
   elevenLabsSpeechToText,
   elevenLabsSttToSarvamShape,
   elevenLabsTextToSpeech,
+  elevenLabsTextToSpeechStream,
   pcmSampleRateFromElevenOutputFormat,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
@@ -1130,7 +1131,10 @@ async function speakToExotel(
         modelId,
         outputFormat,
       };
-      let elTts = await elevenLabsTextToSpeech({
+      const useElevenLabsStream = session.ttsStreamingForVoice === true;
+      let elTts = await (useElevenLabsStream
+        ? elevenLabsTextToSpeechStream
+        : elevenLabsTextToSpeech)({
         ...ttsBody,
         voiceSettings: vs,
       });
@@ -1143,7 +1147,9 @@ async function speakToExotel(
           prior_status: elTts.status,
           eleven_v3: elevenLabsTtsModelIsV3(modelId),
         });
-        elTts = await elevenLabsTextToSpeech({ ...ttsBody, voiceSettings: null });
+        elTts = await (useElevenLabsStream
+          ? elevenLabsTextToSpeechStream
+          : elevenLabsTextToSpeech)({ ...ttsBody, voiceSettings: null });
       }
 
       if (
@@ -1159,7 +1165,9 @@ async function speakToExotel(
           prior_voice_id: voiceId,
           fallback_voice_id: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
         });
-        elTts = await elevenLabsTextToSpeech({
+        elTts = await (useElevenLabsStream
+          ? elevenLabsTextToSpeechStream
+          : elevenLabsTextToSpeech)({
           ...ttsBody,
           voiceId: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
           voiceSettings: null,

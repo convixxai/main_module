@@ -26,6 +26,7 @@ import {
   elevenLabsSpeechToText,
   elevenLabsSttToSarvamShape,
   elevenLabsTextToSpeech,
+  elevenLabsTextToSpeechStream,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
   elevenLabsTtsModelIsV3,
@@ -1281,7 +1282,10 @@ export async function askRoutes(app: FastifyInstance) {
             }
             const modelId = resolveElevenLabsTtsModelId(cust?.tts_model ?? null);
             const outFmt = elevenLabsAskTtsOutputFormat(codec, sampleRate, modelId);
-            let el = await elevenLabsTextToSpeech({
+            const useElevenLabsStream = cust?.tts_streaming_enabled === true;
+            let el = await (useElevenLabsStream
+              ? elevenLabsTextToSpeechStream
+              : elevenLabsTextToSpeech)({
               voiceId,
               text: ttsText,
               modelId,
@@ -1292,7 +1296,9 @@ export async function askRoutes(app: FastifyInstance) {
               elevenLabsTtsIsLibraryOrPaymentError(el.status, el.body) &&
               voiceId !== ELEVENLABS_PREMADE_API_SAFE_VOICE_ID
             ) {
-              el = await elevenLabsTextToSpeech({
+              el = await (useElevenLabsStream
+                ? elevenLabsTextToSpeechStream
+                : elevenLabsTextToSpeech)({
                 voiceId: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
                 text: ttsText,
                 modelId,

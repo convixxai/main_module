@@ -192,9 +192,29 @@ export type ElevenLabsTtsParams = {
   voiceSettings?: ElevenLabsVoiceSettingsPayload | null;
 };
 
-/** Append to RAG system prompts when tenant TTS is ElevenLabs (v3-style audio tags). */
+const ELEVENLABS_DEFAULT_HUMAN_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
+  stability: 0.35,
+  similarity_boost: 0.9,
+  style: 0.2,
+  use_speaker_boost: true,
+  speed: 1.0,
+};
+
+/**
+ * ElevenLabs can pronounce bracket delivery tags literally depending on voice/model/account.
+ * Keep LLM-facing text natural, and strip old/generated [warmly]-style prefixes before TTS.
+ */
+export function sanitizeTextForElevenLabsTts(text: string): string {
+  return text
+    .replace(/(^|[\s.!?।…])\[[A-Za-z][A-Za-z\s_-]{0,32}\]\s*/g, "$1")
+    .replace(/\s+([,.!?।…])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** Append to RAG system prompts when tenant TTS is ElevenLabs. */
 export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs TTS delivery ---
-Your reply will be read by ElevenLabs text-to-speech. For models that support delivery cues, you may insert short audio tags in square brackets before a phrase, e.g. [warmly], [thoughtful], [excited], [sighs], [whispers], [laughs]. Use sparingly (at most one tag every few sentences), only where it helps empathy or clarity on a phone call. Do not chain many tags. Keep tags in English.`;
+Your reply will be read by ElevenLabs text-to-speech. Do NOT write bracketed emotion or delivery tags like [warmly], [happy], [sighs], or [laughs], because they may be spoken aloud. Make the voice sound human using natural wording, contractions where appropriate, and short sentences with commas and periods for pauses.`;
 
 /** True when the resolved TTS model id is ElevenLabs v3 (expressive / audio-tag oriented). */
 export function elevenLabsTtsModelIsV3(modelId: string | null | undefined): boolean {
@@ -206,29 +226,28 @@ export function elevenLabsTtsModelIsV3(modelId: string | null | undefined): bool
  * Extra RAG instructions when TTS uses `eleven_v3`: model should pick tags from user turn + history.
  */
 export const ELEVENLABS_V3_AUDIO_DELIVERY_RULE = `--- ElevenLabs v3 expressive delivery ---
-Your answer will be spoken with ElevenLabs **v3**, which uses bracketed **audio tags** before a phrase to set tone (e.g. [happy], [sympathetic], [excited], [calm], [warmly], [thoughtful], [curious], [whispers], [laughs], [sighs]).
+Your answer will be spoken with ElevenLabs **v3**. Do NOT output bracketed audio/emotion tags; in this deployment they are read as words. Express tone through natural phrasing and punctuation only.
 
-You must choose tags **yourself** from: (1) the user's latest message, (2) prior turns in this conversation, and (3) the situation implied by the knowledgebase answer — so the voice matches empathy, energy, and clarity.
+Choose the tone yourself from: (1) the user's latest message, (2) prior turns in this conversation, and (3) the situation implied by the knowledgebase answer — so the voice matches empathy, energy, and clarity.
 
 Rules:
-- Put **one** tag immediately before the sentence or clause it colours, e.g. [happy] That's wonderful to hear. / [sympathetic] I'm sorry you're going through that.
-- **Sparingly**: roughly one tag per one or two short sentences — never a stack of tags or a tag on every clause.
-- **Vary** tags across turns when mood changes; do not repeat the same tag every reply.
-- Tag names in **English** only. Tags are additive: they must not replace accurate RAG content or language rules.`;
+- Never include square-bracket stage directions or emotion labels in the final answer.
+- Use conversational pauses with commas and periods.
+- Vary wording across turns when mood changes; do not repeat the same canned phrase.
+- Tone must not replace accurate RAG content or language rules.`;
 
 /**
  * When `customer_settings.tts_model` is `eleven_v3`: required bracketed emotion/delivery prefix per sentence for LLM output.
  */
 export const ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE = `--- ElevenLabs eleven_v3 — required [emotion] prefixes ---
-Your reply will be read by ElevenLabs **eleven_v3**. You MUST format the **spoken** answer so that **every sentence** starts with **one** short tag in **square brackets** (emotion or delivery), immediately before the words of that sentence.
+Your reply will be read by ElevenLabs **eleven_v3**. Do NOT write square-bracket emotion or delivery prefixes. In this deployment, bracket text is spoken aloud, so it must not appear in the final answer.
 
-Examples: [warmly] Hello, how can I help you today? [curious] Are you looking for a weekend stay?
+Use natural, human delivery instead: short sentences, contractions where appropriate, commas for small pauses, and warm conversational phrasing.
 
 Requirements:
-- **Each sentence** (parts ending with . ! ? … or Devanagari ।, or a clear line break for voice) must begin with exactly one bracket prefix like [happy], [calm], [sympathetic], [excited], [warmly], [thoughtful], [curious], [reassuring], [whispers], [laughs], [sighs], [professional], or similar — **English tag names only**.
-- The full reply MUST contain **at least one** such prefix (a single-sentence answer still starts with a tag).
-- Do **not** omit the opening tag on any sentence. Do not stack multiple tags before one sentence.
-- Tags are for **delivery only**: keep facts accurate per the KNOWLEDGEBASE and obey all language/locale rules; never replace content with tags alone.`;
+- Never include text like [happy], [calm], [warmly], [laughs], [sighs], or any other bracketed stage direction.
+- Keep the answer suitable for phone audio: brief, natural, and easy to speak.
+- Keep facts accurate per the KNOWLEDGEBASE and obey all language/locale rules.`;
 
 /**
  * Fragment to append under RAG rules when tenant uses ElevenLabs TTS.
@@ -258,8 +277,9 @@ export async function elevenLabsTextToSpeech(
 ): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
   const key = requireElevenLabsKey();
   const q = new URLSearchParams({ output_format: params.outputFormat });
+  const cleanText = sanitizeTextForElevenLabsTts(params.text).slice(0, 2500);
   const bodyObj: Record<string, unknown> = {
-    text: params.text.slice(0, 2500),
+    text: cleanText,
     model_id: params.modelId,
   };
   const vs = normalizeVoiceSettingsForApi(params.voiceSettings);
@@ -287,6 +307,50 @@ export async function elevenLabsTextToSpeech(
 
   const buf = Buffer.from(await res.arrayBuffer());
   return { status: res.status, body: buf, contentType: ct };
+}
+
+export async function elevenLabsTextToSpeechStream(
+  params: ElevenLabsTtsParams
+): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
+  const key = requireElevenLabsKey();
+  const q = new URLSearchParams({ output_format: params.outputFormat });
+  const cleanText = sanitizeTextForElevenLabsTts(params.text).slice(0, 2500);
+  const bodyObj: Record<string, unknown> = {
+    text: cleanText,
+    model_id: params.modelId,
+  };
+  const vs = normalizeVoiceSettingsForApi(params.voiceSettings);
+  if (vs) bodyObj.voice_settings = vs;
+
+  const res = await fetch(
+    `${ELEVEN_BASE}/v1/text-to-speech/${encodeURIComponent(params.voiceId)}/stream?${q}`,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": key,
+        "Content-Type": "application/json",
+        Accept: "audio/*",
+      },
+      body: JSON.stringify(bodyObj),
+      signal: AbortSignal.timeout(60_000),
+    }
+  );
+
+  const ct = res.headers.get("content-type") || "";
+  if (!res.ok) {
+    const errBody = ct.includes("json") ? await readJsonBody(res) : await res.text();
+    return { status: res.status, body: errBody, contentType: ct };
+  }
+
+  const chunks: Buffer[] = [];
+  if (res.body) {
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      if (chunk && chunk.length > 0) chunks.push(Buffer.from(chunk));
+    }
+  } else {
+    chunks.push(Buffer.from(await res.arrayBuffer()));
+  }
+  return { status: res.status, body: Buffer.concat(chunks), contentType: ct };
 }
 
 /** Prefer WAV for telephony: same PCM payload as `pcm_*` but with a RIFF header (matches Sarvam path). */
@@ -375,28 +439,29 @@ export async function elevenLabsListVoices(
 function normalizeVoiceSettingsForApi(
   raw: ElevenLabsVoiceSettingsPayload | null | undefined
 ): ElevenLabsVoiceSettingsPayload | null {
-  if (!raw || typeof raw !== "object") return null;
-  const o: ElevenLabsVoiceSettingsPayload = {};
+  const o: ElevenLabsVoiceSettingsPayload = { ...ELEVENLABS_DEFAULT_HUMAN_VOICE_SETTINGS };
+  if (!raw || typeof raw !== "object") return o;
   const r = raw as Record<string, unknown>;
-  const num = (k: string) => {
+  const num = (k: string, min: number, max: number) => {
     const v = r[k];
-    return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+    if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
+    return Math.min(max, Math.max(min, v));
   };
   const bool = (k: string) => {
     const v = r[k];
     return typeof v === "boolean" ? v : undefined;
   };
-  const stability = num("stability");
-  const similarity_boost = num("similarity_boost");
-  const style = num("style");
-  const speed = num("speed");
+  const stability = num("stability", 0, 1);
+  const similarity_boost = num("similarity_boost", 0, 1);
+  const style = num("style", 0, 1);
+  const speed = num("speed", 0.7, 1.0);
   const use_speaker_boost = bool("use_speaker_boost");
   if (stability !== undefined) o.stability = stability;
   if (similarity_boost !== undefined) o.similarity_boost = similarity_boost;
   if (style !== undefined) o.style = style;
   if (speed !== undefined) o.speed = speed;
   if (use_speaker_boost !== undefined) o.use_speaker_boost = use_speaker_boost;
-  return Object.keys(o).length ? o : null;
+  return o;
 }
 
 async function readJsonBody(res: Response): Promise<unknown> {
