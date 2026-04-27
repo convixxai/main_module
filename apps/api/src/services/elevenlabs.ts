@@ -3,13 +3,35 @@ import { env } from "../config/env";
 const ELEVEN_BASE = "https://api.elevenlabs.io";
 
 /**
- * Default ElevenLabs `voice_id` when the tenant has no `elevenlabs_avatars` row and no `tts_speaker` /
- * `tts_default_speaker` / `ELEVENLABS_DEFAULT_VOICE_ID`. Suited to **en / hi / mr** via multilingual models
- * (e.g. `eleven_multilingual_v2`, `eleven_v3`). Override with `ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID`.
+ * Premade voice available on **all** API keys (including free tier). Voice Library IDs return 402
+ * (`paid_plan_required`) for free accounts.
  *
- * Voice: ElevenLabs **Prem** (Hindi-connectable, male). If your API key cannot access it, set the env var.
+ * **Rachel** — works with multilingual models for en/hi/mr text; accent is not Indian. For Indian
+ * library voices, set `ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID` or an `elevenlabs_avatars`
+ * row on a paid plan.
  */
-export const ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID = "sY2peC9GbHX8NCy5enOe";
+export const ELEVENLABS_PREMADE_API_SAFE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+
+/** @alias {@link ELEVENLABS_PREMADE_API_SAFE_VOICE_ID} — default when no other voice is configured */
+export const ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID =
+  ELEVENLABS_PREMADE_API_SAFE_VOICE_ID;
+
+/** True when TTS failed because the voice requires a paid plan / Voice Library access. */
+export function elevenLabsTtsIsLibraryOrPaymentError(
+  status: number,
+  body: unknown
+): boolean {
+  if (status !== 402 && status !== 403) return false;
+  const s = JSON.stringify(body ?? "").toLowerCase();
+  return (
+    s.includes("paid_plan") ||
+    s.includes("payment_required") ||
+    s.includes("library voice") ||
+    s.includes("library voices") ||
+    s.includes("free users cannot") ||
+    s.includes("upgrade your subscription")
+  );
+}
 
 function requireElevenLabsKey(): string {
   const key = (env.elevenlabs.apiKey || "").trim();

@@ -62,6 +62,8 @@ import {
   bcp47ToElevenLabsLanguage,
   buildElevenLabsRagAudioTagHintForProvider,
   ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID,
+  ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
+  elevenLabsTtsIsLibraryOrPaymentError,
 } from "../services/elevenlabs";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
@@ -902,6 +904,26 @@ async function speakToExotel(
           eleven_v3: elevenLabsTtsModelIsV3(modelId),
         });
         elTts = await elevenLabsTextToSpeech({ ...ttsBody, voiceSettings: null });
+      }
+
+      if (
+        elTts.status !== 200 &&
+        elevenLabsTtsIsLibraryOrPaymentError(elTts.status, elTts.body) &&
+        voiceId !== ELEVENLABS_PREMADE_API_SAFE_VOICE_ID
+      ) {
+        voiceTrace(log, "pipeline.tts.retry", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          reason: "premade_voice_free_tier",
+          prior_status: elTts.status,
+          prior_voice_id: voiceId,
+          fallback_voice_id: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
+        });
+        elTts = await elevenLabsTextToSpeech({
+          ...ttsBody,
+          voiceId: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
+          voiceSettings: null,
+        });
       }
 
       if (elTts.status !== 200) {

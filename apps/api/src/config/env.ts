@@ -67,7 +67,7 @@ export const env = {
     defaultVoiceId: (process.env.ELEVENLABS_DEFAULT_VOICE_ID || "").trim() || undefined,
     /**
      * Optional `voice_id` when using ElevenLabs TTS without an `elevenlabs_avatars` row and no other speaker is set.
-     * If unset, `elevenlabs.ts` uses a built-in Hindi-capable multilingual default (override there or via env).
+     * Voice Library IDs need a **paid** ElevenLabs plan for API use; free tier uses a premade default in code.
      */
     defaultIndianMultilingualVoiceId:
       (process.env.ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID || "").trim() || undefined,

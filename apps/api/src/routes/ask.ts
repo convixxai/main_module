@@ -32,6 +32,8 @@ import {
   bcp47ToElevenLabsLanguage,
   buildElevenLabsRagAudioTagHintForProvider,
   ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID,
+  ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
+  elevenLabsTtsIsLibraryOrPaymentError,
 } from "../services/elevenlabs";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
@@ -1275,12 +1277,24 @@ export async function askRoutes(app: FastifyInstance) {
             }
             const modelId = resolveElevenLabsTtsModelId(cust?.tts_model ?? null);
             const outFmt = elevenLabsAskTtsOutputFormat(codec, sampleRate, modelId);
-            const el = await elevenLabsTextToSpeech({
+            let el = await elevenLabsTextToSpeech({
               voiceId,
               text: ttsText,
               modelId,
               outputFormat: outFmt,
             });
+            if (
+              el.status !== 200 &&
+              elevenLabsTtsIsLibraryOrPaymentError(el.status, el.body) &&
+              voiceId !== ELEVENLABS_PREMADE_API_SAFE_VOICE_ID
+            ) {
+              el = await elevenLabsTextToSpeech({
+                voiceId: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
+                text: ttsText,
+                modelId,
+                outputFormat: outFmt,
+              });
+            }
             if (el.status === 200 && Buffer.isBuffer(el.body)) {
               tts = {
                 status: 200,
