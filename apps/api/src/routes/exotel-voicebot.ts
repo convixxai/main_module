@@ -588,6 +588,51 @@ function transcriptLooksLatinHeavyForRehintSkip(
 }
 
 /**
+ * True when a meaningful share of letters are non-ASCII (Indic/CJK/etc.). Rehinting those
+ * utterances with en-IN/mr-IN/hi-IN often replaces a good transcript with garbage ("Result").
+ */
+function transcriptIsPrimarilyNonLatinScript(
+  text: string,
+  minNonLatinRatio: number
+): boolean {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  let nonLatin = 0;
+  let letters = 0;
+  for (const ch of t) {
+    if (/[A-Za-z]/.test(ch)) {
+      letters++;
+    } else if (/\p{L}/u.test(ch)) {
+      letters++;
+      nonLatin++;
+    }
+  }
+  if (letters === 0) return false;
+  return nonLatin / letters >= minNonLatinRatio;
+}
+
+/** Heuristic: REST rehint with a clamped language hint destroyed a longer non-Latin transcript. */
+function rehintLikelyCorruptedFirstPass(first: string, retry: string): boolean {
+  const a = first.trim();
+  const b = retry.trim();
+  if (a.length < 4 || b.length === 0) return false;
+  let nonLatin = 0;
+  for (const ch of a) {
+    if (!/[A-Za-z]/.test(ch) && /\p{L}/u.test(ch)) nonLatin++;
+  }
+  if (nonLatin >= 3 && b.length < a.length * 0.35) return true;
+  if (
+    nonLatin >= 2 &&
+    b.length <= 16 &&
+    /^[A-Za-z][A-Za-z.!?,'\s-]*$/.test(b) &&
+    !/\s{2,}/.test(b)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * True when the transcript is only light fillers (hmm, um, uh, …) with no other words.
  * Used to skip RAG/LLM so "Hmm." does not trigger embeddings + a generic sales line.
  */
@@ -894,16 +939,41 @@ function sendToExotel(
   ws.send(JSON.stringify(message));
 }
 
+function sendExotelPlaybackMark(
+  ws: WebSocket,
+  session: VoicebotSession,
+  log?: FastifyRequest["log"]
+): void {
+  const ctx: VoiceTraceCtx = {
+    customerId: session.customerId,
+    streamSid: session.streamSid,
+    callSid: session.callSid,
+    exotelCallDbId: session.callSessionDbId,
+  };
+  const markName = nextMarkName(session);
+  session.pendingMarks.add(markName);
+  session.isSpeaking = true;
+  const mark: ExotelOutboundMark = {
+    event: "mark",
+    stream_sid: session.streamSid,
+    mark: { name: markName },
+  };
+  sendToExotel(ws, mark, log, ctx);
+}
+
 /**
  * Send PCM audio back to Exotel as base64 media frames.
  * Respects chunk sizing rules (320-byte multiples, 3.2KB–100KB).
+ * Use `omitMark` for incremental TTS chunks, then call `sendExotelPlaybackMark` once after the stream.
  */
 function sendAudioToExotel(
   ws: WebSocket,
   session: VoicebotSession,
   pcmBuffer: Buffer,
-  log?: FastifyRequest["log"]
+  log?: FastifyRequest["log"],
+  options?: { omitMark?: boolean }
 ): void {
+  const omitMark = options?.omitMark === true;
   const chunkBuffer = new PcmChunkBuffer();
   const chunks = chunkBuffer.push(pcmBuffer);
   const flushed: Buffer[] = [];
@@ -931,6 +1001,10 @@ function sendAudioToExotel(
       media: { payload: b64 },
     };
     sendToExotel(ws, media, log, ctx, { skipTrace: true });
+  }
+
+  if (allChunks.length > 0 && omitMark) {
+    session.isSpeaking = true;
   }
 
   // TTFA: log time from utterance start to first outbound audio for the answer
@@ -964,19 +1038,12 @@ function sendAudioToExotel(
     pcm_in_bytes: pcmBuffer.length,
     media_chunks: allChunks.length,
     outbound_b64_chars: totalB64,
+    omit_mark: omitMark,
   });
 
   // Send a mark after the last chunk so we know when playback completes
-  if (allChunks.length > 0) {
-    const markName = nextMarkName(session);
-    session.pendingMarks.add(markName);
-    session.isSpeaking = true;
-    const mark: ExotelOutboundMark = {
-      event: "mark",
-      stream_sid: session.streamSid,
-      mark: { name: markName },
-    };
-    sendToExotel(ws, mark, log, ctx);
+  if (allChunks.length > 0 && !omitMark) {
+    sendExotelPlaybackMark(ws, session, log);
   }
 }
 
@@ -1300,7 +1367,7 @@ async function speakToExotel(
             });
             firstChunkSent = true;
           }
-          sendAudioToExotel(ws, session, chunk, log);
+          sendAudioToExotel(ws, session, chunk, log, { omitMark: true });
           totalPcmBytes += chunk.length;
         }
         session.ttsInProgress = false;
@@ -1308,6 +1375,7 @@ async function speakToExotel(
           log?.warn({ stream_sid: session.streamSid }, "voicebot incremental TTS yielded 0 bytes");
           return false;
         }
+        sendExotelPlaybackMark(ws, session, log);
         schedulePlaybackMarkFallback(session, totalPcmBytes, exotelRate, log);
         logVoiceStage(log, "tts.sent_to_exotel", {
           customerId: session.customerId,
@@ -1516,14 +1584,14 @@ function findNextSpeakCut(s: string): number {
   if (s.length === 0) return -1;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
-    if (ch && ".!?\n।".includes(ch)) {
+    if (ch && ".!?\n।,".includes(ch)) {
       if (i === s.length - 1 || /\s/.test(s[i + 1]!)) return i;
     }
   }
-  if (s.length >= 140) {
-    const lim = 100;
+  if (s.length >= 48) {
+    const lim = 48;
     const sp = s.lastIndexOf(" ", lim);
-    if (sp > 30) return sp - 1;
+    if (sp > 12) return sp - 1;
     return lim - 1;
   }
   return -1;
@@ -1780,7 +1848,8 @@ async function processUtterance(
     // Sarvam auto-detect can label audio as a language outside the tenant allowlist (e.g. gu-IN for
     // English). Policy clamps to en-IN/mr-IN/hi-IN but the transcript can stay in the wrong script;
     // the LLM may mirror that. Re-transcribe once with an explicit language hint (costly ~1s+).
-    // `VOICEBOT_STT_REHINT=auto` (default): skip rehint when the first transcript is already mostly Latin.
+    // `VOICEBOT_STT_REHINT=auto` (default): skip when first transcript is mostly Latin (English fast path)
+    // or mostly non-Latin (Telugu/Malayalam/etc. — rehint with en-IN often yields garbage like "Result").
     // `always` / `never` override. See `env.voicebot.sttRehint`.
     {
       const rehintMode = env.voicebot.sttRehint;
@@ -1788,13 +1857,15 @@ async function processUtterance(
         multilingual &&
         sttProvider === "sarvam" &&
         !isLanguageInAllowedList(detectedRaw, allowedNorm);
+      const nonLatinScriptHeavy = transcriptIsPrimarilyNonLatinScript(transcript, 0.22);
       const shouldRehint =
         outOfList &&
         (rehintMode === "never"
           ? false
           : rehintMode === "always"
             ? true
-            : !transcriptLooksLatinHeavyForRehintSkip(transcript, 0.5));
+            : !transcriptLooksLatinHeavyForRehintSkip(transcript, 0.5) &&
+              !nonLatinScriptHeavy);
 
       if (outOfList && !shouldRehint && rehintMode === "auto") {
         voiceTrace(log, "pipeline.stt.rehint_skipped", {
@@ -1803,12 +1874,15 @@ async function processUtterance(
           call_sid: session.callSid,
           exotel_call_session_id: session.callSessionDbId,
           stt_detected: detectedRaw,
-          reason: "latin_transcript_fast_path",
+          reason: nonLatinScriptHeavy
+            ? "non_latin_transcript"
+            : "latin_transcript_fast_path",
         });
       }
       if (shouldRehint) {
         const sttModel = csUtterance?.stt_model?.trim() || "saaras:v3";
         const firstDetected = detectedRaw;
+        const firstPassTranscript = transcript;
         const languageHintForRetry = effectiveLanguage;
         try {
           const sttRetry = await sarvamSpeechToText({
@@ -1823,23 +1897,36 @@ async function processUtterance(
             const b = sttRetry.body as { transcript?: string; language_code?: string };
             const t2 = b.transcript?.trim() || "";
             if (t2) {
-              transcript = t2;
-              detectedRaw = b.language_code?.trim() || languageHintForRetry;
-              effectiveLanguage = clampLanguageToAllowed(
-                detectedRaw,
-                allowedNorm,
-                session.defaultLanguageCode || "en-IN"
-              );
-              voiceTrace(log, "pipeline.stt.rehint", {
-                customerId: session.customerId,
-                stream_sid: session.streamSid,
-                call_sid: session.callSid,
-                exotel_call_session_id: session.callSessionDbId,
-                stt_detected_before: firstDetected,
-                language_code_hint: languageHintForRetry,
-                stt_detected_after: detectedRaw,
-                transcript_preview: transcript.slice(0, 200),
-              });
+              if (rehintLikelyCorruptedFirstPass(firstPassTranscript, t2)) {
+                voiceTrace(log, "pipeline.stt.rehint_reverted", {
+                  customerId: session.customerId,
+                  stream_sid: session.streamSid,
+                  call_sid: session.callSid,
+                  exotel_call_session_id: session.callSessionDbId,
+                  stt_detected_before: firstDetected,
+                  language_code_hint: languageHintForRetry,
+                  first_pass_preview: firstPassTranscript.slice(0, 200),
+                  retry_preview: t2.slice(0, 200),
+                });
+              } else {
+                transcript = t2;
+                detectedRaw = b.language_code?.trim() || languageHintForRetry;
+                effectiveLanguage = clampLanguageToAllowed(
+                  detectedRaw,
+                  allowedNorm,
+                  session.defaultLanguageCode || "en-IN"
+                );
+                voiceTrace(log, "pipeline.stt.rehint", {
+                  customerId: session.customerId,
+                  stream_sid: session.streamSid,
+                  call_sid: session.callSid,
+                  exotel_call_session_id: session.callSessionDbId,
+                  stt_detected_before: firstDetected,
+                  language_code_hint: languageHintForRetry,
+                  stt_detected_after: detectedRaw,
+                  transcript_preview: transcript.slice(0, 200),
+                });
+              }
             }
           }
         } catch (err) {
