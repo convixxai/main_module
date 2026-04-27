@@ -452,6 +452,17 @@ function clampLanguageToAllowed(
   return normalizeBcp47Tag(fallback);
 }
 
+/** Same acceptance rule as clamp (exact tag or matching primary subtag). */
+function isLanguageInAllowedList(detectedRaw: string, allowed: string[]): boolean {
+  if (!allowed.length) return true;
+  const d = normalizeBcp47Tag(detectedRaw);
+  if (allowed.includes(d)) return true;
+  const primary = d.split("-")[0]?.toLowerCase() ?? "";
+  return allowed.some(
+    (a) => a.split("-")[0]?.toLowerCase() === primary
+  );
+}
+
 const LANG_LABEL: Record<string, string> = {
   "en-IN": "English",
   "hi-IN": "Hindi",
@@ -1393,13 +1404,63 @@ async function processUtterance(
       transcript = sttBody.transcript?.trim() || "";
       detectedRaw = sttBody.language_code || "en-IN";
     }
-    const effectiveLanguage = multilingual
+
+    let effectiveLanguage = multilingual
       ? clampLanguageToAllowed(
           detectedRaw,
           allowedNorm,
           session.defaultLanguageCode || "en-IN"
         )
       : "en-IN";
+
+    // Sarvam auto-detect can label audio as a language outside the tenant allowlist (e.g. gu-IN for
+    // English). Policy clamps to en-IN/mr-IN/hi-IN but the transcript stays in the wrong script;
+    // the LLM then mirrors that script. Re-transcribe once with an explicit allowed language hint.
+    if (
+      multilingual &&
+      sttProvider === "sarvam" &&
+      !isLanguageInAllowedList(detectedRaw, allowedNorm)
+    ) {
+      const sttModel = csUtterance?.stt_model?.trim() || "saaras:v3";
+      const firstDetected = detectedRaw;
+      const languageHintForRetry = effectiveLanguage;
+      try {
+        const sttRetry = await sarvamSpeechToText({
+          fileBuffer: wavBuffer,
+          filename: "utterance.wav",
+          mimeType: "audio/wav",
+          model: sttModel,
+          mode: "transcribe",
+          language_code: languageHintForRetry,
+        });
+        if (sttRetry.status === 200) {
+          const b = sttRetry.body as { transcript?: string; language_code?: string };
+          const t2 = b.transcript?.trim() || "";
+          if (t2) {
+            transcript = t2;
+            detectedRaw = b.language_code?.trim() || languageHintForRetry;
+            effectiveLanguage = clampLanguageToAllowed(
+              detectedRaw,
+              allowedNorm,
+              session.defaultLanguageCode || "en-IN"
+            );
+            voiceTrace(log, "pipeline.stt.rehint", {
+              customerId: session.customerId,
+              stream_sid: session.streamSid,
+              call_sid: session.callSid,
+              exotel_call_session_id: session.callSessionDbId,
+              stt_detected_before: firstDetected,
+              language_code_hint: languageHintForRetry,
+              stt_detected_after: detectedRaw,
+              transcript_preview: transcript.slice(0, 200),
+            });
+          }
+        }
+      } catch (err) {
+        log?.warn({ err, stream_sid: session.streamSid }, "voicebot STT rehint failed; using first pass");
+      }
+    }
+
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
     await applyAgentVoicePersonaToSession(session);
     if (session.callSessionDbId) {
