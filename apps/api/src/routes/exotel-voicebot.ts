@@ -54,12 +54,14 @@ import {
   elevenLabsSpeechToText,
   elevenLabsSttToSarvamShape,
   elevenLabsTextToSpeech,
-  elevenLabsWavOutputFormat,
   pcmSampleRateFromElevenOutputFormat,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
+  elevenLabsTtsModelIsV3,
+  elevenLabsTtsOutputFormatForTelephony,
   bcp47ToElevenLabsLanguage,
   buildElevenLabsRagAudioTagHintForProvider,
+  ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID,
 } from "../services/elevenlabs";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
@@ -132,7 +134,9 @@ function voiceTtsCanRun(session: VoicebotSession): boolean {
       !!(
         session.ttsSpeaker?.trim() ||
         cs?.tts_default_speaker?.trim() ||
-        env.elevenlabs.defaultVoiceId
+        env.elevenlabs.defaultVoiceId ||
+        env.elevenlabs.defaultIndianMultilingualVoiceId ||
+        ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID
       )
     );
   }
@@ -152,7 +156,7 @@ function voiceTtsBlockingReason(session: VoicebotSession): string {
         env.elevenlabs.defaultVoiceId
       )
     ) {
-      return "no ElevenLabs voice_id (set agent tts_speaker, customer tts_default_speaker, elevenlabs avatar voice, or ELEVENLABS_DEFAULT_VOICE_ID)";
+      return "no ElevenLabs voice_id (set agent tts_speaker, customer tts_default_speaker, elevenlabs avatar, ELEVENLABS_DEFAULT_VOICE_ID, or ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID; built-in Indian default applies when none are set)";
     }
     return "ElevenLabs TTS unavailable (check configuration)";
   }
@@ -827,6 +831,8 @@ async function speakToExotel(
         session.ttsSpeaker?.trim() ||
         cs?.tts_default_speaker?.trim() ||
         env.elevenlabs.defaultVoiceId ||
+        env.elevenlabs.defaultIndianMultilingualVoiceId?.trim() ||
+        ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID ||
         "";
       if (!voiceId) {
         session.ttsInProgress = false;
@@ -843,7 +849,10 @@ async function speakToExotel(
       const modelId = resolveElevenLabsTtsModelId(
         session.ttsModel ?? cs?.tts_model ?? null
       );
-      const outputFormat = elevenLabsWavOutputFormat(exotelRate);
+      const outputFormat = elevenLabsTtsOutputFormatForTelephony(
+        modelId,
+        exotelRate
+      );
 
       logVoiceStage(log, "tts.start", {
         customerId: session.customerId,
@@ -872,13 +881,28 @@ async function speakToExotel(
         exotel_stream_sample_rate: exotelRate,
       });
 
-      const elTts = await elevenLabsTextToSpeech({
+      const vs = session.elevenlabsVoiceSettings ?? null;
+      const ttsBody = {
         voiceId,
         text: text.slice(0, 2500),
         modelId,
         outputFormat,
-        voiceSettings: session.elevenlabsVoiceSettings ?? null,
+      };
+      let elTts = await elevenLabsTextToSpeech({
+        ...ttsBody,
+        voiceSettings: vs,
       });
+
+      if (elTts.status !== 200 && vs) {
+        voiceTrace(log, "pipeline.tts.retry", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          reason: "without_voice_settings",
+          prior_status: elTts.status,
+          eleven_v3: elevenLabsTtsModelIsV3(modelId),
+        });
+        elTts = await elevenLabsTextToSpeech({ ...ttsBody, voiceSettings: null });
+      }
 
       if (elTts.status !== 200) {
         session.ttsInProgress = false;
@@ -2042,15 +2066,18 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
           return;
         }
 
-        voiceTrace(log, "exotel.in", {
-          customerId,
-          stream_sid: session?.streamSid,
-          call_sid: session?.callSid,
-          exotel_call_session_id: session?.callSessionDbId,
-          chat_session_id: session?.chatSessionId,
-          raw_utf8_bytes: raw.length,
-          payload: redactInboundExotelForLog(msg as unknown as Record<string, unknown>),
-        });
+        // Media arrives every ~20ms; logging each frame floods PM2/pino with near-duplicate lines.
+        if (msg.event !== "media") {
+          voiceTrace(log, "exotel.in", {
+            customerId,
+            stream_sid: session?.streamSid,
+            call_sid: session?.callSid,
+            exotel_call_session_id: session?.callSessionDbId,
+            chat_session_id: session?.chatSessionId,
+            raw_utf8_bytes: raw.length,
+            payload: redactInboundExotelForLog(msg as unknown as Record<string, unknown>),
+          });
+        }
 
         try {
           switch (msg.event) {
@@ -2166,18 +2193,34 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     session.voicebotMultilingualEffective === true
                       ? session.defaultLanguageCode || "en-IN"
                       : "en-IN";
-                  await speakToExotel(
+                  const greetingOk = await speakToExotel(
                     socket,
                     session,
                     session.greetingText || GREETING_TEXT,
                     greetingLang,
                     log
                   );
-                  logVoiceStage(log, "greeting.sent", {
-                    customerId,
-                    stream_sid: session.streamSid,
-                    call_sid: session.callSid,
-                  });
+                  if (!greetingOk) {
+                    log.warn(
+                      {
+                        customerId,
+                        stream_sid: session.streamSid,
+                        call_sid: session.callSid,
+                      },
+                      "voicebot: greeting TTS failed — caller may hear silence until the next reply; see tts.error / pipeline.tts.error logs"
+                    );
+                    logVoiceStage(log, "greeting.tts_failed", {
+                      customerId,
+                      stream_sid: session.streamSid,
+                      call_sid: session.callSid,
+                    });
+                  } else {
+                    logVoiceStage(log, "greeting.sent", {
+                      customerId,
+                      stream_sid: session.streamSid,
+                      call_sid: session.callSid,
+                    });
+                  }
                 } else {
                   log.warn(
                     {

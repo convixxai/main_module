@@ -65,6 +65,12 @@ export const env = {
     apiKey: (process.env.ELEVENLABS_API_KEY || "").trim(),
     /** Optional default `voice_id` when tenant/agent has no `tts_default_speaker` / `tts_speaker`. */
     defaultVoiceId: (process.env.ELEVENLABS_DEFAULT_VOICE_ID || "").trim() || undefined,
+    /**
+     * Optional `voice_id` when using ElevenLabs TTS without an `elevenlabs_avatars` row and no other speaker is set.
+     * If unset, `elevenlabs.ts` uses a built-in Hindi-capable multilingual default (override there or via env).
+     */
+    defaultIndianMultilingualVoiceId:
+      (process.env.ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID || "").trim() || undefined,
     /** Default TTS model when `customer_settings.tts_model` is missing or Sarvam-specific. */
     defaultTtsModelId:
       (process.env.ELEVENLABS_DEFAULT_TTS_MODEL || "eleven_multilingual_v2").trim(),

@@ -28,8 +28,10 @@ import {
   elevenLabsTextToSpeech,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
+  elevenLabsTtsModelIsV3,
   bcp47ToElevenLabsLanguage,
   buildElevenLabsRagAudioTagHintForProvider,
+  ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID,
 } from "../services/elevenlabs";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
@@ -968,12 +970,16 @@ function parseSttBody(body: unknown): { transcript: string; language_code: strin
 /** ElevenLabs `output_format` for /ask/voice (WAV/MP3 file response). */
 function elevenLabsAskTtsOutputFormat(
   codec: string,
-  sampleRateStr: string
+  sampleRateStr: string,
+  ttsModelId?: string | null
 ): string {
   const sr = parseInt(sampleRateStr, 10) || 24000;
   if (codec === "mp3") {
     if (sr <= 22050) return "mp3_22050_32";
     return "mp3_44100_128";
+  }
+  if (ttsModelId && elevenLabsTtsModelIsV3(ttsModelId) && sr <= 16000) {
+    return "wav_22050";
   }
   if (sr <= 8000) return "wav_8000";
   if (sr <= 16000) return "wav_16000";
@@ -1259,6 +1265,8 @@ export async function askRoutes(app: FastifyInstance) {
               fields.speaker?.trim() ||
               cust?.tts_default_speaker?.trim() ||
               env.elevenlabs.defaultVoiceId ||
+              env.elevenlabs.defaultIndianMultilingualVoiceId?.trim() ||
+              ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID ||
               "";
             if (!voiceId) {
               throw new Error(
@@ -1266,7 +1274,7 @@ export async function askRoutes(app: FastifyInstance) {
               );
             }
             const modelId = resolveElevenLabsTtsModelId(cust?.tts_model ?? null);
-            const outFmt = elevenLabsAskTtsOutputFormat(codec, sampleRate);
+            const outFmt = elevenLabsAskTtsOutputFormat(codec, sampleRate, modelId);
             const el = await elevenLabsTextToSpeech({
               voiceId,
               text: ttsText,

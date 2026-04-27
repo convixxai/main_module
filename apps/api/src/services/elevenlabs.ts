@@ -2,6 +2,15 @@ import { env } from "../config/env";
 
 const ELEVEN_BASE = "https://api.elevenlabs.io";
 
+/**
+ * Default ElevenLabs `voice_id` when the tenant has no `elevenlabs_avatars` row and no `tts_speaker` /
+ * `tts_default_speaker` / `ELEVENLABS_DEFAULT_VOICE_ID`. Suited to **en / hi / mr** via multilingual models
+ * (e.g. `eleven_multilingual_v2`, `eleven_v3`). Override with `ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID`.
+ *
+ * Voice: ElevenLabs **Prem** (Hindi-connectable, male). If your API key cannot access it, set the env var.
+ */
+export const ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID = "sY2peC9GbHX8NCy5enOe";
+
 function requireElevenLabsKey(): string {
   const key = (env.elevenlabs.apiKey || "").trim();
   if (!key) {
@@ -247,6 +256,21 @@ export function elevenLabsWavOutputFormat(sampleRate: number): string {
   if (sampleRate <= 32000) return "wav_32000";
   if (sampleRate <= 48000) return "wav_48000";
   return "wav_44100";
+}
+
+/**
+ * ElevenLabs `output_format` for Exotel-style streams. `eleven_v3` often rejects or mishandles
+ * `wav_8000` / low-rate WAV; synthesize at 22.05 kHz linear PCM and let the caller resample to
+ * the trunk sample rate (e.g. 8000 Hz).
+ */
+export function elevenLabsTtsOutputFormatForTelephony(
+  modelId: string,
+  exotelSampleRate: number
+): string {
+  if (elevenLabsTtsModelIsV3(modelId)) {
+    return "pcm_22050";
+  }
+  return elevenLabsWavOutputFormat(exotelSampleRate);
 }
 
 /** Pick ElevenLabs `output_format` from desired PCM sample rate (telephony). */

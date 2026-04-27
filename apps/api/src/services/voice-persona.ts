@@ -1,7 +1,11 @@
 import { pool } from "../config/db";
+import { env } from "../config/env";
 import type { VoicebotSession } from "./voicebot-session";
 import type { CustomerSettings } from "./customer-settings";
-import type { ElevenLabsVoiceSettingsPayload } from "./elevenlabs";
+import {
+  type ElevenLabsVoiceSettingsPayload,
+  ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID,
+} from "./elevenlabs";
 
 function pickLang(session: VoicebotSession): string {
   return (
@@ -112,7 +116,22 @@ export async function applyAgentVoicePersonaToSession(
 
   session.elevenlabsVoiceSettings = null;
 
-  if (ttsProvider !== "elevenlabs" && avatarId) {
+  if (ttsProvider === "elevenlabs") {
+    if (!elevenlabsAvatarId) {
+      const hasAnySpeaker =
+        session.ttsSpeaker?.trim() ||
+        cs?.tts_default_speaker?.trim() ||
+        env.elevenlabs.defaultVoiceId;
+      if (!hasAnySpeaker) {
+        session.ttsSpeaker =
+          env.elevenlabs.defaultIndianMultilingualVoiceId?.trim() ||
+          ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID;
+      }
+    }
+    return;
+  }
+
+  if (avatarId) {
     const ar = await pool.query(
       `SELECT tts_provider, tts_model, tts_speaker, tts_pace, tts_sample_rate, language_voice_map
        FROM avatars
