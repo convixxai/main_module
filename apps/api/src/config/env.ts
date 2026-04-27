@@ -67,6 +67,19 @@ export const env = {
       Math.max(50, parseInt(process.env.SARVAM_STT_WS_IDLE_MS || "250", 10) || 250)
     ),
     /**
+     * If the STT WebSocket never sends a `data` transcript after connect+flush, fail fast (ms) and
+     * fall back to REST — avoids 60s dead air when the socket hangs (common after many playback marks).
+     */
+    sttWsFirstDataTimeoutMs: Math.min(
+      90_000,
+      Math.max(3000, parseInt(process.env.SARVAM_STT_WS_FIRST_DATA_MS || "12000", 10) || 12_000)
+    ),
+    /** Max time waiting on the Sarvam STT WebSocket overall (ms). Voice default below batch REST. */
+    sttWsHardTimeoutMs: Math.min(
+      120_000,
+      Math.max(8000, parseInt(process.env.SARVAM_STT_WS_HARD_TIMEOUT_MS || "28000", 10) || 28_000)
+    ),
+    /**
      * When `true`, Sarvam STT WebSocket `language-code` uses `default_language_code` (e.g. en-IN)
      * instead of `unknown` for multilingual calls — fewer wrong-language IDs, less rehint. English-primary lines: enable.
      */

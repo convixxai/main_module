@@ -283,6 +283,8 @@ export async function sarvamSpeechToTextWebsocket(params: {
   model: string;
   mode: SarvamSttMode;
   language_code: string;
+  /** When true (e.g. Exotel stream ended), close the socket and fail fast so work does not block ~60s. */
+  shouldAbort?: () => boolean;
 }): Promise<{ status: number; body: unknown }> {
   const key = requireSarvamKey();
   const sr = params.sampleRate === 8000 ? 8000 : 16000;
@@ -312,8 +314,11 @@ export async function sarvamSpeechToTextWebsocket(params: {
     let lastRequestId: string | null = null;
     let settled = false;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let firstDataTimer: ReturnType<typeof setTimeout> | null = null;
     const idleMs = env.sarvam.sttWsIdleAfterTranscriptMs;
-    const maxWait = 60_000;
+    const firstDataMs = env.sarvam.sttWsFirstDataTimeoutMs;
+    const maxWait = env.sarvam.sttWsHardTimeoutMs;
+    let abortPoll: ReturnType<typeof setInterval> | null = null;
 
     let hardTimeout: ReturnType<typeof setTimeout>;
     const finish = (status: number, body: unknown) => {
@@ -323,6 +328,14 @@ export async function sarvamSpeechToTextWebsocket(params: {
       if (idleTimer) {
         clearTimeout(idleTimer);
         idleTimer = null;
+      }
+      if (firstDataTimer) {
+        clearTimeout(firstDataTimer);
+        firstDataTimer = null;
+      }
+      if (abortPoll) {
+        clearInterval(abortPoll);
+        abortPoll = null;
       }
       try {
         ws.close();
@@ -337,6 +350,13 @@ export async function sarvamSpeechToTextWebsocket(params: {
         finish(504, { error: "Sarvam STT WebSocket hard timeout" });
       }
     }, maxWait);
+
+    abortPoll = setInterval(() => {
+      if (settled) return;
+      if (params.shouldAbort?.()) {
+        finish(499, { error: "Sarvam STT WebSocket aborted (session closing)" });
+      }
+    }, 200);
 
     const scheduleIdle = () => {
       if (idleTimer) clearTimeout(idleTimer);
@@ -376,6 +396,10 @@ export async function sarvamSpeechToTextWebsocket(params: {
           lastTranscript = d.transcript;
           lastLang = typeof d.language_code === "string" ? d.language_code : null;
           lastRequestId = typeof d.request_id === "string" ? d.request_id : null;
+          if (firstDataTimer) {
+            clearTimeout(firstDataTimer);
+            firstDataTimer = null;
+          }
           scheduleIdle();
         }
       }
@@ -395,6 +419,11 @@ export async function sarvamSpeechToTextWebsocket(params: {
       try {
         ws.send(JSON.stringify(audioMsg));
         ws.send(JSON.stringify({ type: "flush" }));
+        firstDataTimer = setTimeout(() => {
+          if (!settled && !lastTranscript.trim()) {
+            finish(504, { error: "Sarvam STT WebSocket first data timeout" });
+          }
+        }, firstDataMs);
       } catch (err) {
         finish(500, { error: String(err) });
       }
@@ -402,11 +431,16 @@ export async function sarvamSpeechToTextWebsocket(params: {
 
     ws.on("close", () => {
       if (!settled) {
-        finish(200, {
-          request_id: lastRequestId,
-          transcript: lastTranscript,
-          language_code: lastLang ?? "en-IN",
-        });
+        const t = lastTranscript.trim();
+        if (!t) {
+          finish(504, { error: "Sarvam STT WebSocket closed without transcript" });
+        } else {
+          finish(200, {
+            request_id: lastRequestId,
+            transcript: lastTranscript,
+            language_code: lastLang ?? "en-IN",
+          });
+        }
       }
     });
   });

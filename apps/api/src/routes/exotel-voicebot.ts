@@ -1778,14 +1778,19 @@ async function processUtterance(
             model: sttModel,
             mode: "transcribe",
             language_code: wsLanguage,
+            shouldAbort: () => session.isClosing,
           });
           if (stt.status !== 200) {
+            if (session.isClosing || stt.status === 499) {
+              return;
+            }
             voiceTrace(log, "pipeline.stt.websocket_fallback", {
               customerId: session.customerId,
               stream_sid: session.streamSid,
               stt_status: stt.status,
               body: safeJsonForLog(stt.body),
             });
+            if (session.isClosing) return;
             stt = await sarvamSpeechToText({
               fileBuffer: wavBuffer,
               filename: "utterance.wav",
@@ -1813,6 +1818,7 @@ async function processUtterance(
     }
 
     if (stt.status !== 200) {
+      if (session.isClosing) return;
       log?.error({ status: stt.status, body: safeJsonForLog(stt.body) }, "voicebot STT failed");
       voiceTrace(log, "pipeline.stt.error", {
         customerId: session.customerId,
@@ -1824,6 +1830,8 @@ async function processUtterance(
       await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
       return;
     }
+
+    if (session.isClosing) return;
 
     let transcript: string;
     let detectedRaw: string;
@@ -1988,6 +1996,8 @@ async function processUtterance(
       stt_detected_raw: detectedRaw,
     }, "voicebot STT result");
 
+    if (session.isClosing) return;
+
     const tAfterStt = Date.now();
 
     // TTS language for this turn (also used for incremental TTS when RAG streaming is on)
@@ -2042,6 +2052,7 @@ async function processUtterance(
         stream_sid: session.streamSid,
         transcript_chars: transcript.length,
       });
+      if (session.isClosing) return;
       await appendVoiceTurnToChat(session, transcript, ack, {
         assistantSource: "filler_ack",
       });
@@ -2078,6 +2089,8 @@ async function processUtterance(
       exotel_call_session_id: session.callSessionDbId,
       question_preview: transcript.slice(0, 500),
     });
+
+    if (session.isClosing) return;
 
     // LLM + incremental TTS only when both RAG and TTS streaming are enabled (see SETTINGS catalog).
     const streamToCall =
@@ -2224,6 +2237,8 @@ async function runVoicebotAskPipeline(
   spokeIncrementally?: boolean;
 } | null> {
   try {
+    if (session.isClosing) return null;
+
     const {
       generateEmbedding,
       prepareQuestionForKbEmbedding,
@@ -2266,6 +2281,7 @@ async function runVoicebotAskPipeline(
           multilingual: session.voicebotMultilingualEffective === true,
           languageTag: session.effectiveSttLanguageThisTurn,
           trace: ragTrace,
+          voicePreferNativeEmbeddingForIndic: true,
         });
       voiceTrace(log, "pipeline.rag.embedding_query", {
         customerId: session.customerId,
@@ -2340,6 +2356,8 @@ async function runVoicebotAskPipeline(
     let agentFallbackInstruction: string | null = null;
 
     const [embedBundle, historyRaw] = await Promise.all([embedPipeline, historyP, agentP]);
+
+    if (session.isClosing) return null;
 
     // Apply agent data after parallel fetch completes
     if (session.voiceRagAgentCache) {

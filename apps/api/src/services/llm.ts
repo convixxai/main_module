@@ -291,6 +291,11 @@ export async function prepareQuestionForKbEmbedding(
     multilingual: boolean;
     languageTag?: string | null;
     trace?: RagTraceFn;
+    /**
+     * Voicebot: for Hindi/Marathi, Sarvam EN glosses for search can be wrong ("cantonment kitchen")
+     * and steer RAG to unrelated KB rows. Nomic cross-lingual match on the raw transcript is safer.
+     */
+    voicePreferNativeEmbeddingForIndic?: boolean;
   }
 ): Promise<{ textForEmbedding: string; translatedForSearch: boolean }> {
   const q = question.trim();
@@ -306,6 +311,18 @@ export async function prepareQuestionForKbEmbedding(
 
   if (isEnglishLanguageTag(effectiveTag)) {
     return { textForEmbedding: q, translatedForSearch: false };
+  }
+
+  if (opts.voicePreferNativeEmbeddingForIndic && effectiveTag) {
+    const low = String(effectiveTag).trim().toLowerCase().replace(/_/g, "-");
+    if (low === "hi-in" || low === "mr-in") {
+      opts.trace?.("kb_search_translate_skipped", {
+        reason: "voice_native_indic_embedding",
+        language: low,
+        question_preview: q.slice(0, 500),
+      });
+      return { textForEmbedding: q, translatedForSearch: false };
+    }
   }
 
   try {
