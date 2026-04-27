@@ -974,11 +974,15 @@ function parseSttBody(body: unknown): { transcript: string; language_code: strin
   };
 }
 
-/** ElevenLabs `output_format` for /ask/voice (WAV/MP3 file response). */
+/**
+ * ElevenLabs `output_format` for /ask/voice (WAV/MP3 file response).
+ * Streaming requests must not use `wav_*` (API: "WAV is only supported for non-streaming requests").
+ */
 function elevenLabsAskTtsOutputFormat(
   codec: string,
   sampleRateStr: string,
-  ttsModelId?: string | null
+  ttsModelId?: string | null,
+  streaming?: boolean
 ): string {
   const sr = parseInt(sampleRateStr, 10) || 24000;
   if (codec === "mp3") {
@@ -986,7 +990,14 @@ function elevenLabsAskTtsOutputFormat(
     return "mp3_44100_128";
   }
   if (ttsModelId && elevenLabsTtsModelIsV3(ttsModelId) && sr <= 16000) {
-    return "wav_22050";
+    return streaming ? "pcm_22050" : "wav_22050";
+  }
+  if (streaming) {
+    if (sr <= 8000) return "pcm_8000";
+    if (sr <= 16000) return "pcm_16000";
+    if (sr <= 22050) return "pcm_22050";
+    if (sr <= 24000) return "pcm_24000";
+    return "pcm_44100";
   }
   if (sr <= 8000) return "wav_8000";
   if (sr <= 16000) return "wav_16000";
@@ -1281,8 +1292,13 @@ export async function askRoutes(app: FastifyInstance) {
               );
             }
             const modelId = resolveElevenLabsTtsModelId(cust?.tts_model ?? null);
-            const outFmt = elevenLabsAskTtsOutputFormat(codec, sampleRate, modelId);
             const useElevenLabsStream = cust?.tts_streaming_enabled === true;
+            const outFmt = elevenLabsAskTtsOutputFormat(
+              codec,
+              sampleRate,
+              modelId,
+              useElevenLabsStream
+            );
             let el = await (useElevenLabsStream
               ? elevenLabsTextToSpeechStream
               : elevenLabsTextToSpeech)({

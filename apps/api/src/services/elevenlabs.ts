@@ -201,20 +201,39 @@ const ELEVENLABS_DEFAULT_HUMAN_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsP
 };
 
 /**
- * ElevenLabs can pronounce bracket delivery tags literally depending on voice/model/account.
- * Keep LLM-facing text natural, and strip old/generated [warmly]-style prefixes before TTS.
+ * Strip bracket tags for ElevenLabs models that are **not** `eleven_v3` (they often read tags as words).
  */
 export function sanitizeTextForElevenLabsTts(text: string): string {
   return text
-    .replace(/(^|[\s.!?।…])\[[A-Za-z][A-Za-z\s_-]{0,32}\]\s*/g, "$1")
+    .replace(/(^|[\s.!?।…])\[[^\]]{1,48}\]\s*/g, "$1")
     .replace(/\s+([,.!?।…])/g, "$1")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
-/** Append to RAG system prompts when tenant TTS is ElevenLabs. */
+/** Trim inside `[ ... ]` so `[sad ]` and `[ happy]` work reliably for Eleven v3 audio tags. */
+export function normalizeElevenV3AudioTagsInText(text: string): string {
+  return text
+    .replace(/\[([^\]]*?)\]/g, (_, inner: string) => {
+      const t = inner.trim().replace(/\s+/g, " ");
+      return t.length > 0 ? `[${t}]` : "";
+    })
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** Text sent to ElevenLabs: v3 keeps (normalized) audio tags unless `env.elevenlabs.v3StripAudioTags`. */
+export function prepareTextForElevenLabsTts(text: string, modelId: string): string {
+  const capped = text.slice(0, 2500);
+  if (env.elevenlabs.v3StripAudioTags || !elevenLabsTtsModelIsV3(modelId)) {
+    return sanitizeTextForElevenLabsTts(capped);
+  }
+  return normalizeElevenV3AudioTagsInText(capped);
+}
+
+/** Append to RAG system prompts when tenant TTS is ElevenLabs (non–v3 models). */
 export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs TTS delivery ---
-Your reply will be read by ElevenLabs text-to-speech. Do NOT write bracketed emotion or delivery tags like [warmly], [happy], [sighs], or [laughs], because they may be spoken aloud. Make the voice sound human using natural wording, contractions where appropriate, and short sentences with commas and periods for pauses.`;
+Your reply will be read by ElevenLabs text-to-speech. Do NOT use square-bracket tags like [happy] or [sighs] unless the tenant uses model **eleven_v3** (this rule applies to other ElevenLabs models). For natural speech here, use wording, commas, and periods only.`;
 
 /** True when the resolved TTS model id is ElevenLabs v3 (expressive / audio-tag oriented). */
 export function elevenLabsTtsModelIsV3(modelId: string | null | undefined): boolean {
@@ -225,29 +244,29 @@ export function elevenLabsTtsModelIsV3(modelId: string | null | undefined): bool
 /**
  * Extra RAG instructions when TTS uses `eleven_v3`: model should pick tags from user turn + history.
  */
-export const ELEVENLABS_V3_AUDIO_DELIVERY_RULE = `--- ElevenLabs v3 expressive delivery ---
-Your answer will be spoken with ElevenLabs **v3**. Do NOT output bracketed audio/emotion tags; in this deployment they are read as words. Express tone through natural phrasing and punctuation only.
+export const ELEVENLABS_V3_AUDIO_DELIVERY_RULE = `--- ElevenLabs v3 audio tags ---
+Your answer will be spoken with ElevenLabs **eleven_v3**, which supports **audio tags**: short cues in square brackets placed **immediately before** the phrase they colour (e.g. [warmly] Thanks for calling. [curious] What dates work for you?).
 
-Choose the tone yourself from: (1) the user's latest message, (2) prior turns in this conversation, and (3) the situation implied by the knowledgebase answer — so the voice matches empathy, energy, and clarity.
+Use tags from: (1) the user's latest message, (2) prior turns, (3) the situation implied by the knowledgebase — empathy, energy, and clarity on a phone call.
 
 Rules:
-- Never include square-bracket stage directions or emotion labels in the final answer.
-- Use conversational pauses with commas and periods.
-- Vary wording across turns when mood changes; do not repeat the same canned phrase.
-- Tone must not replace accurate RAG content or language rules.`;
+- Prefer **one** tag per sentence or main clause; do not stack many tags in a row.
+- Use tags Eleven v3 understands: emotions like [happy], [sad], [excited], [calm], [sympathetic]; delivery like [whispers], [laughs], [sighs], [thoughtful], [curious]. Keep tag text **English** and **no extra spaces inside brackets** (write [sad] not [sad ]).
+- Tags must not replace facts: still obey the KNOWLEDGEBASE and language/locale rules.
+- Also use natural punctuation (commas, periods) for pauses; v3 does not use SSML breaks.`;
 
 /**
- * When `customer_settings.tts_model` is `eleven_v3`: required bracketed emotion/delivery prefix per sentence for LLM output.
+ * When `customer_settings.tts_model` is `eleven_v3`: stronger tag usage for expressiveness.
  */
-export const ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE = `--- ElevenLabs eleven_v3 — required [emotion] prefixes ---
-Your reply will be read by ElevenLabs **eleven_v3**. Do NOT write square-bracket emotion or delivery prefixes. In this deployment, bracket text is spoken aloud, so it must not appear in the final answer.
-
-Use natural, human delivery instead: short sentences, contractions where appropriate, commas for small pauses, and warm conversational phrasing.
+export const ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE = `--- ElevenLabs eleven_v3 — audio tags required ---
+Your reply will be read with **eleven_v3**. You MUST use ElevenLabs **audio tags** in square brackets so the voice sounds human and expressive.
 
 Requirements:
-- Never include text like [happy], [calm], [warmly], [laughs], [sighs], or any other bracketed stage direction.
-- Keep the answer suitable for phone audio: brief, natural, and easy to speak.
-- Keep facts accurate per the KNOWLEDGEBASE and obey all language/locale rules.`;
+- **Every sentence** you output should start with **exactly one** audio tag right before the words, e.g. [happy] Great question. [calm] Here is what we offer.
+- The full reply MUST include **at least one** tag (single-sentence answers still start with a tag).
+- Use concise English tags: [happy], [sad], [excited], [warmly], [sympathetic], [curious], [reassuring], [thoughtful], [whispers], [laughs], [sighs], etc. No spaces inside brackets.
+- Do not put the whole sentence inside brackets — only the short tag in brackets, then normal spoken text.
+- Keep content accurate per the KNOWLEDGEBASE and obey all language/locale rules.`;
 
 /**
  * Fragment to append under RAG rules when tenant uses ElevenLabs TTS.
@@ -277,7 +296,7 @@ export async function elevenLabsTextToSpeech(
 ): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
   const key = requireElevenLabsKey();
   const q = new URLSearchParams({ output_format: params.outputFormat });
-  const cleanText = sanitizeTextForElevenLabsTts(params.text).slice(0, 2500);
+  const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
   const bodyObj: Record<string, unknown> = {
     text: cleanText,
     model_id: params.modelId,
@@ -314,7 +333,7 @@ export async function elevenLabsTextToSpeechStream(
 ): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
   const key = requireElevenLabsKey();
   const q = new URLSearchParams({ output_format: params.outputFormat });
-  const cleanText = sanitizeTextForElevenLabsTts(params.text).slice(0, 2500);
+  const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
   const bodyObj: Record<string, unknown> = {
     text: cleanText,
     model_id: params.modelId,
@@ -368,13 +387,19 @@ export function elevenLabsWavOutputFormat(sampleRate: number): string {
  * ElevenLabs `output_format` for Exotel-style streams. `eleven_v3` often rejects or mishandles
  * `wav_8000` / low-rate WAV; synthesize at 22.05 kHz linear PCM and let the caller resample to
  * the trunk sample rate (e.g. 8000 Hz).
+ *
+ * **Streaming** (`/v1/text-to-speech/.../stream`): API returns 400 for `wav_*` — use `pcm_*` only.
  */
 export function elevenLabsTtsOutputFormatForTelephony(
   modelId: string,
-  exotelSampleRate: number
+  exotelSampleRate: number,
+  opts?: { streaming?: boolean }
 ): string {
   if (elevenLabsTtsModelIsV3(modelId)) {
     return "pcm_22050";
+  }
+  if (opts?.streaming === true) {
+    return elevenLabsPcmOutputFormat(exotelSampleRate);
   }
   return elevenLabsWavOutputFormat(exotelSampleRate);
 }

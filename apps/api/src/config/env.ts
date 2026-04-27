@@ -158,6 +158,11 @@ export const env = {
     /** Default TTS model when `customer_settings.tts_model` is missing or Sarvam-specific. */
     defaultTtsModelId:
       (process.env.ELEVENLABS_DEFAULT_TTS_MODEL || "eleven_multilingual_v2").trim(),
+    /**
+     * When `true` (default), `eleven_v3` TTS requests keep `[audio tags]` in the text (normalized).
+     * Set `ELEVENLABS_V3_STRIP_AUDIO_TAGS=true` to strip them if your voice still speaks tags aloud.
+     */
+    v3StripAudioTags: process.env.ELEVENLABS_V3_STRIP_AUDIO_TAGS === "true",
   },
 
   /**

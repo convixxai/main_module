@@ -1092,9 +1092,11 @@ async function speakToExotel(
       const modelId = resolveElevenLabsTtsModelId(
         session.ttsModel ?? cs?.tts_model ?? null
       );
+      const useElevenLabsStream = session.ttsStreamingForVoice === true;
       const outputFormat = elevenLabsTtsOutputFormatForTelephony(
         modelId,
-        exotelRate
+        exotelRate,
+        { streaming: useElevenLabsStream }
       );
 
       logVoiceStage(log, "tts.start", {
@@ -1131,7 +1133,6 @@ async function speakToExotel(
         modelId,
         outputFormat,
       };
-      const useElevenLabsStream = session.ttsStreamingForVoice === true;
       let elTts = await (useElevenLabsStream
         ? elevenLabsTextToSpeechStream
         : elevenLabsTextToSpeech)({
