@@ -2501,7 +2501,8 @@ async function runVoicebotAskPipeline(
     }
     const elevenLabsTagHint = buildElevenLabsRagAudioTagHintForProvider(
       csRag?.tts_provider,
-      session.ttsModel ?? csRag?.tts_model ?? null
+      session.ttsModel ?? csRag?.tts_model ?? null,
+      { customerTtsModelRaw: csRag?.tts_model ?? null }
     );
     const ragRules = `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.

@@ -6,6 +6,12 @@ const API_ROOT = path.resolve(__dirname, "../..");
 
 dotenv.config({ path: path.resolve(API_ROOT, ".env") });
 
+/**
+ * Default ElevenLabs `voice_id` when `customer_settings.tts_provider` is `elevenlabs` and no
+ * `ELEVENLABS_DEFAULT_VOICE_ID` env / DB speaker is set. Override via env only.
+ */
+export const DEFAULT_ELEVENLABS_TTS_VOICE_ID = "2cdvnKJ5TZi631y5PN1s";
+
 export const env = {
   port: parseInt(process.env.PORT || "8080", 10),
 
@@ -138,8 +144,11 @@ export const env = {
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
   elevenlabs: {
     apiKey: (process.env.ELEVENLABS_API_KEY || "").trim(),
-    /** Optional default `voice_id` when tenant/agent has no `tts_default_speaker` / `tts_speaker`. */
-    defaultVoiceId: (process.env.ELEVENLABS_DEFAULT_VOICE_ID || "").trim() || undefined,
+    /** Default `voice_id` when tenant/agent has no speaker; `ELEVENLABS_DEFAULT_VOICE_ID` overrides. */
+    defaultVoiceId: (() => {
+      const v = (process.env.ELEVENLABS_DEFAULT_VOICE_ID || "").trim();
+      return v.length > 0 ? v : DEFAULT_ELEVENLABS_TTS_VOICE_ID;
+    })(),
     /**
      * Optional `voice_id` when using ElevenLabs TTS without an `elevenlabs_avatars` row and no other speaker is set.
      * Voice Library IDs need a **paid** ElevenLabs plan for API use; free tier uses a premade default in code.

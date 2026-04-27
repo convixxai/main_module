@@ -322,6 +322,8 @@ function buildRAGMessages(
     ttsProvider?: string | null;
     /** Raw \`tts_model\` from agent or customer (resolved inside hint builder). */
     ttsModelRaw?: string | null;
+    /** Raw \`customer_settings.tts_model\` — when \`eleven_v3\`, LLM gets strict per-sentence [tag] prefixes. */
+    customerTtsModelRaw?: string | null;
   }
 ) {
   const noKbLine =
@@ -330,7 +332,8 @@ function buildRAGMessages(
       : "";
   const elHint = buildElevenLabsRagAudioTagHintForProvider(
     opts?.ttsProvider,
-    opts?.ttsModelRaw ?? null
+    opts?.ttsModelRaw ?? null,
+    { customerTtsModelRaw: opts?.customerTtsModelRaw ?? null }
   );
   const messages: { role: "system" | "user" | "assistant"; content: string }[] =
     [
@@ -628,6 +631,7 @@ async function runAskPipeline(params: {
     {
       ttsProvider: custSettings?.tts_provider ?? null,
       ttsModelRaw: agent?.ttsModel ?? custSettings?.tts_model ?? null,
+      customerTtsModelRaw: custSettings?.tts_model ?? null,
     }
   );
 

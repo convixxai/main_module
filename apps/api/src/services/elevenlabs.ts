@@ -217,14 +217,34 @@ Rules:
 - Tag names in **English** only. Tags are additive: they must not replace accurate RAG content or language rules.`;
 
 /**
+ * When `customer_settings.tts_model` is `eleven_v3`: required bracketed emotion/delivery prefix per sentence for LLM output.
+ */
+export const ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE = `--- ElevenLabs eleven_v3 — required [emotion] prefixes ---
+Your reply will be read by ElevenLabs **eleven_v3**. You MUST format the **spoken** answer so that **every sentence** starts with **one** short tag in **square brackets** (emotion or delivery), immediately before the words of that sentence.
+
+Examples: [warmly] Hello, how can I help you today? [curious] Are you looking for a weekend stay?
+
+Requirements:
+- **Each sentence** (parts ending with . ! ? … or Devanagari ।, or a clear line break for voice) must begin with exactly one bracket prefix like [happy], [calm], [sympathetic], [excited], [warmly], [thoughtful], [curious], [reassuring], [whispers], [laughs], [sighs], [professional], or similar — **English tag names only**.
+- The full reply MUST contain **at least one** such prefix (a single-sentence answer still starts with a tag).
+- Do **not** omit the opening tag on any sentence. Do not stack multiple tags before one sentence.
+- Tags are for **delivery only**: keep facts accurate per the KNOWLEDGEBASE and obey all language/locale rules; never replace content with tags alone.`;
+
+/**
  * Fragment to append under RAG rules when tenant uses ElevenLabs TTS.
- * Adds v3-specific guidance when the resolved model is `eleven_v3` (from customer/agent \`tts_model\` after {@link resolveElevenLabsTtsModelId}).
+ * When `customer_settings.tts_model` is `eleven_v3`, adds strict per-sentence tag rules (LLM).
+ * Otherwise, if the resolved model is `eleven_v3` (agent/customer after {@link resolveElevenLabsTtsModelId}), adds the lighter v3 hint.
  */
 export function buildElevenLabsRagAudioTagHintForProvider(
   ttsProvider: string | null | undefined,
-  ttsModelRaw: string | null | undefined
+  ttsModelRaw: string | null | undefined,
+  opts?: { customerTtsModelRaw?: string | null }
 ): string {
   if (ttsProvider !== "elevenlabs") return "";
+  const customerV3 = elevenLabsTtsModelIsV3(opts?.customerTtsModelRaw);
+  if (customerV3) {
+    return `\n${ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE}\n`;
+  }
   const resolved = resolveElevenLabsTtsModelId(ttsModelRaw);
   let s = `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`;
   if (elevenLabsTtsModelIsV3(resolved)) {

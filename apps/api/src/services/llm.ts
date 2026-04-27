@@ -356,3 +356,6 @@ export async function prepareQuestionForKbEmbedding(
     return { textForEmbedding: q, translatedForSearch: false };
   }
 }
+
+/** Same as `DEFAULT_ELEVENLABS_TTS_VOICE_ID` in config — default ElevenLabs voice when `tts_provider` is elevenlabs. */
+export { DEFAULT_ELEVENLABS_TTS_VOICE_ID } from "../config/env";
