@@ -39,7 +39,7 @@ Each entry has:
 |------------------------------|-------------|-------------|-----------------|-------|
 | `stt_provider`               | TEXT        | 'sarvam'    | tenant-editable | Current code uses Sarvam STT only; provider switching is roadmap. |
 | `stt_model`                  | TEXT        | 'saaras:v3' | admin-only      | Provider-specific model id (Sarvam `saaras:v3`, ElevenLabs `scribe_v1`, etc.). |
-| `stt_streaming_enabled`      | BOOLEAN     | FALSE       | tenant-editable | When `TRUE` and provider supports it, use streaming STT (partial transcripts) instead of batch WAV upload. |
+| `stt_streaming_enabled`      | BOOLEAN     | FALSE       | tenant-editable | **Exotel + Sarvam:** when `TRUE` and `stt_model` is a WebSocket-capable Sarvam model (`saaras:*` / `saarika:*`), STT uses [Sarvam STT WebSocket](https://docs.sarvam.ai/api-reference-docs/speech-to-text/transcribe/ws) (`stt_implementation: "websocket"`), with REST fallback on error. |
 
 ## C. TTS (text-to-speech)
 
@@ -53,7 +53,7 @@ Each entry has:
 | `tts_default_loudness`       | NUMERIC(3,2)  | NULL        | tenant-editable |  |
 | `tts_default_sample_rate`    | INT           | 22050       | admin-only      | Effective default comes from `SARVAM_TTS_SPEECH_SAMPLE_RATE` in code (`env.ts`). |
 | `tts_output_codec`           | TEXT          | 'wav'       | admin-only      | Rarely changes. |
-| `tts_streaming_enabled`      | BOOLEAN       | FALSE       | tenant-editable | Stream PCM chunks to Exotel as they are synthesized; reduces time-to-first-audio. |
+| `tts_streaming_enabled`      | BOOLEAN       | FALSE       | tenant-editable | **Exotel + Sarvam:** with `rag_streaming_enabled`, gates LLM stream + TTS. When `TRUE`, TTS uses [Sarvam HTTP stream](https://docs.sarvam.ai/api-reference-docs/api-guides-tutorials/text-to-speech/streaming-api/http-stream) (`POST /text-to-speech/stream`); on failure, falls back to REST JSON. |
 
 ## D. RAG / LLM
 

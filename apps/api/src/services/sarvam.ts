@@ -1,6 +1,8 @@
 import { env } from "../config/env";
+import WebSocket from "ws";
 
 const SARVAM_BASE = "https://api.sarvam.ai";
+const SARVAM_WS_BASE = "wss://api.sarvam.ai";
 
 export type SarvamSttMode =
   | "transcribe"
@@ -96,6 +98,220 @@ export async function sarvamTextToSpeech(
 
   const body = await readJsonBody(res);
   return { status: res.status, body };
+}
+
+/**
+ * Sarvam HTTP streaming TTS — `POST /text-to-speech/stream` (binary WAV/MP3/…).
+ * @see https://docs.sarvam.ai/api-reference-docs/api-guides-tutorials/text-to-speech/streaming-api/http-stream
+ */
+export async function sarvamTextToSpeechStream(payload: {
+  text: string;
+  target_language_code: string;
+  speaker?: string | null;
+  model?: string;
+  pace?: number | null;
+  speech_sample_rate?: number;
+  output_audio_codec?: string;
+  temperature?: number | null;
+  pitch?: number | null;
+  loudness?: number | null;
+  enable_preprocessing?: boolean;
+  dict_id?: string | null;
+}): Promise<{
+  status: number;
+  body: unknown;
+  /** Raw audio when status is 200 */
+  audioBuffer?: Buffer;
+  contentType?: string | null;
+}> {
+  const key = requireSarvamKey();
+  const body: Record<string, unknown> = {
+    text: payload.text.slice(0, 3500),
+    target_language_code: payload.target_language_code,
+    model: payload.model ?? "bulbul:v3",
+    output_audio_codec: payload.output_audio_codec ?? "wav",
+  };
+  if (payload.speaker) body.speaker = payload.speaker;
+  if (payload.speech_sample_rate != null) {
+    body.speech_sample_rate = payload.speech_sample_rate;
+  }
+  if (payload.pace != null && !Number.isNaN(payload.pace)) body.pace = payload.pace;
+  if (payload.temperature != null && !Number.isNaN(payload.temperature)) {
+    body.temperature = payload.temperature;
+  }
+  if (payload.pitch != null && !Number.isNaN(payload.pitch)) body.pitch = payload.pitch;
+  if (payload.loudness != null && !Number.isNaN(payload.loudness)) {
+    body.loudness = payload.loudness;
+  }
+  if (payload.enable_preprocessing === true) body.enable_preprocessing = true;
+  if (payload.dict_id) body.dict_id = payload.dict_id;
+
+  const res = await fetch(`${SARVAM_BASE}/text-to-speech/stream`, {
+    method: "POST",
+    headers: {
+      "api-subscription-key": key,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const ct = res.headers.get("content-type");
+  if (!res.ok) {
+    const errBody = await readJsonBody(res);
+    return { status: res.status, body: errBody, contentType: ct };
+  }
+  const ab = await res.arrayBuffer();
+  return {
+    status: 200,
+    body: { streamed: true },
+    audioBuffer: Buffer.from(ab),
+    contentType: ct,
+  };
+}
+
+/** Models supported on Sarvam STT WebSocket (see API reference). */
+export function sarvamSttWebsocketModelSupported(model: string | undefined): boolean {
+  const m = (model ?? "saaras:v3").trim().toLowerCase();
+  return m.startsWith("saaras:") || m.startsWith("saarika:");
+}
+
+/**
+ * One-shot STT over Sarvam WebSocket: full utterance in, final transcript out.
+ * @see https://docs.sarvam.ai/api-reference-docs/speech-to-text/transcribe/ws
+ * @see https://docs.sarvam.ai/api-reference-docs/api-guides-tutorials/speech-to-text/streaming-api
+ */
+export async function sarvamSpeechToTextWebsocket(params: {
+  wavBuffer: Buffer;
+  sampleRate: number;
+  model: string;
+  mode: SarvamSttMode;
+  language_code: string;
+}): Promise<{ status: number; body: unknown }> {
+  const key = requireSarvamKey();
+  const sr = params.sampleRate === 8000 ? 8000 : 16000;
+  const model = params.model || "saaras:v3";
+  const languageCode = params.language_code.trim() || "unknown";
+
+  const u = new URL(`${SARVAM_WS_BASE}/speech-to-text/ws`);
+  u.searchParams.set("language-code", languageCode);
+  u.searchParams.set("model", model);
+  u.searchParams.set("mode", params.mode);
+  u.searchParams.set("sample_rate", String(sr));
+  u.searchParams.set("input_audio_codec", "wav");
+  u.searchParams.set("flush_signal", "true");
+  u.searchParams.set("high_vad_sensitivity", "false");
+
+  return await new Promise((resolve) => {
+    const ws = new WebSocket(u.toString(), {
+      headers: {
+        "api-subscription-key": key,
+        "Api-Subscription-Key": key,
+      },
+      handshakeTimeout: 15_000,
+    });
+
+    let lastTranscript = "";
+    let lastLang: string | null = null;
+    let lastRequestId: string | null = null;
+    let settled = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const idleMs = 2000;
+    const maxWait = 60_000;
+
+    let hardTimeout: ReturnType<typeof setTimeout>;
+    const finish = (status: number, body: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimeout);
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      resolve({ status, body });
+    };
+
+    hardTimeout = setTimeout(() => {
+      if (!settled) {
+        finish(504, { error: "Sarvam STT WebSocket hard timeout" });
+      }
+    }, maxWait);
+
+    const scheduleIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (!settled) {
+          finish(200, {
+            request_id: lastRequestId,
+            transcript: lastTranscript,
+            language_code: lastLang ?? "en-IN",
+          });
+        }
+      }, idleMs);
+    };
+
+    ws.on("error", (err) => {
+      if (!settled) {
+        finish(500, { error: String(err) });
+      }
+    });
+
+    ws.on("message", (data: WebSocket.RawData) => {
+      const text = data.toString();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      const p = parsed as { type?: string; data?: unknown };
+      if (p.type === "data" && p.data && typeof p.data === "object") {
+        const d = p.data as Record<string, unknown>;
+        if (typeof d.error === "string" && d.code) {
+          finish(400, { error: d.error, code: d.code });
+          return;
+        }
+        if (typeof d.transcript === "string") {
+          lastTranscript = d.transcript;
+          lastLang = typeof d.language_code === "string" ? d.language_code : null;
+          lastRequestId = typeof d.request_id === "string" ? d.request_id : null;
+          scheduleIdle();
+        }
+      }
+    });
+
+    ws.on("open", () => {
+      const b64 = params.wavBuffer.toString("base64");
+      // Connection-level sample_rate (8/16 kHz) drives decode; per-message field uses 16 kHz enum when not 8k stream.
+      const audioMsg = {
+        audio: {
+          data: b64,
+          encoding: "audio/wav",
+          sample_rate: "16000",
+        },
+      };
+      try {
+        ws.send(JSON.stringify(audioMsg));
+        ws.send(JSON.stringify({ type: "flush" }));
+      } catch (err) {
+        finish(500, { error: String(err) });
+      }
+    });
+
+    ws.on("close", () => {
+      if (!settled) {
+        finish(200, {
+          request_id: lastRequestId,
+          transcript: lastTranscript,
+          language_code: lastLang ?? "en-IN",
+        });
+      }
+    });
+  });
 }
 
 async function readJsonBody(res: Response): Promise<unknown> {

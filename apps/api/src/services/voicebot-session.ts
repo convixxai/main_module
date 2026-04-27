@@ -93,9 +93,21 @@ export interface VoicebotSession {
    */
   llmMaxTokensForVoice?: number;
   /**
-   * From `customer_settings.rag_streaming_enabled` — stream LLM tokens to TTS in sentence chunks.
+   * From `customer_settings.rag_streaming_enabled` — allow streaming LLM when combined with
+   * `ttsStreamingForVoice` (see `exotel-voicebot` `streamToCall`).
    */
   ragStreamingForVoice?: boolean;
+  /**
+   * From `customer_settings.tts_streaming_enabled` — sentence-chunk TTS from streaming LLM
+   * (`createStreamingVoiceTts`). If false while RAG streaming is on, the pipeline uses
+   * full `chatOpenAI` then a single `speakToExotel`.
+   */
+  ttsStreamingForVoice?: boolean;
+  /**
+   * From `customer_settings.stt_streaming_enabled` — reserved for future streaming STT; today
+   * STT is always batch; used for logging / tracing.
+   */
+  sttStreamingForVoice?: boolean;
   /** From `customer_settings.llm_temperature` (voice RAG). */
   llmTemperatureVoice?: number | null;
   /** From `customer_settings.llm_top_p` (voice RAG). */

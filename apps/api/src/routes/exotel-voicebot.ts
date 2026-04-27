@@ -47,7 +47,10 @@ import {
 } from "../services/pcm-audio";
 import {
   sarvamSpeechToText,
+  sarvamSpeechToTextWebsocket,
+  sarvamSttWebsocketModelSupported,
   sarvamTextToSpeech,
+  sarvamTextToSpeechStream,
   type SarvamTtsBody,
 } from "../services/sarvam";
 import {
@@ -186,6 +189,8 @@ async function applyCustomerVoiceSettingsToSession(
   const m = cs?.llm_max_tokens != null ? Number(cs.llm_max_tokens) : 150;
   session.llmMaxTokensForVoice = Math.min(512, Math.max(8, Number.isFinite(m) ? Math.floor(m) : 150));
   session.ragStreamingForVoice = cs?.rag_streaming_enabled === true;
+  session.ttsStreamingForVoice = cs?.tts_streaming_enabled === true;
+  session.sttStreamingForVoice = cs?.stt_streaming_enabled === true;
   const lt = cs?.llm_temperature != null ? Number(cs.llm_temperature) : null;
   session.llmTemperatureVoice =
     lt != null && Number.isFinite(lt) ? lt : null;
@@ -1089,6 +1094,7 @@ async function speakToExotel(
       tts_pace: ttsPayload.pace ?? null,
       tts_output_codec: ttsPayload.output_audio_codec ?? null,
     });
+    const useSarvamTtsStream = session.ttsStreamingForVoice === true;
     voiceTrace(log, "pipeline.tts.request", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -1105,9 +1111,50 @@ async function speakToExotel(
       tts_loudness: ttsPayload.loudness ?? null,
       tts_output_codec: ttsPayload.output_audio_codec ?? null,
       exotel_stream_sample_rate: session.mediaFormat.sample_rate,
+      sarvam_tts_path: useSarvamTtsStream ? "http_stream" : "rest_json",
     });
 
-    const tts = await sarvamTextToSpeech(ttsPayload);
+    const speechSrNum = Number(ttsPayload.speech_sample_rate) || 22050;
+    type TtsOk = { status: number; body: unknown; b64OrRaw: "b64" | "buffer"; b64?: string; buf?: Buffer };
+    let tts: TtsOk;
+    if (useSarvamTtsStream) {
+      const streamRes = await sarvamTextToSpeechStream({
+        text: ttsPayload.text,
+        target_language_code: ttsPayload.target_language_code,
+        speaker: ttsPayload.speaker,
+        model: ttsPayload.model,
+        pace: ttsPayload.pace ?? null,
+        speech_sample_rate: speechSrNum,
+        output_audio_codec: (ttsPayload.output_audio_codec || "wav") as string,
+        pitch: ttsPayload.pitch ?? null,
+        loudness: ttsPayload.loudness ?? null,
+      });
+      if (streamRes.status !== 200 || !streamRes.audioBuffer || streamRes.audioBuffer.length === 0) {
+        voiceTrace(log, "pipeline.tts.stream_fallback_rest", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          stream_status: streamRes.status,
+          reason: "retry_batch_json",
+        });
+        const rest = await sarvamTextToSpeech(ttsPayload);
+        tts = {
+          status: rest.status,
+          body: rest.body,
+          b64OrRaw: "b64",
+          b64: (rest.body as { audios?: string[] })?.audios?.[0],
+        };
+      } else {
+        tts = { status: 200, body: { streamed: true }, b64OrRaw: "buffer", buf: streamRes.audioBuffer };
+      }
+    } else {
+      const rest = await sarvamTextToSpeech(ttsPayload);
+      tts = {
+        status: rest.status,
+        body: rest.body,
+        b64OrRaw: "b64",
+        b64: (rest.body as { audios?: string[] })?.audios?.[0],
+      };
+    }
 
     if (tts.status !== 200) {
       session.ttsInProgress = false;
@@ -1126,25 +1173,36 @@ async function speakToExotel(
       return false;
     }
 
-    const ttsData = tts.body as { audios?: string[] };
-    const b64Audio = ttsData.audios?.[0];
-    if (!b64Audio) {
-      session.ttsInProgress = false;
-      log?.error("voicebot TTS returned no audio");
-      logVoiceStage(log, "tts.empty_audio", {
+    let wavBuffer: Buffer;
+    if (tts.b64OrRaw === "buffer" && tts.buf) {
+      voiceTrace(log, "pipeline.tts.response", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
-      }, "voicebot TTS returned empty audio payload");
-      return false;
+        pcm_bytes: tts.buf.length,
+        sarvam_tts_path: "http_stream",
+      });
+      wavBuffer = tts.buf;
+    } else {
+      const b64Audio = tts.b64;
+      if (!b64Audio) {
+        session.ttsInProgress = false;
+        log?.error("voicebot TTS returned no audio");
+        logVoiceStage(log, "tts.empty_audio", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+        }, "voicebot TTS returned empty audio payload");
+        return false;
+      }
+
+      voiceTrace(log, "pipeline.tts.response", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        wav_b64_chars: b64Audio.length,
+        sarvam_tts_path: "rest_json",
+      });
+
+      wavBuffer = Buffer.from(b64Audio, "base64");
     }
-
-    voiceTrace(log, "pipeline.tts.response", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      wav_b64_chars: b64Audio.length,
-    });
-
-    const wavBuffer = Buffer.from(b64Audio, "base64");
     const parsed = parseWavPcm16Mono(wavBuffer);
     const fallbackRate = parseInt(env.sarvam.ttsSpeechSampleRate, 10) || 22050;
     let pcmData: Buffer;
@@ -1311,6 +1369,13 @@ async function processUtterance(
 
   const csUtterance = tenantCs(session);
   const sttProvider = csUtterance?.stt_provider ?? "sarvam";
+  const sttModelForPath = (csUtterance?.stt_model ?? "saaras:v3").trim();
+  const sttImplLine: "websocket" | "batch" =
+    sttProvider === "sarvam" &&
+    session.sttStreamingForVoice === true &&
+    sarvamSttWebsocketModelSupported(sttModelForPath)
+      ? "websocket"
+      : "batch";
 
   voiceTrace(log, "pipeline.stt.request", {
     customerId: session.customerId,
@@ -1320,6 +1385,8 @@ async function processUtterance(
     wav_pcm_bytes: combinedPcm.length,
     sample_rate: session.mediaFormat.sample_rate,
     stt_provider: sttProvider,
+    stt_streaming_enabled: session.sttStreamingForVoice === true,
+    stt_implementation: sttImplLine,
   });
 
   try {
@@ -1363,16 +1430,49 @@ async function processUtterance(
         await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
         return;
       }
-      const sttModel = csUtterance?.stt_model?.trim() || "saaras:v3";
+      const sttModel = sttModelForPath;
+      const useSttWebsocket =
+        session.sttStreamingForVoice === true &&
+        sarvamSttWebsocketModelSupported(sttModel);
       try {
-        stt = await sarvamSpeechToText({
-          fileBuffer: wavBuffer,
-          filename: "utterance.wav",
-          mimeType: "audio/wav",
-          model: sttModel,
-          mode: "transcribe",
-          language_code: sttLanguageHint,
-        });
+        if (useSttWebsocket) {
+          const wsLanguage =
+            sttLanguageHint && sttLanguageHint.trim().length > 0
+              ? sttLanguageHint
+              : "unknown";
+          stt = await sarvamSpeechToTextWebsocket({
+            wavBuffer,
+            sampleRate: session.mediaFormat.sample_rate,
+            model: sttModel,
+            mode: "transcribe",
+            language_code: wsLanguage,
+          });
+          if (stt.status !== 200) {
+            voiceTrace(log, "pipeline.stt.websocket_fallback", {
+              customerId: session.customerId,
+              stream_sid: session.streamSid,
+              stt_status: stt.status,
+              body: safeJsonForLog(stt.body),
+            });
+            stt = await sarvamSpeechToText({
+              fileBuffer: wavBuffer,
+              filename: "utterance.wav",
+              mimeType: "audio/wav",
+              model: sttModel,
+              mode: "transcribe",
+              language_code: sttLanguageHint,
+            });
+          }
+        } else {
+          stt = await sarvamSpeechToText({
+            fileBuffer: wavBuffer,
+            filename: "utterance.wav",
+            mimeType: "audio/wav",
+            model: sttModel,
+            mode: "transcribe",
+            language_code: sttLanguageHint,
+          });
+        }
       } catch (err) {
         log?.error({ err }, "voicebot Sarvam STT failed");
         await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
@@ -1555,10 +1655,22 @@ async function processUtterance(
       return;
     }
 
+    // LLM + incremental TTS only when both RAG and TTS streaming are enabled (see SETTINGS catalog).
     const streamToCall =
-      session.ragStreamingForVoice === true
+      session.ragStreamingForVoice === true && session.ttsStreamingForVoice === true
         ? { ws, ttsLanguage }
         : undefined;
+    if (
+      session.ragStreamingForVoice === true &&
+      session.ttsStreamingForVoice !== true &&
+      log
+    ) {
+      voiceTrace(log, "pipeline.rag.tts_streaming_off", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        reason: "full_llm_then_single_tts",
+      });
+    }
 
     // === Step 2: Run RAG/Ask Pipeline ===
     const askResult = await runVoicebotAskPipeline(
@@ -1933,15 +2045,15 @@ async function runVoicebotAskPipeline(
           : 0.95,
       model: resolvedOpenAiModelForVoice(session),
     };
-    const useLlmStream =
-      streamCall != null &&
-      session.ragStreamingForVoice === true;
+    // `streamCall` is only passed from `processUtterance` when RAG + TTS streaming are both on.
+    const useLlmStream = streamCall != null;
 
     if (useLlmStream) {
       voiceTrace(log, "pipeline.rag.llm_stream", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
         max_tokens: maxTok,
+        tts_streaming_enabled: true,
       });
       const ttsq = createStreamingVoiceTts(
         streamCall!.ws,
