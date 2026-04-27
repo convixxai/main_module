@@ -473,6 +473,30 @@ function isLanguageInAllowedList(detectedRaw: string, allowed: string[]): boolea
   );
 }
 
+/**
+ * When Sarvam tags a wrong script language (e.g. gu-IN) for clear English speech, the first transcript
+ * is still usually Latin. Skipping the 2nd REST rehint in that case saves ~1s+ (TTFA).
+ */
+function transcriptLooksLatinHeavyForRehintSkip(
+  text: string,
+  minRatio: number
+): boolean {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  let latin = 0;
+  let letters = 0;
+  for (const ch of t) {
+    if (/[A-Za-z]/.test(ch)) {
+      latin++;
+      letters++;
+    } else if (/\p{L}/u.test(ch)) {
+      letters++;
+    }
+  }
+  if (letters === 0) return true;
+  return latin / letters >= minRatio;
+}
+
 const LANG_LABEL: Record<string, string> = {
   "en-IN": "English",
   "hi-IN": "Hindi",
@@ -1512,10 +1536,15 @@ async function processUtterance(
         sarvamSttWebsocketModelSupported(sttModel);
       try {
         if (useSttWebsocket) {
-          const wsLanguage =
-            sttLanguageHint && sttLanguageHint.trim().length > 0
-              ? sttLanguageHint
-              : "unknown";
+          const wsLanguage = (() => {
+            if (sttLanguageHint && sttLanguageHint.trim().length > 0) {
+              return sttLanguageHint;
+            }
+            if (multilingual && env.sarvam.sttWssUseDefaultLanguage) {
+              return session.defaultLanguageCode || "en-IN";
+            }
+            return "unknown";
+          })();
           stt = await sarvamSpeechToTextWebsocket({
             wavBuffer,
             sampleRate: session.mediaFormat.sample_rate,
@@ -1590,50 +1619,76 @@ async function processUtterance(
       : "en-IN";
 
     // Sarvam auto-detect can label audio as a language outside the tenant allowlist (e.g. gu-IN for
-    // English). Policy clamps to en-IN/mr-IN/hi-IN but the transcript stays in the wrong script;
-    // the LLM then mirrors that script. Re-transcribe once with an explicit allowed language hint.
-    if (
-      multilingual &&
-      sttProvider === "sarvam" &&
-      !isLanguageInAllowedList(detectedRaw, allowedNorm)
-    ) {
-      const sttModel = csUtterance?.stt_model?.trim() || "saaras:v3";
-      const firstDetected = detectedRaw;
-      const languageHintForRetry = effectiveLanguage;
-      try {
-        const sttRetry = await sarvamSpeechToText({
-          fileBuffer: wavBuffer,
-          filename: "utterance.wav",
-          mimeType: "audio/wav",
-          model: sttModel,
-          mode: "transcribe",
-          language_code: languageHintForRetry,
+    // English). Policy clamps to en-IN/mr-IN/hi-IN but the transcript can stay in the wrong script;
+    // the LLM may mirror that. Re-transcribe once with an explicit language hint (costly ~1s+).
+    // `VOICEBOT_STT_REHINT=auto` (default): skip rehint when the first transcript is already mostly Latin.
+    // `always` / `never` override. See `env.voicebot.sttRehint`.
+    {
+      const rehintMode = env.voicebot.sttRehint;
+      const outOfList =
+        multilingual &&
+        sttProvider === "sarvam" &&
+        !isLanguageInAllowedList(detectedRaw, allowedNorm);
+      const shouldRehint =
+        outOfList &&
+        (rehintMode === "never"
+          ? false
+          : rehintMode === "always"
+            ? true
+            : !transcriptLooksLatinHeavyForRehintSkip(transcript, 0.5));
+
+      if (outOfList && !shouldRehint && rehintMode === "auto") {
+        voiceTrace(log, "pipeline.stt.rehint_skipped", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          call_sid: session.callSid,
+          exotel_call_session_id: session.callSessionDbId,
+          stt_detected: detectedRaw,
+          reason: "latin_transcript_fast_path",
         });
-        if (sttRetry.status === 200) {
-          const b = sttRetry.body as { transcript?: string; language_code?: string };
-          const t2 = b.transcript?.trim() || "";
-          if (t2) {
-            transcript = t2;
-            detectedRaw = b.language_code?.trim() || languageHintForRetry;
-            effectiveLanguage = clampLanguageToAllowed(
-              detectedRaw,
-              allowedNorm,
-              session.defaultLanguageCode || "en-IN"
-            );
-            voiceTrace(log, "pipeline.stt.rehint", {
-              customerId: session.customerId,
-              stream_sid: session.streamSid,
-              call_sid: session.callSid,
-              exotel_call_session_id: session.callSessionDbId,
-              stt_detected_before: firstDetected,
-              language_code_hint: languageHintForRetry,
-              stt_detected_after: detectedRaw,
-              transcript_preview: transcript.slice(0, 200),
-            });
+      }
+      if (shouldRehint) {
+        const sttModel = csUtterance?.stt_model?.trim() || "saaras:v3";
+        const firstDetected = detectedRaw;
+        const languageHintForRetry = effectiveLanguage;
+        try {
+          const sttRetry = await sarvamSpeechToText({
+            fileBuffer: wavBuffer,
+            filename: "utterance.wav",
+            mimeType: "audio/wav",
+            model: sttModel,
+            mode: "transcribe",
+            language_code: languageHintForRetry,
+          });
+          if (sttRetry.status === 200) {
+            const b = sttRetry.body as { transcript?: string; language_code?: string };
+            const t2 = b.transcript?.trim() || "";
+            if (t2) {
+              transcript = t2;
+              detectedRaw = b.language_code?.trim() || languageHintForRetry;
+              effectiveLanguage = clampLanguageToAllowed(
+                detectedRaw,
+                allowedNorm,
+                session.defaultLanguageCode || "en-IN"
+              );
+              voiceTrace(log, "pipeline.stt.rehint", {
+                customerId: session.customerId,
+                stream_sid: session.streamSid,
+                call_sid: session.callSid,
+                exotel_call_session_id: session.callSessionDbId,
+                stt_detected_before: firstDetected,
+                language_code_hint: languageHintForRetry,
+                stt_detected_after: detectedRaw,
+                transcript_preview: transcript.slice(0, 200),
+              });
+            }
           }
+        } catch (err) {
+          log?.warn(
+            { err, stream_sid: session.streamSid },
+            "voicebot STT rehint failed; using first pass"
+          );
         }
-      } catch (err) {
-        log?.warn({ err, stream_sid: session.streamSid }, "voicebot STT rehint failed; using first pass");
       }
     }
 
@@ -2132,7 +2187,10 @@ async function runVoicebotAskPipeline(
       user_preview: question.slice(0, 300),
     });
 
-    const maxTok = session.llmMaxTokensForVoice ?? 150;
+    const maxTok = Math.min(
+      session.llmMaxTokensForVoice ?? 150,
+      env.voicebot.voiceLlmMaxTokensCap
+    );
     const tTop = session.llmTopPVoice;
     const voiceRagOpts = {
       temperature: session.llmTemperatureVoice ?? 0.2,

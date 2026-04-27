@@ -64,14 +64,45 @@ export const env = {
      */
     sttWsIdleAfterTranscriptMs: Math.min(
       5000,
-      Math.max(50, parseInt(process.env.SARVAM_STT_WS_IDLE_MS || "450", 10) || 450)
+      Math.max(50, parseInt(process.env.SARVAM_STT_WS_IDLE_MS || "400", 10) || 400)
     ),
+    /**
+     * When `true`, Sarvam STT WebSocket `language-code` uses `default_language_code` (e.g. en-IN)
+     * instead of `unknown` for multilingual calls — fewer wrong-language IDs, less rehint. English-primary lines: enable.
+     */
+    sttWssUseDefaultLanguage: process.env.SARVAM_STT_WSS_DEFAULT_LANG === "true",
     /**
      * When `true` (default), Sarvam HTTP TTS stream uses `linear16` at the **Exotel** sample rate so the body
      * decodes as raw PCM in one pass (avoids RIFF/codec edge cases that triggered REST fallback + double latency).
      * Set `SARVAM_TTS_STREAM_LINEAR16=false` to use tenant WAV codec for the stream.
      */
     ttsStreamLinear16: process.env.SARVAM_TTS_STREAM_LINEAR16 !== "false",
+  },
+
+  /**
+   * Voicebot TTFA / latency tuning (Exotel path).
+   */
+  voicebot: {
+    /**
+     * Second STT pass when Sarvam language is outside tenant allowlist.
+     * `auto` (default): skip when first transcript is mostly Latin letters (saves ~1s).
+     * `always`: always rehint. `never`: never rehint.
+     */
+    sttRehint: ((): "auto" | "always" | "never" => {
+      const v = (process.env.VOICEBOT_STT_REHINT || "auto").trim().toLowerCase();
+      if (v === "always" || v === "never") return v;
+      return "auto";
+    })(),
+    /**
+     * Hard cap on LLM completion tokens for voice RAG (lower = faster first audio). Default 120.
+     */
+    voiceLlmMaxTokensCap: Math.min(
+      512,
+      Math.max(
+        32,
+        parseInt(process.env.VOICEBOT_VOICE_LLM_MAX_TOKENS || "120", 10) || 120
+      )
+    ),
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
