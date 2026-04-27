@@ -202,3 +202,108 @@ export function parseWavPcm16Mono(
   if (!dataChunk || bitsPerSample !== 16) return null;
   return { pcm: dataChunk, sampleRate };
 }
+
+const WAVE_FORMAT_PCM = 0x0001;
+const WAVE_FORMAT_IEEE_FLOAT = 0x0003;
+
+function interleavedS16leStereoToMono(buf: Buffer): Buffer {
+  const n = Math.floor(buf.length / 4);
+  const out = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) {
+    const l = buf.readInt16LE(i * 4);
+    const r = buf.readInt16LE(i * 4 + 2);
+    const m = Math.round((l + r) / 2);
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, m)), i * 2);
+  }
+  return out;
+}
+
+function interleavedF32StereoToMonoS16le(buf: Buffer): Buffer {
+  const n = Math.floor(buf.length / 8);
+  const out = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) {
+    const l = buf.readFloatLE(i * 8);
+    const r = buf.readFloatLE(i * 8 + 4);
+    const f = (l + r) * 0.5;
+    const s = f * 32767;
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(s))), i * 2);
+  }
+  return out;
+}
+
+function float32MonoWavDataToS16le(buf: Buffer): Buffer {
+  const n = Math.floor(buf.length / 4);
+  const out = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) {
+    const f = buf.readFloatLE(i * 4);
+    const s = f * 32767;
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(s))), i * 2);
+  }
+  return out;
+}
+
+/**
+ * Sarvam (and other) TTS WAV buffers may be 16-bit PCM, stereo, or IEEE float.
+ * Produces 16-bit LE mono PCM for telephony. Returns null for unsupported or invalid WAV.
+ */
+export function parseWavToPcmS16leMono(
+  buffer: Buffer
+): { pcm: Buffer; sampleRate: number } | null {
+  if (
+    buffer.length < 44 ||
+    buffer.toString("ascii", 0, 4) !== "RIFF" ||
+    buffer.toString("ascii", 8, 12) !== "WAVE"
+  ) {
+    return null;
+  }
+
+  let sampleRate = 8000;
+  let audioFormat = 0;
+  let numChannels = 1;
+  let bitsPerSample = 16;
+  let dataChunk: Buffer | null = null;
+
+  let offset = 12;
+  while (offset + 8 <= buffer.length) {
+    const id = buffer.toString("ascii", offset, offset + 4);
+    const size = buffer.readUInt32LE(offset + 4);
+    const payloadStart = offset + 8;
+    if (payloadStart + size > buffer.length) break;
+
+    if (id === "fmt " && size >= 16) {
+      audioFormat = buffer.readUInt16LE(payloadStart);
+      numChannels = buffer.readUInt16LE(payloadStart + 2);
+      sampleRate = buffer.readUInt32LE(payloadStart + 4);
+      bitsPerSample = buffer.readUInt16LE(payloadStart + 14);
+    }
+    if (id === "data") {
+      dataChunk = buffer.subarray(payloadStart, payloadStart + size);
+      break;
+    }
+
+    offset = payloadStart + size + (size % 2);
+  }
+
+  if (!dataChunk || dataChunk.length === 0) return null;
+  if (numChannels < 1 || numChannels > 2) return null;
+
+  if (audioFormat === WAVE_FORMAT_PCM && bitsPerSample === 16) {
+    if (numChannels === 1) return { pcm: dataChunk, sampleRate };
+    return { pcm: interleavedS16leStereoToMono(dataChunk), sampleRate };
+  }
+  if (audioFormat === WAVE_FORMAT_IEEE_FLOAT && bitsPerSample === 32) {
+    if (numChannels === 1) {
+      return { pcm: float32MonoWavDataToS16le(dataChunk), sampleRate };
+    }
+    return { pcm: interleavedF32StereoToMonoS16le(dataChunk), sampleRate };
+  }
+  return null;
+}
+
+/** True if buffer looks like MP3 (ID3 tag or frame sync), not RIFF. */
+export function isLikelyMp3Buffer(b: Buffer): boolean {
+  if (b.length < 2) return false;
+  if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) return true; // "ID3"
+  if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) return true; // MPEG frame sync
+  return false;
+}

@@ -41,7 +41,9 @@ import {
   decodeBase64Pcm,
   encodeBase64Pcm,
   PcmChunkBuffer,
+  isLikelyMp3Buffer,
   parseWavPcm16Mono,
+  parseWavToPcmS16leMono,
   pcmDurationMs,
   resamplePcm16,
 } from "../services/pcm-audio";
@@ -1203,22 +1205,84 @@ async function speakToExotel(
 
       wavBuffer = Buffer.from(b64Audio, "base64");
     }
-    const parsed = parseWavPcm16Mono(wavBuffer);
-    const fallbackRate = parseInt(env.sarvam.ttsSpeechSampleRate, 10) || 22050;
-    let pcmData: Buffer;
-    let srcRate: number;
-
-    if (parsed) {
-      pcmData = parsed.pcm;
-      srcRate = parsed.sampleRate;
-    } else {
-      pcmData = wavBuffer.length > 44 ? wavBuffer.subarray(44) : wavBuffer;
-      srcRate = fallbackRate;
-      log?.warn(
-        { stream_sid: session.streamSid, wav_bytes: wavBuffer.length },
-        "voicebot: WAV parse failed; assuming raw PCM at SARVAM_TTS_SPEECH_SAMPLE_RATE"
-      );
+    /** HTTP /stream can return MP3, float WAV, linear16 without a RIFF header, etc. */
+    function tryDecodeSarvamAudio(buf: Buffer): { pcm: Buffer; srcRate: number } | null {
+      const w = parseWavToPcmS16leMono(buf);
+      if (w) return { pcm: w.pcm, srcRate: w.sampleRate };
+      if (isLikelyMp3Buffer(buf)) return null;
+      const isRiff =
+        buf.length >= 12 &&
+        buf.toString("ascii", 0, 4) === "RIFF" &&
+        buf.toString("ascii", 8, 12) === "WAVE";
+      if (isRiff) return null;
+      if (buf.length > 0 && buf.length % 2 === 0) {
+        voiceTrace(log, "pipeline.tts.sarvam_linear_or_raw", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          pcm_bytes: buf.length,
+          speech_sample_rate: speechSrNum,
+        });
+        return { pcm: buf, srcRate: speechSrNum };
+      }
+      return null;
     }
+
+    let decoded = tryDecodeSarvamAudio(wavBuffer);
+    if (!decoded) {
+      if (tts.b64OrRaw === "b64") {
+        session.ttsInProgress = false;
+        log?.error(
+          { stream_sid: session.streamSid, bytes: wavBuffer.length },
+          "voicebot TTS: could not decode audio from Sarvam REST (already on JSON path)"
+        );
+        return false;
+      }
+      if (isLikelyMp3Buffer(wavBuffer)) {
+        voiceTrace(log, "pipeline.tts.sarvam_stream_mpeg", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          bytes: wavBuffer.length,
+          note: "Sarvam /stream can return audio/mpeg; using REST /text-to-speech JSON for PCM WAV",
+        });
+      } else {
+        voiceTrace(log, "pipeline.tts.sarvam_decode_rest", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          bytes: wavBuffer.length,
+          reason: "stream_body_not_decodable",
+        });
+      }
+      const rest = await sarvamTextToSpeech(ttsPayload);
+      if (rest.status !== 200) {
+        session.ttsInProgress = false;
+        log?.error({ status: rest.status, body: safeJsonForLog(rest.body) }, "voicebot TTS REST fallback after stream decode failed");
+        voiceTrace(log, "pipeline.tts.error", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          status: rest.status,
+          body: safeJsonForLog(rest.body),
+        });
+        return false;
+      }
+      const b64Audio = (rest.body as { audios?: string[] })?.audios?.[0];
+      if (!b64Audio) {
+        session.ttsInProgress = false;
+        log?.error("voicebot TTS REST fallback returned no audio");
+        return false;
+      }
+      wavBuffer = Buffer.from(b64Audio, "base64");
+      decoded = tryDecodeSarvamAudio(wavBuffer);
+    }
+    if (!decoded) {
+      session.ttsInProgress = false;
+      log?.error(
+        { stream_sid: session.streamSid, bytes: wavBuffer.length },
+        "voicebot TTS: could not decode Sarvam audio (WAV/PCM/REST)"
+      );
+      return false;
+    }
+    let pcmData = decoded.pcm;
+    const srcRate = decoded.srcRate;
 
     if (srcRate !== exotelRate) {
       voiceTrace(log, "pipeline.tts.resample", {
