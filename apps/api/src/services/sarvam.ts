@@ -169,6 +169,103 @@ export async function sarvamTextToSpeechStream(payload: {
   };
 }
 
+/**
+ * True incremental streaming TTS — yields PCM chunks as they arrive from Sarvam
+ * instead of buffering the full response body. Each yielded Buffer is aligned to
+ * `alignBytes` (default 320, Exotel's requirement) and at least `minChunkBytes`
+ * (default 3200, Exotel's minimum for jitter-free playback).
+ *
+ * Caller should request `output_audio_codec: "linear16"` at the target sample rate
+ * so the body is headerless raw s16le PCM — no RIFF parsing needed.
+ */
+export async function* sarvamTtsStreamIncremental(payload: {
+  text: string;
+  target_language_code: string;
+  speaker?: string | null;
+  model?: string;
+  pace?: number | null;
+  speech_sample_rate?: number;
+  output_audio_codec?: string;
+  temperature?: number | null;
+  pitch?: number | null;
+  loudness?: number | null;
+  enable_preprocessing?: boolean;
+  dict_id?: string | null;
+  /** Minimum bytes per yielded chunk (default 3200 = Exotel min). */
+  minChunkBytes?: number;
+  /** Alignment in bytes (default 320 = Exotel requirement). */
+  alignBytes?: number;
+}): AsyncGenerator<Buffer, void, unknown> {
+  const key = requireSarvamKey();
+  const body: Record<string, unknown> = {
+    text: payload.text.slice(0, 3500),
+    target_language_code: payload.target_language_code,
+    model: payload.model ?? "bulbul:v3",
+    output_audio_codec: payload.output_audio_codec ?? "linear16",
+  };
+  if (payload.speaker) body.speaker = payload.speaker;
+  if (payload.speech_sample_rate != null) {
+    body.speech_sample_rate = payload.speech_sample_rate;
+  }
+  if (payload.pace != null && !Number.isNaN(payload.pace)) body.pace = payload.pace;
+  if (payload.temperature != null && !Number.isNaN(payload.temperature)) {
+    body.temperature = payload.temperature;
+  }
+  if (payload.pitch != null && !Number.isNaN(payload.pitch)) body.pitch = payload.pitch;
+  if (payload.loudness != null && !Number.isNaN(payload.loudness)) {
+    body.loudness = payload.loudness;
+  }
+  if (payload.enable_preprocessing === true) body.enable_preprocessing = true;
+  if (payload.dict_id) body.dict_id = payload.dict_id;
+
+  const align = payload.alignBytes ?? 320;
+  const minChunk = payload.minChunkBytes ?? 3200;
+
+  const res = await fetch(`${SARVAM_BASE}/text-to-speech/stream`, {
+    method: "POST",
+    headers: {
+      "api-subscription-key": key,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Sarvam TTS stream HTTP ${res.status}`);
+  }
+  if (!res.body) {
+    throw new Error("Sarvam TTS stream: no response body");
+  }
+
+  const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+  let pending = Buffer.alloc(0);
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    pending = Buffer.concat([pending, Buffer.from(value)]);
+
+    while (pending.length >= minChunk) {
+      const aligned = Math.floor(pending.length / align) * align;
+      if (aligned < minChunk) break;
+      const take = Math.min(aligned, 102400);
+      yield pending.subarray(0, take);
+      pending = pending.subarray(take);
+    }
+  }
+  // Flush remaining: pad to alignment, then to min chunk if needed.
+  if (pending.length > 0) {
+    const rem = pending.length % align;
+    if (rem !== 0) {
+      pending = Buffer.concat([pending, Buffer.alloc(align - rem, 0)]);
+    }
+    if (pending.length < minChunk) {
+      pending = Buffer.concat([pending, Buffer.alloc(minChunk - pending.length, 0)]);
+    }
+    yield pending;
+  }
+}
+
 /** Models supported on Sarvam STT WebSocket (see API reference). */
 export function sarvamSttWebsocketModelSupported(model: string | undefined): boolean {
   const m = (model ?? "saaras:v3").trim().toLowerCase();

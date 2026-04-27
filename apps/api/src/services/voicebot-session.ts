@@ -120,6 +120,19 @@ export interface VoicebotSession {
     defaultNoKb: string | null;
   };
   /**
+   * Cached agent row from first RAG call — avoids repeated PG round-trip per utterance.
+   */
+  voiceRagAgentCache?: {
+    systemPrompt: string;
+    fallbackInstruction: string | null;
+    ttsPace: number | null;
+    ttsModel: string | null;
+    ttsSpeaker: string | null;
+    ttsSampleRate: number | null;
+    avatarId: string | null;
+    elevenlabsAvatarId: string | null;
+  } | null;
+  /**
    * Full tenant row from `getCustomerSettings` at `start` — drives VAD, RAG caps, webhooks, etc.
    */
   customerSettingsSnapshot?: CustomerSettings | null;
@@ -127,6 +140,10 @@ export interface VoicebotSession {
   maxCallDurationTimer?: ReturnType<typeof setTimeout> | null;
   /** Avoid duplicate `call_end` webhooks when both `stop` and `close` fire. */
   callEndNotified?: boolean;
+  /** Timestamp (Date.now()) when the current utterance started processing — for TTFA measurement. */
+  utteranceProcessingStartedAt?: number;
+  /** Set to true once the first outbound audio for the current answer is sent (reset per utterance). */
+  ttfaLogged?: boolean;
 }
 
 /**

@@ -64,7 +64,7 @@ export const env = {
      */
     sttWsIdleAfterTranscriptMs: Math.min(
       5000,
-      Math.max(50, parseInt(process.env.SARVAM_STT_WS_IDLE_MS || "400", 10) || 400)
+      Math.max(50, parseInt(process.env.SARVAM_STT_WS_IDLE_MS || "250", 10) || 250)
     ),
     /**
      * When `true`, Sarvam STT WebSocket `language-code` uses `default_language_code` (e.g. en-IN)
@@ -77,6 +77,13 @@ export const env = {
      * Set `SARVAM_TTS_STREAM_LINEAR16=false` to use tenant WAV codec for the stream.
      */
     ttsStreamLinear16: process.env.SARVAM_TTS_STREAM_LINEAR16 !== "false",
+    /**
+     * When `true` (default), use the incremental ReadableStream TTS consumer that pipes PCM chunks
+     * to Exotel as they arrive from Sarvam — first audio reaches the caller ~200-400ms after Sarvam
+     * starts generating instead of waiting for the full response body. Requires `ttsStreamLinear16`.
+     * Set `SARVAM_TTS_INCREMENTAL_STREAM=false` to use the legacy full-buffer path.
+     */
+    ttsIncrementalStream: process.env.SARVAM_TTS_INCREMENTAL_STREAM !== "false",
   },
 
   /**
@@ -94,15 +101,25 @@ export const env = {
       return "auto";
     })(),
     /**
-     * Hard cap on LLM completion tokens for voice RAG (lower = faster first audio). Default 120.
+     * Hard cap on LLM completion tokens for voice RAG (lower = faster first audio). Default 80.
      */
     voiceLlmMaxTokensCap: Math.min(
       512,
       Math.max(
         32,
-        parseInt(process.env.VOICEBOT_VOICE_LLM_MAX_TOKENS || "120", 10) || 120
+        parseInt(process.env.VOICEBOT_VOICE_LLM_MAX_TOKENS || "80", 10) || 80
       )
     ),
+    /**
+     * When true (default), STT lines that are only conversational fillers (hmm, um, uh, …) skip embedding + RAG + LLM
+     * and play `fillerAckText` instead (faster, avoids irrelevant sales prompts). Set `VOICEBOT_FILLER_ACK_ENABLED=false` to restore old behavior.
+     */
+    fillerAckEnabled: process.env.VOICEBOT_FILLER_ACK_ENABLED !== "false",
+    /** Spoken reply for filler-only turns. Keep short for telephony. */
+    fillerAckText: (() => {
+      const t = (process.env.VOICEBOT_FILLER_ACK_TEXT || "Go ahead, I'm listening.").trim();
+      return t.length > 0 ? t : "Go ahead, I'm listening.";
+    })(),
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */

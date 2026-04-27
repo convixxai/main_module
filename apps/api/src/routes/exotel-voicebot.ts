@@ -53,6 +53,7 @@ import {
   sarvamSttWebsocketModelSupported,
   sarvamTextToSpeech,
   sarvamTextToSpeechStream,
+  sarvamTtsStreamIncremental,
   type SarvamTtsBody,
 } from "../services/sarvam";
 import {
@@ -99,6 +100,95 @@ const ERROR_AUDIO_TEXT = "Sorry, I was unable to process that. Please try again.
 
 /** Greeting text for new calls. */
 const GREETING_TEXT = "Hello! How can I help you today?";
+
+/**
+ * In-memory cache for pre-rendered greeting PCM audio. Key is
+ * `${customerId}:${greetingText}:${ttsProvider}:${ttsSpeaker}:${lang}:${sampleRate}`.
+ * Avoids a full TTS round-trip on every new call for the same tenant/agent.
+ */
+const greetingPcmCache = new Map<string, { pcm: Buffer; ts: number }>();
+const GREETING_CACHE_TTL_MS = 3600_000; // 1 hour
+
+function getGreetingCacheKey(
+  customerId: string,
+  text: string,
+  provider: string,
+  speaker: string,
+  lang: string,
+  sampleRate: number
+): string {
+  return `${customerId}:${text.slice(0, 200)}:${provider}:${speaker}:${lang}:${sampleRate}`;
+}
+
+function getCachedGreetingPcm(key: string): Buffer | null {
+  const entry = greetingPcmCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > GREETING_CACHE_TTL_MS) {
+    greetingPcmCache.delete(key);
+    return null;
+  }
+  return entry.pcm;
+}
+
+function setCachedGreetingPcm(key: string, pcm: Buffer): void {
+  greetingPcmCache.set(key, { pcm, ts: Date.now() });
+  if (greetingPcmCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of greetingPcmCache) {
+      if (now - v.ts > GREETING_CACHE_TTL_MS) greetingPcmCache.delete(k);
+    }
+  }
+}
+
+/**
+ * After the first greeting plays for a tenant, generate and cache the PCM in the background
+ * so subsequent calls for the same tenant get instant greetings. Fire-and-forget.
+ */
+async function preWarmGreetingCache(
+  session: VoicebotSession,
+  text: string,
+  languageCode: string,
+  cacheKey: string,
+  log?: FastifyRequest["log"]
+): Promise<void> {
+  try {
+    const cs = tenantCs(session);
+    const ttsProvider = cs?.tts_provider ?? "sarvam";
+    const exotelRate = session.mediaFormat.sample_rate;
+
+    if (ttsProvider === "elevenlabs") return; // ElevenLabs caching would need voice_id alignment
+
+    const ttsPayload: SarvamTtsBody = {
+      text: text.slice(0, 2500),
+      target_language_code: languageCode,
+      model: session.ttsModel?.trim() || cs?.tts_model?.trim() || env.sarvam.ttsModel || "bulbul:v2",
+      speech_sample_rate: exotelRate.toString(),
+      output_audio_codec: "wav",
+    };
+    if (session.ttsSpeaker?.trim()) ttsPayload.speaker = session.ttsSpeaker.trim();
+    else if (cs?.tts_default_speaker?.trim()) ttsPayload.speaker = cs.tts_default_speaker.trim();
+    else if (env.sarvam.ttsSpeaker) ttsPayload.speaker = env.sarvam.ttsSpeaker;
+
+    const pace = session.ttsPace ?? (cs?.tts_default_pace != null ? Number(cs.tts_default_pace) : null) ?? env.sarvam.ttsPace;
+    if (pace != null && !Number.isNaN(pace)) ttsPayload.pace = pace;
+
+    const rest = await sarvamTextToSpeech(ttsPayload);
+    if (rest.status !== 200) return;
+    const b64 = (rest.body as { audios?: string[] })?.audios?.[0];
+    if (!b64) return;
+    const wavBuf = Buffer.from(b64, "base64");
+    const parsed = parseWavToPcmS16leMono(wavBuf);
+    if (!parsed) return;
+    let pcm = parsed.pcm;
+    if (parsed.sampleRate !== exotelRate) {
+      pcm = resamplePcm16(pcm, parsed.sampleRate, exotelRate);
+    }
+    setCachedGreetingPcm(cacheKey, pcm);
+    log?.info({ customerId: session.customerId, cache_key_len: cacheKey.length, pcm_bytes: pcm.length }, "voicebot: greeting PCM cached for next call");
+  } catch {
+    // Best-effort; don't let cache warming break anything
+  }
+}
 
 /** Same as `DIRECT_MATCH_THRESHOLD` in ask.ts (pgvector distance). Skips LLM on first user turn when match is strong. */
 const VOICEBOT_DIRECT_KB_DISTANCE = 0.3;
@@ -497,6 +587,21 @@ function transcriptLooksLatinHeavyForRehintSkip(
   return latin / letters >= minRatio;
 }
 
+/**
+ * True when the transcript is only light fillers (hmm, um, uh, …) with no other words.
+ * Used to skip RAG/LLM so "Hmm." does not trigger embeddings + a generic sales line.
+ */
+function isFillerOnlyTranscript(raw: string): boolean {
+  const t = raw
+    .trim()
+    .replace(/[\u201c\u201d\u2018\u2019'"`]/g, "")
+    .replace(/\s+/g, " ");
+  if (t.length === 0) return false;
+  return /^(?:(?:hmm|hmmm|hm|mmm|mm|mhm|um|umm|uhm|uh|ah|oh|er|huh)\s*[.,!?…]*\s*)+$/i.test(
+    t
+  );
+}
+
 const LANG_LABEL: Record<string, string> = {
   "en-IN": "English",
   "hi-IN": "Hindi",
@@ -828,6 +933,29 @@ function sendAudioToExotel(
     sendToExotel(ws, media, log, ctx, { skipTrace: true });
   }
 
+  // TTFA: log time from utterance start to first outbound audio for the answer
+  if (
+    allChunks.length > 0 &&
+    !session.ttfaLogged &&
+    session.utteranceProcessingStartedAt &&
+    !session.greetingPending
+  ) {
+    session.ttfaLogged = true;
+    const ttfaMs = Date.now() - session.utteranceProcessingStartedAt;
+    voiceTrace(log, "pipeline.ttfa", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      ttfa_ms: ttfaMs,
+      target_ms: 2000,
+      met_target: ttfaMs < 2000,
+    });
+    logVoiceStage(log, "ttfa.first_audio", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      ttfa_ms: ttfaMs,
+    }, `voicebot TTFA: ${ttfaMs}ms${ttfaMs < 2000 ? " ✓" : " (over target)"}`);
+  }
+
   voiceTrace(log, "exotel.out.media_batch", {
     customerId: session.customerId,
     stream_sid: session.streamSid,
@@ -1124,9 +1252,10 @@ async function speakToExotel(
       tts_output_codec: ttsPayload.output_audio_codec ?? null,
     });
     const useSarvamTtsStream = session.ttsStreamingForVoice === true;
-    /** HTTP stream: linear16 @ Exotel rate = raw s16le; avoids RIFF parse failures and REST double-fetch. */
     const useLinear16TtsStream =
       useSarvamTtsStream && env.sarvam.ttsStreamLinear16;
+    const useIncrementalStream =
+      useLinear16TtsStream && env.sarvam.ttsIncrementalStream;
     voiceTrace(log, "pipeline.tts.request", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -1143,9 +1272,61 @@ async function speakToExotel(
       tts_loudness: ttsPayload.loudness ?? null,
       tts_output_codec: ttsPayload.output_audio_codec ?? null,
       exotel_stream_sample_rate: session.mediaFormat.sample_rate,
-      sarvam_tts_path: useSarvamTtsStream ? "http_stream" : "rest_json",
+      sarvam_tts_path: useIncrementalStream ? "incremental_stream" : useSarvamTtsStream ? "http_stream" : "rest_json",
       sarvam_stream_linear16: useLinear16TtsStream,
     });
+
+    // --- True incremental streaming: pipe PCM chunks to Exotel as they arrive ---
+    if (useIncrementalStream) {
+      try {
+        let totalPcmBytes = 0;
+        let firstChunkSent = false;
+        for await (const chunk of sarvamTtsStreamIncremental({
+          text: ttsPayload.text,
+          target_language_code: ttsPayload.target_language_code,
+          speaker: ttsPayload.speaker,
+          model: ttsPayload.model,
+          pace: ttsPayload.pace ?? null,
+          speech_sample_rate: exotelRate,
+          output_audio_codec: "linear16",
+          pitch: ttsPayload.pitch ?? null,
+          loudness: ttsPayload.loudness ?? null,
+        })) {
+          if (!firstChunkSent) {
+            voiceTrace(log, "pipeline.tts.first_chunk", {
+              customerId: session.customerId,
+              stream_sid: session.streamSid,
+              chunk_bytes: chunk.length,
+            });
+            firstChunkSent = true;
+          }
+          sendAudioToExotel(ws, session, chunk, log);
+          totalPcmBytes += chunk.length;
+        }
+        session.ttsInProgress = false;
+        if (totalPcmBytes === 0) {
+          log?.warn({ stream_sid: session.streamSid }, "voicebot incremental TTS yielded 0 bytes");
+          return false;
+        }
+        schedulePlaybackMarkFallback(session, totalPcmBytes, exotelRate, log);
+        logVoiceStage(log, "tts.sent_to_exotel", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          pcm_bytes: totalPcmBytes,
+          exotel_sample_rate: exotelRate,
+          tts_provider: "sarvam",
+          mode: "incremental_stream",
+        });
+        return true;
+      } catch (err) {
+        voiceTrace(log, "pipeline.tts.incremental_fallback", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          err: String(err),
+        });
+        // Fall through to legacy path on incremental stream failure
+      }
+    }
 
     let speechSrNum = Number(ttsPayload.speech_sample_rate) || 22050;
     type TtsOk = { status: number; body: unknown; b64OrRaw: "b64" | "buffer"; b64?: string; buf?: Buffer };
@@ -1241,7 +1422,7 @@ async function speakToExotel(
     if (useLinear16TtsStream && tts.b64OrRaw === "buffer") {
       speechSrNum = exotelRate;
     }
-    /** HTTP /stream can return MP3, float WAV, linear16 without a RIFF header, etc. */
+
     function tryDecodeSarvamAudio(buf: Buffer): { pcm: Buffer; srcRate: number } | null {
       const w = parseWavToPcmS16leMono(buf);
       if (w) return { pcm: w.pcm, srcRate: w.sampleRate };
@@ -1251,13 +1432,8 @@ async function speakToExotel(
         buf.toString("ascii", 0, 4) === "RIFF" &&
         buf.toString("ascii", 8, 12) === "WAVE";
       if (isRiff) return null;
+      // Headerless raw PCM (linear16 stream or unknown format with even byte count)
       if (buf.length > 0 && buf.length % 2 === 0) {
-        voiceTrace(log, "pipeline.tts.sarvam_linear_or_raw", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          pcm_bytes: buf.length,
-          speech_sample_rate: speechSrNum,
-        });
         return { pcm: buf, srcRate: speechSrNum };
       }
       return null;
@@ -1265,39 +1441,27 @@ async function speakToExotel(
 
     let decoded = tryDecodeSarvamAudio(wavBuffer);
     if (!decoded) {
+      // Instead of calling sarvamTextToSpeech AGAIN (double TTS), try REST once only
+      // when this is the stream path. Log and skip the second attempt pattern.
       if (tts.b64OrRaw === "b64") {
         session.ttsInProgress = false;
         log?.error(
           { stream_sid: session.streamSid, bytes: wavBuffer.length },
-          "voicebot TTS: could not decode audio from Sarvam REST (already on JSON path)"
+          "voicebot TTS: could not decode audio from Sarvam REST"
         );
         return false;
       }
-      if (isLikelyMp3Buffer(wavBuffer)) {
-        voiceTrace(log, "pipeline.tts.sarvam_stream_mpeg", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          bytes: wavBuffer.length,
-          note: "Sarvam /stream can return audio/mpeg; using REST /text-to-speech JSON for PCM WAV",
-        });
-      } else {
-        voiceTrace(log, "pipeline.tts.sarvam_decode_rest", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          bytes: wavBuffer.length,
-          reason: "stream_body_not_decodable",
-        });
-      }
+      voiceTrace(log, "pipeline.tts.stream_decode_failed_rest_fallback", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        bytes: wavBuffer.length,
+        is_mp3: isLikelyMp3Buffer(wavBuffer),
+        first_bytes: wavBuffer.subarray(0, 16).toString("hex"),
+      });
       const rest = await sarvamTextToSpeech(ttsPayload);
       if (rest.status !== 200) {
         session.ttsInProgress = false;
-        log?.error({ status: rest.status, body: safeJsonForLog(rest.body) }, "voicebot TTS REST fallback after stream decode failed");
-        voiceTrace(log, "pipeline.tts.error", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          status: rest.status,
-          body: safeJsonForLog(rest.body),
-        });
+        log?.error({ status: rest.status, body: safeJsonForLog(rest.body) }, "voicebot TTS REST fallback failed");
         return false;
       }
       const b64Audio = (rest.body as { audios?: string[] })?.audios?.[0];
@@ -1321,13 +1485,6 @@ async function speakToExotel(
     const srcRate = decoded.srcRate;
 
     if (srcRate !== exotelRate) {
-      voiceTrace(log, "pipeline.tts.resample", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        pcm_bytes_before: pcmData.length,
-        from_sample_rate: srcRate,
-        to_sample_rate: exotelRate,
-      });
       pcmData = resamplePcm16(pcmData, srcRate, exotelRate);
     }
 
@@ -1428,6 +1585,8 @@ async function processUtterance(
     return;
   }
   const utteranceStartedAt = Date.now();
+  session.utteranceProcessingStartedAt = utteranceStartedAt;
+  session.ttfaLogged = false;
 
   // Grab all accumulated PCM and reset
   const pcmChunks = session.inboundPcm;
@@ -1744,13 +1903,6 @@ async function processUtterance(
 
     const tAfterStt = Date.now();
 
-    voiceTrace(log, "pipeline.rag.start", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      exotel_call_session_id: session.callSessionDbId,
-      question_preview: transcript.slice(0, 500),
-    });
-
     // TTS language for this turn (also used for incremental TTS when RAG streaming is on)
     const ttsLanguage = multilingual
       ? mapToTtsLanguage(effectiveLanguage)
@@ -1787,6 +1939,58 @@ async function processUtterance(
       await speakToExotel(ws, session, bye, ttsLanguage, log);
       return;
     }
+
+    if (env.voicebot.fillerAckEnabled && isFillerOnlyTranscript(transcript)) {
+      const ack = env.voicebot.fillerAckText;
+      voiceTrace(log, "pipeline.stt.filler_only", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        call_sid: session.callSid,
+        exotel_call_session_id: session.callSessionDbId,
+        transcript_preview: transcript.slice(0, 120),
+        ack_preview: ack.slice(0, 200),
+      });
+      logVoiceStage(log, "stt.filler_skip_rag", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        transcript_chars: transcript.length,
+      });
+      await appendVoiceTurnToChat(session, transcript, ack, {
+        assistantSource: "filler_ack",
+      });
+      await speakToExotel(ws, session, ack, ttsLanguage, log);
+      const tEnd = Date.now();
+      const elapsedMs = tEnd - utteranceStartedAt;
+      const sttMs = tAfterStt - utteranceStartedAt;
+      const fillerMs = tEnd - tAfterStt;
+      voiceTrace(log, "pipeline.utterance.timing", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        stt_ms: sttMs,
+        ask_pipeline_ms: fillerMs,
+        final_tts_ms: 0,
+        total_ms: elapsedMs,
+        spoke_incrementally: false,
+        filler_only: true,
+      });
+      logVoiceStage(log, "utterance.completed", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        llm_source: "filler_ack",
+        elapsed_ms: elapsedMs,
+        timing_stt_ms: sttMs,
+        timing_ask_pipeline_ms: fillerMs,
+        timing_final_tts_ms: 0,
+      });
+      return;
+    }
+
+    voiceTrace(log, "pipeline.rag.start", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      exotel_call_session_id: session.callSessionDbId,
+      question_preview: transcript.slice(0, 500),
+    });
 
     // LLM + incremental TTS only when both RAG and TTS streaming are enabled (see SETTINGS catalog).
     const streamToCall =
@@ -1996,11 +2200,24 @@ async function runVoicebotAskPipeline(
     await ensureVoicebotChatSessionForUtterance(session, log);
     if (!session.chatSessionId) return null;
 
+    // Parallel: history + agent row (agent is cached after first utterance)
     const historyP = loadVoicebotChatHistory(session);
-
-    let agentPrompt = customerPrompt;
-    let agentFallbackInstruction: string | null = null;
-    if (session.agentId) {
+    const agentP = (async () => {
+      if (!session.agentId) return;
+      if (session.voiceRagAgentCache !== undefined) {
+        const c = session.voiceRagAgentCache;
+        if (c) {
+          session.ttsPace = c.ttsPace;
+          session.ttsModel = c.ttsModel;
+          session.ttsSpeaker = c.ttsSpeaker;
+          session.ttsSampleRate = c.ttsSampleRate;
+          await applyAgentVoicePersonaToSession(session, {
+            avatarId: c.avatarId,
+            elevenlabsAvatarId: c.elevenlabsAvatarId,
+          });
+        }
+        return;
+      }
       const agentResult = await pool.query(
         `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
                 avatar_id, elevenlabs_avatar_id
@@ -2009,18 +2226,38 @@ async function runVoicebotAskPipeline(
       );
       if (agentResult.rows.length > 0) {
         const row = agentResult.rows[0];
-        agentPrompt = row.system_prompt;
-        agentFallbackInstruction = row.no_kb_fallback_instruction;
-
-        session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
-        session.ttsModel = row.tts_model;
-        session.ttsSpeaker = row.tts_speaker;
-        session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
+        session.voiceRagAgentCache = {
+          systemPrompt: row.system_prompt,
+          fallbackInstruction: row.no_kb_fallback_instruction,
+          ttsPace: row.tts_pace != null ? Number(row.tts_pace) : null,
+          ttsModel: row.tts_model,
+          ttsSpeaker: row.tts_speaker,
+          ttsSampleRate: row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null,
+          avatarId: row.avatar_id as string | null,
+          elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
+        };
+        session.ttsPace = session.voiceRagAgentCache.ttsPace;
+        session.ttsModel = session.voiceRagAgentCache.ttsModel;
+        session.ttsSpeaker = session.voiceRagAgentCache.ttsSpeaker;
+        session.ttsSampleRate = session.voiceRagAgentCache.ttsSampleRate;
         await applyAgentVoicePersonaToSession(session, {
           avatarId: row.avatar_id as string | null,
           elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
         });
+      } else {
+        session.voiceRagAgentCache = null;
       }
+    })();
+
+    let agentPrompt = customerPrompt;
+    let agentFallbackInstruction: string | null = null;
+
+    const [embedBundle, historyRaw] = await Promise.all([embedPipeline, historyP, agentP]);
+
+    // Apply agent data after parallel fetch completes
+    if (session.voiceRagAgentCache) {
+      agentPrompt = session.voiceRagAgentCache.systemPrompt;
+      agentFallbackInstruction = session.voiceRagAgentCache.fallbackInstruction;
     }
 
     const csRag = tenantCs(session);
@@ -2029,8 +2266,6 @@ async function runVoicebotAskPipeline(
       csRag?.no_kb_fallback_instruction?.trim() ||
       defaultFallbackInstruction?.trim() ||
       'respond with a polite message like "I don\'t have an answer for that right now" then ask 1-2 follow-up questions related to the conversation context to keep the discussion going and explore sales opportunities.';
-
-    const [embedBundle, historyRaw] = await Promise.all([embedPipeline, historyP]);
     const history = trimRagHistory(session, historyRaw);
     const { embedding, textForEmbedding, translatedForSearch } = embedBundle;
 
@@ -2106,11 +2341,11 @@ async function runVoicebotAskPipeline(
     const dist = Number(top.distance);
     const priorUserTurns = history.filter((h) => h.role === "user").length;
     const directTh = ragDirectKbDistanceThreshold(session);
-    // Same as HTTP `/ask`: allow kb-direct on first user turn whenever the vector
-    // match is strong. Gating this to English-only caused Hindi (etc.) to always
-    // take the LLM path and often pick the wrong passage among top-k chunks.
+    // Allow kb-direct on ANY turn: first turn uses the full threshold; subsequent
+    // turns use a tighter threshold (60%) to reduce false positives when context matters.
+    const directThForTurn = priorUserTurns === 0 ? directTh : directTh * 0.6;
     const canDirectKb =
-      Number.isFinite(dist) && dist < directTh && priorUserTurns === 0;
+      Number.isFinite(dist) && dist < directThForTurn;
 
     if (canDirectKb) {
       const direct = String(top.answer).trim();
@@ -2543,13 +2778,38 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     session.voicebotMultilingualEffective === true
                       ? session.defaultLanguageCode || "en-IN"
                       : "en-IN";
-                  const greetingOk = await speakToExotel(
-                    socket,
-                    session,
-                    session.greetingText || GREETING_TEXT,
+                  const greetingText = session.greetingText || GREETING_TEXT;
+                  const cs = tenantCs(session);
+                  const cacheKey = getGreetingCacheKey(
+                    customerId,
+                    greetingText,
+                    cs?.tts_provider ?? "sarvam",
+                    session.ttsSpeaker?.trim() || cs?.tts_default_speaker?.trim() || "",
                     greetingLang,
-                    log
+                    session.mediaFormat.sample_rate
                   );
+                  const cachedPcm = getCachedGreetingPcm(cacheKey);
+                  let greetingOk: boolean;
+                  if (cachedPcm) {
+                    voiceTrace(log, "greeting.cache_hit", {
+                      customerId,
+                      stream_sid: session.streamSid,
+                      pcm_bytes: cachedPcm.length,
+                    });
+                    session.ttsInProgress = true;
+                    sendAudioToExotel(socket, session, cachedPcm, log);
+                    session.ttsInProgress = false;
+                    schedulePlaybackMarkFallback(session, cachedPcm.length, session.mediaFormat.sample_rate, log);
+                    greetingOk = true;
+                  } else {
+                    greetingOk = await speakToExotel(
+                      socket,
+                      session,
+                      greetingText,
+                      greetingLang,
+                      log
+                    );
+                  }
                   if (!greetingOk) {
                     log.warn(
                       {
@@ -2570,6 +2830,10 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                       stream_sid: session.streamSid,
                       call_sid: session.callSid,
                     });
+                    // Background: warm cache for next call with same greeting
+                    if (!cachedPcm) {
+                      void preWarmGreetingCache(session, greetingText, greetingLang, cacheKey, log);
+                    }
                   }
                 } else {
                   log.warn(
