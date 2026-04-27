@@ -332,7 +332,10 @@ function trimRagHistory(
   const cs = tenantCs(session);
   if (!cs || !cs.rag_use_history) return [];
   const maxTurns = cs.rag_history_max_turns;
-  const capPairs = maxTurns != null && maxTurns > 0 ? maxTurns : 50;
+  /** Voice: default 3 Q/A pairs (6 messages) to keep LLM prompt small for latency. */
+  const defaultVoicePairs = 3;
+  const capPairs =
+    maxTurns != null && maxTurns > 0 ? maxTurns : defaultVoicePairs;
   const maxMsgs = Math.min(history.length, capPairs * 2);
   return history.slice(-maxMsgs);
 }
@@ -1097,6 +1100,9 @@ async function speakToExotel(
       tts_output_codec: ttsPayload.output_audio_codec ?? null,
     });
     const useSarvamTtsStream = session.ttsStreamingForVoice === true;
+    /** HTTP stream: linear16 @ Exotel rate = raw s16le; avoids RIFF parse failures and REST double-fetch. */
+    const useLinear16TtsStream =
+      useSarvamTtsStream && env.sarvam.ttsStreamLinear16;
     voiceTrace(log, "pipeline.tts.request", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -1114,9 +1120,10 @@ async function speakToExotel(
       tts_output_codec: ttsPayload.output_audio_codec ?? null,
       exotel_stream_sample_rate: session.mediaFormat.sample_rate,
       sarvam_tts_path: useSarvamTtsStream ? "http_stream" : "rest_json",
+      sarvam_stream_linear16: useLinear16TtsStream,
     });
 
-    const speechSrNum = Number(ttsPayload.speech_sample_rate) || 22050;
+    let speechSrNum = Number(ttsPayload.speech_sample_rate) || 22050;
     type TtsOk = { status: number; body: unknown; b64OrRaw: "b64" | "buffer"; b64?: string; buf?: Buffer };
     let tts: TtsOk;
     if (useSarvamTtsStream) {
@@ -1126,8 +1133,10 @@ async function speakToExotel(
         speaker: ttsPayload.speaker,
         model: ttsPayload.model,
         pace: ttsPayload.pace ?? null,
-        speech_sample_rate: speechSrNum,
-        output_audio_codec: (ttsPayload.output_audio_codec || "wav") as string,
+        speech_sample_rate: useLinear16TtsStream ? exotelRate : speechSrNum,
+        output_audio_codec: (useLinear16TtsStream
+          ? "linear16"
+          : (ttsPayload.output_audio_codec || "wav")) as string,
         pitch: ttsPayload.pitch ?? null,
         loudness: ttsPayload.loudness ?? null,
       });
@@ -1204,6 +1213,9 @@ async function speakToExotel(
       });
 
       wavBuffer = Buffer.from(b64Audio, "base64");
+    }
+    if (useLinear16TtsStream && tts.b64OrRaw === "buffer") {
+      speechSrNum = exotelRate;
     }
     /** HTTP /stream can return MP3, float WAV, linear16 without a RIFF header, etc. */
     function tryDecodeSarvamAudio(buf: Buffer): { pcm: Buffer; srcRate: number } | null {
@@ -1675,6 +1687,8 @@ async function processUtterance(
       stt_detected_raw: detectedRaw,
     }, "voicebot STT result");
 
+    const tAfterStt = Date.now();
+
     voiceTrace(log, "pipeline.rag.start", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -1743,6 +1757,7 @@ async function processUtterance(
       log,
       streamToCall
     );
+    const tAfterAsk = Date.now();
 
     if (!askResult || !askResult.answer) {
       await appendVoiceTurnToChat(session, transcript, session.errorText || ERROR_AUDIO_TEXT, {
@@ -1766,12 +1781,30 @@ async function processUtterance(
     if (!askResult.spokeIncrementally) {
       await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
     }
-    const elapsedMs = Date.now() - utteranceStartedAt;
+    const tEnd = Date.now();
+    const elapsedMs = tEnd - utteranceStartedAt;
+    const sttMs = tAfterStt - utteranceStartedAt;
+    const askMs = tAfterAsk - tAfterStt;
+    const finalTtsMs = askResult.spokeIncrementally
+      ? 0
+      : tEnd - tAfterAsk;
+    voiceTrace(log, "pipeline.utterance.timing", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      stt_ms: sttMs,
+      ask_pipeline_ms: askMs,
+      final_tts_ms: finalTtsMs,
+      total_ms: elapsedMs,
+      spoke_incrementally: askResult.spokeIncrementally === true,
+    });
     logVoiceStage(log, "utterance.completed", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
       llm_source: askResult.source,
       elapsed_ms: elapsedMs,
+      timing_stt_ms: sttMs,
+      timing_ask_pipeline_ms: askMs,
+      timing_final_tts_ms: finalTtsMs,
     });
     if (elapsedMs > 15000) {
       log?.warn({ stream_sid: session.streamSid, elapsedMs }, "voicebot utterance slow path (>15s)");

@@ -215,7 +215,7 @@ export async function sarvamSpeechToTextWebsocket(params: {
     let lastRequestId: string | null = null;
     let settled = false;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    const idleMs = 2000;
+    const idleMs = env.sarvam.sttWsIdleAfterTranscriptMs;
     const maxWait = 60_000;
 
     let hardTimeout: ReturnType<typeof setTimeout>;

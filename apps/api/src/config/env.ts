@@ -58,6 +58,20 @@ export const env = {
     ttsSpeaker: (process.env.SARVAM_TTS_SPEAKER || "").trim() || undefined,
     /** Optional pace (Sarvam). */
     ttsPace: process.env.SARVAM_TTS_PACE ? parseFloat(process.env.SARVAM_TTS_PACE) : undefined,
+    /**
+     * After the last STT WebSocket `data` message, wait this long (ms) before settling the transcript.
+     * Lower = faster; too low may cut off late updates. Default tuned for &lt;2s voice SLO. Range 50–5000.
+     */
+    sttWsIdleAfterTranscriptMs: Math.min(
+      5000,
+      Math.max(50, parseInt(process.env.SARVAM_STT_WS_IDLE_MS || "450", 10) || 450)
+    ),
+    /**
+     * When `true` (default), Sarvam HTTP TTS stream uses `linear16` at the **Exotel** sample rate so the body
+     * decodes as raw PCM in one pass (avoids RIFF/codec edge cases that triggered REST fallback + double latency).
+     * Set `SARVAM_TTS_STREAM_LINEAR16=false` to use tenant WAV codec for the stream.
+     */
+    ttsStreamLinear16: process.env.SARVAM_TTS_STREAM_LINEAR16 !== "false",
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
