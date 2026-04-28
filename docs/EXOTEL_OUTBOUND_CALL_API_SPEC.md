@@ -161,9 +161,9 @@ Optional fields (pass through only when present; validate length/types per Exote
 
 ## 7. Integration with voicebot / streaming (later)
 
-Inbound voice today hits **`exotel-voicebot`** WebSocket bootstrap (see existing specs). **Outbound** may need **`StreamUrl`** / applet configuration so that after connect the media flows to the **same** pipeline — that is **not** fully covered by “trigger call” alone.
+Inbound voice hits **`exotel-voicebot`** WebSocket bootstrap. **Outbound Connect + Voicebot:** Exotel defaults **`StreamBegin`** such that audio can start on **Leg 1** (caller/agent side first). That causes the Convixx greeting to run **before** the callee answers. Set **`StreamBegin=at Leg2Connect`** on the Connect API (Convixx outbound handler defaults this whenever a **`streamUrl`** is present, including auto-filled Voicebot URLs) so the **`start`** event aligns with the customer leg.
 
-**Recommendation:** treat this API as **Phase A — programmatic dial**. Phase B: wire **`StreamUrl`**, **`StreamBegin`**, and `exotel_call_sessions` row creation **if** product requires the same bot on outbound as on inbound (see `docs/EXOTEL_VOICE_INTEGRATION.md` and Legs/streaming docs on Exotel Support).
+**Recommendation:** Phase B wiring for **`StreamUrl`**, **`StreamBegin`**, and `exotel_call_sessions` — outbound dial path now sends Voicebot **`streamUrl`** (tenant `wss://…/exotel/voicebot/{customerId}` when not overridden) with **`at Leg2Connect`** unless you pass **`voicebot_stream: false`** or override **`streamBegin`** (see `docs/EXOTEL_VOICE_INTEGRATION.md`).
 
 ---
 

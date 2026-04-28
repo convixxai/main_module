@@ -14,11 +14,14 @@ import {
   ExotelUpstreamError,
   restApiBaseUrlFromSubdomain,
 } from "../services/exotel-connect-call";
+import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
 
 const outboundCallBodySchema = z.object({
   from: z.string().min(3),
   to: z.string().min(3),
   callerId: z.string().min(2).optional(),
+  /** When true (default), attaches tenant Voicebot `wss://` URL if `streamUrl` is omitted. Set false for PSTN-only outbound (no streaming bot). */
+  voicebot_stream: z.boolean().optional(),
   callType: z.string().optional(),
   timeLimit: z.number().int().positive().max(14400).optional(),
   timeOut: z.number().int().positive().optional(),
@@ -27,6 +30,7 @@ const outboundCallBodySchema = z.object({
   recordingFormat: z.enum(["mp3", "mp3-hq"]).optional(),
   waitUrl: z.string().optional(),
   streamUrl: z.string().optional(),
+  /** Omit to default to `at Leg2Connect` when any stream URL is sent — avoids greeting before callee answers (Connect API). */
   streamBegin: z.enum(["at Leg1Connect", "at Leg2Connect"]).optional(),
   statusCallback: z.string().optional(),
   statusCallbackEvents: z.array(z.enum(["terminal", "answered"])).optional(),
@@ -112,6 +116,15 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
       }
 
       try {
+        const attachVoicebot = body.voicebot_stream !== false;
+        let streamUrlResolved = body.streamUrl?.trim();
+        if (!streamUrlResolved && attachVoicebot) {
+          streamUrlResolved = voicebotUrlsForCustomer(customerId, request).voicebot_wss_url;
+        }
+        const streamBeginResolved =
+          body.streamBegin ??
+          (streamUrlResolved ? ("at Leg2Connect" as const) : undefined);
+
         const result = await exotelConnectCall({
           accountSid,
           apiKey,
@@ -129,8 +142,8 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
           record: body.record,
           recordingChannels: body.recordingChannels,
           recordingFormat: body.recordingFormat,
-          streamUrl: body.streamUrl?.trim(),
-          streamBegin: body.streamBegin,
+          streamUrl: streamUrlResolved,
+          streamBegin: streamBeginResolved,
           customField: body.customField?.trim(),
           startPlaybackToNew: body.startPlaybackToNew,
           startPlaybackValueNew: body.startPlaybackValueNew?.trim(),

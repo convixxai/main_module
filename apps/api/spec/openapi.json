@@ -2842,7 +2842,7 @@
           "Exotel Voicebot"
         ],
         "summary": "Trigger outbound call (Exotel Connect)",
-        "description": "Initiates an outbound PSTN call via Exotel **Connect Two Numbers** (`POST /v1/Accounts/{sid}/Calls/connect`). Exotel rings `from` first, then connects `to`. `callerId` is your ExoPhone / virtual number; if omitted, the server uses `default_outbound_caller_id` or `inbound_phone_number` from Exotel settings.\n\nREST host is configured server-side: `EXOTEL_REST_API_BASE_URL` (full base URL), or `EXOTEL_REST_CLUSTER` (`mumbai` default → `api.in.exotel.com`, `singapore` → `api.exotel.com`).\n\nRequires `x-api-key` for the **same** customer as `{customerId}` in the path. See docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md.",
+        "description": "Initiates an outbound PSTN call via Exotel **Connect Two Numbers** (`POST /v1/Accounts/{sid}/Calls/connect`). Exotel rings `from` first, then connects `to`. `callerId` is your ExoPhone / virtual number; if omitted, the server uses `default_outbound_caller_id` or `inbound_phone_number` from Exotel settings.\n\n**Voicebot:** By default the API attaches your tenant Voicebot `streamUrl` and **`StreamBegin=at Leg2Connect`** when any stream URL applies, so the greeting runs after the callee answers (not while leg A is ringing). Override with `streamBegin` or set `voicebot_stream` to false if you attach streaming only in the Exotel dashboard.\n\nREST host is configured server-side from `exotel_subdomain` (`EXOTEL_REST_API_BASE_URL` / `EXOTEL_REST_CLUSTER` fallback).\n\nRequires `x-api-key` for the **same** customer as `{customerId}` in the path. See docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md.",
         "security": [
           {
             "ApiKey": []
@@ -2889,6 +2889,11 @@
                     "description": "Exotel `CallerId` (ExoPhone). Optional if defaults exist in Exotel settings.",
                     "example": "+9111xxxxxxxx"
                   },
+                  "voicebot_stream": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "When true (default), if `streamUrl` is omitted, the server sets it to this tenant's Voicebot `wss://` URL. Set `false` for PSTN-only outbound (no bot stream), e.g. if your Exotel flow already attaches streaming elsewhere."
+                  },
                   "callType": {
                     "type": "string",
                     "example": "trans"
@@ -2927,14 +2932,15 @@
                   },
                   "streamUrl": {
                     "type": "string",
-                    "description": "WebSocket URL for real-time streaming (optional)."
+                    "description": "Voicebot / AgentStream WebSocket URL. If omitted and `voicebot_stream` is not false, the server fills `wss://{PUBLIC_API_HOST}/exotel/voicebot/{customerId}`."
                   },
                   "streamBegin": {
                     "type": "string",
                     "enum": [
                       "at Leg1Connect",
                       "at Leg2Connect"
-                    ]
+                    ],
+                    "description": "When unset but `streamUrl` is sent, defaults to **`at Leg2Connect`** so media (and greeting) starts when the callee answers — avoids playing greeting before the customer picks up on outbound Connect calls."
                   },
                   "statusCallback": {
                     "type": "string",
