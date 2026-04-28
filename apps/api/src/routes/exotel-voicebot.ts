@@ -1726,15 +1726,33 @@ async function processUtterance(
     stt_implementation: sttImplLine,
     multilingual,
     elevenlabs_stt_full_auto: env.voicebot.elevenlabsSttFullAuto,
+    sarvam_stt_full_auto: env.voicebot.sarvamSttFullAuto,
   });
 
   try {
     // === Step 1: STT ===
     const wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
 
-    const sttLanguageHint = multilingual
-      ? undefined
-      : "en-IN";
+    /**
+     * Sarvam: with `voicebot_multilingual` and no `language_code`, Sarvam often routes English speech to
+     * Hindi/Marathi scripts with garbage words. Bias with tenant default (same idea as ElevenLabs). Opt out:
+     * `VOICEBOT_SARVAM_STT_FULL_AUTO=true`.
+     */
+    const sttLanguageHint =
+      !multilingual
+        ? "en-IN"
+        : env.voicebot.sarvamSttFullAuto
+          ? undefined
+          : session.defaultLanguageCode?.trim() || "en-IN";
+
+    if (sttProvider === "sarvam") {
+      voiceTrace(log, "pipeline.stt.sarvam_language_hint", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        default_language_code: session.defaultLanguageCode ?? null,
+        language_code_sent: sttLanguageHint ?? "auto",
+      });
+    }
 
     let stt: { status: number; body: unknown };
 

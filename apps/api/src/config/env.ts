@@ -141,11 +141,15 @@ export const env = {
     })(),
     /**
      * ElevenLabs Scribe + `voicebot_multilingual`: when `false` (default), send `language_code` from
-     * `customer_settings.default_language_code` so short English lines are not auto-labeled Hindi with
-     * unrelated filler text. Same latency (single STT). Set `VOICEBOT_ELEVENLABS_STT_FULL_AUTO=true` to
-     * omit `language_code` (full auto-detect; better mixed-language-per-utterance, more mis-detect risk).
+     * `customer_settings.default_language_code`. Set `VOICEBOT_ELEVENLABS_STT_FULL_AUTO=true` for full auto-detect.
      */
     elevenlabsSttFullAuto: process.env.VOICEBOT_ELEVENLABS_STT_FULL_AUTO === "true",
+    /**
+     * Sarvam STT + `voicebot_multilingual`: when `false` (default), pass `language_code` from
+     * `customer_settings.default_language_code` so English is not transcribed in Devanagari with wrong words.
+     * Set `VOICEBOT_SARVAM_STT_FULL_AUTO=true` to omit the hint / use `unknown` (wider auto-detect).
+     */
+    sarvamSttFullAuto: process.env.VOICEBOT_SARVAM_STT_FULL_AUTO === "true",
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
