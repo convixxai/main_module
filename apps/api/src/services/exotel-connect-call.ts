@@ -209,10 +209,11 @@ export async function exotelConnectCall(
   if (params.startPlaybackValueNew)
     appendForm(body, "StartPlaybackValueNew", params.startPlaybackValueNew);
   if (params.statusCallback) appendForm(body, "StatusCallback", params.statusCallback);
+  // Exotel expects indexed keys (`StatusCallbackEvents[0]=terminal`), not repeated bare keys.
   if (params.statusCallbackEvents?.length) {
-    for (const ev of params.statusCallbackEvents) {
-      appendForm(body, "StatusCallbackEvents", ev);
-    }
+    params.statusCallbackEvents.forEach((ev, i) => {
+      appendForm(body, `StatusCallbackEvents[${i}]`, ev);
+    });
   }
   if (params.statusCallbackContentType)
     appendForm(body, "StatusCallbackContentType", params.statusCallbackContentType);

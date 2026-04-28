@@ -166,7 +166,7 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
             ? `${customFieldMerged.slice(0, 120)}|${linkCf}`.slice(0, 128)
             : linkCf;
           statusCallbackUse = statusCallbackUse ?? defaultStatusCb;
-          statusEventsUse = statusEventsUse ?? ["answered", "terminal"];
+          statusEventsUse = statusEventsUse ?? ["terminal", "answered"];
           statusContentUse = statusContentUse ?? "application/json";
         }
 
