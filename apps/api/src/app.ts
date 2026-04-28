@@ -14,6 +14,7 @@ import { settingsRoutes } from "./routes/settings";
 import { exotelVoicebotRoutes } from "./routes/exotel-voicebot";
 import { exotelSettingsRoutes } from "./routes/exotel-settings";
 import { exotelOutboundCallRoutes } from "./routes/exotel-outbound-call";
+import { exotelStatusCallbackRoutes } from "./routes/exotel-status-callback";
 import { adminLogsRoutes } from "./routes/adminLogs";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
@@ -46,6 +47,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(exotelVoicebotRoutes);          // Exotel Voicebot WebSocket (multi-tenant)
   app.register(exotelSettingsRoutes);           // Exotel settings admin API
   app.register(exotelOutboundCallRoutes);       // Exotel outbound dial (REST Connect API)
+  app.register(exotelStatusCallbackRoutes);      // Exotel HTTP StatusCallback (answered)
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)
 
   return app;

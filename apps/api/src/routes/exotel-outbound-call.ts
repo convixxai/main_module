@@ -16,6 +16,7 @@ import {
   restApiBaseUrlFromSubdomain,
 } from "../services/exotel-connect-call";
 import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
+import { env } from "../config/env";
 
 const outboundCallBodySchema = z.object({
   from: z.string().min(3),
@@ -117,6 +118,7 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
       }
 
       try {
+        const csRow = await getCustomerSettings(customerId);
         const attachVoicebot = body.voicebot_stream !== false;
         let streamUrlResolved = body.streamUrl?.trim();
         if (!streamUrlResolved && attachVoicebot) {
@@ -126,77 +128,130 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
           body.streamBegin ??
           (streamUrlResolved ? "atLeg2connect" : undefined);
 
-        const result = await exotelConnectCall({
-          accountSid,
-          apiKey,
-          apiToken,
-          ...(restFromSubdomain != null
-            ? { restApiBaseUrl: restFromSubdomain }
-            : {}),
-          from: body.from.trim(),
-          to: body.to.trim(),
-          callerId,
-          callType: body.callType?.trim(),
-          timeLimit: body.timeLimit,
-          timeOut: body.timeOut,
-          waitUrl: body.waitUrl?.trim(),
-          record: body.record,
-          recordingChannels: body.recordingChannels,
-          recordingFormat: body.recordingFormat,
-          streamUrl: streamUrlResolved,
-          streamBegin: streamBeginPassed,
-          customField: body.customField?.trim(),
-          startPlaybackToNew: body.startPlaybackToNew,
-          startPlaybackValueNew: body.startPlaybackValueNew?.trim(),
-          statusCallback: body.statusCallback?.trim(),
-          statusCallbackEvents: body.statusCallbackEvents,
-          statusCallbackContentType: body.statusCallbackContentType,
-        });
+        const hostForCb =
+          (env.publicApiHost || request.hostname || "").trim() || "localhost";
+        const defaultStatusCb = `https://${hostForCb}/exotel/status-callback/${customerId}${
+          settings.webhook_secret?.trim()
+            ? `?token=${encodeURIComponent(settings.webhook_secret.trim())}`
+            : ""
+        }`;
 
-        const call = result.call;
-        const sidOut =
-          call && typeof call.Sid === "string" ? call.Sid : undefined;
-        request.log.info(
-          {
-            customer_id: customerId,
-            exotel_call_sid: sidOut,
-          },
-          "exotel outbound call initiated"
-        );
+        let pendingSessionId: string | undefined;
+        let customFieldMerged = body.customField?.trim();
+        let statusCallbackUse = body.statusCallback?.trim();
+        let statusEventsUse = body.statusCallbackEvents;
+        let statusContentUse = body.statusCallbackContentType;
 
-        let exotelCallSessionId: string | undefined;
-        if (sidOut) {
-          try {
-            const cs = await getCustomerSettings(customerId);
-            exotelCallSessionId = await createCallSession({
-              customerId,
-              callSid: sidOut,
-              streamSid: null,
-              direction: "outbound",
-              fromNumber: body.from.trim(),
-              toNumber: body.to.trim(),
-              chatSessionId: null,
-              metadata: {
-                source: "outbound_connect_api",
-                caller_id: callerId,
-              },
-              voicebotMultilingual: cs?.voicebot_multilingual ?? undefined,
-              defaultLanguageCode: cs?.default_language_code ?? null,
-              currentLanguageCode: cs?.default_language_code ?? null,
-            });
-          } catch (err) {
-            request.log.warn(
-              { err, customerId, callSid: sidOut },
-              "exotel outbound: exotel_call_sessions insert failed"
-            );
-          }
+        if (attachVoicebot && streamUrlResolved) {
+          pendingSessionId = await createCallSession({
+            customerId,
+            callSid: null,
+            streamSid: null,
+            direction: "outbound",
+            fromNumber: body.from.trim(),
+            toNumber: body.to.trim(),
+            chatSessionId: null,
+            metadata: {
+              source: "outbound_connect_api",
+              caller_id: callerId,
+              outbound_pending: true,
+            },
+            voicebotMultilingual: csRow?.voicebot_multilingual ?? undefined,
+            defaultLanguageCode: csRow?.default_language_code ?? null,
+            currentLanguageCode: csRow?.default_language_code ?? null,
+          });
+
+          const linkCf = `ccs=${pendingSessionId}`;
+          customFieldMerged = customFieldMerged
+            ? `${customFieldMerged.slice(0, 120)}|${linkCf}`.slice(0, 128)
+            : linkCf;
+          statusCallbackUse = statusCallbackUse ?? defaultStatusCb;
+          statusEventsUse = statusEventsUse ?? ["answered", "terminal"];
+          statusContentUse = statusContentUse ?? "application/json";
         }
 
-        return reply.send({
-          call: result.call ?? undefined,
-          raw: result.raw,
-          exotel_call_session_id: exotelCallSessionId,
-        });
+        try {
+          const result = await exotelConnectCall({
+            accountSid,
+            apiKey,
+            apiToken,
+            ...(restFromSubdomain != null
+              ? { restApiBaseUrl: restFromSubdomain }
+              : {}),
+            from: body.from.trim(),
+            to: body.to.trim(),
+            callerId,
+            callType: body.callType?.trim(),
+            timeLimit: body.timeLimit,
+            timeOut: body.timeOut,
+            waitUrl: body.waitUrl?.trim(),
+            record: body.record,
+            recordingChannels: body.recordingChannels,
+            recordingFormat: body.recordingFormat,
+            streamUrl: streamUrlResolved,
+            streamBegin: streamBeginPassed,
+            customField: customFieldMerged,
+            startPlaybackToNew: body.startPlaybackToNew,
+            startPlaybackValueNew: body.startPlaybackValueNew?.trim(),
+            statusCallback: statusCallbackUse,
+            statusCallbackEvents: statusEventsUse,
+            statusCallbackContentType: statusContentUse,
+          });
+
+          const call = result.call;
+          const sidOut =
+            call && typeof call.Sid === "string" ? call.Sid : undefined;
+          request.log.info(
+            {
+              customer_id: customerId,
+              exotel_call_sid: sidOut,
+              exotel_call_session_id: pendingSessionId,
+            },
+            "exotel outbound call initiated"
+          );
+
+          if (pendingSessionId && sidOut) {
+            try {
+              await pool.query(
+                `UPDATE exotel_call_sessions
+                 SET exotel_call_sid = $1,
+                     metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+                     status = 'active'
+                 WHERE id = $3::uuid AND customer_id = $4::uuid`,
+                [
+                  sidOut,
+                  JSON.stringify({
+                    outbound_pending: false,
+                    connect_placed_at: new Date().toISOString(),
+                  }),
+                  pendingSessionId,
+                  customerId,
+                ]
+              );
+            } catch (err) {
+              request.log.warn(
+                { err, customerId, pendingSessionId, callSid: sidOut },
+                "exotel outbound: failed to attach Exotel Call Sid to session row"
+              );
+            }
+          }
+
+          return reply.send({
+            call: result.call ?? undefined,
+            raw: result.raw,
+            exotel_call_session_id: pendingSessionId,
+          });
+        } catch (connectErr) {
+          if (pendingSessionId) {
+            await pool
+              .query(
+                `DELETE FROM exotel_call_sessions WHERE id = $1::uuid AND exotel_call_sid IS NULL`,
+                [pendingSessionId]
+              )
+              .catch(() => {});
+          }
+          throw connectErr;
+        }
       } catch (err) {
         if (err instanceof ExotelUpstreamError) {
           const es = err.exotelStatus;

@@ -30,6 +30,10 @@ import {
 } from "../services/exotel-settings";
 import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
 import {
+  extractOutboundSessionIdFromCustomParameters,
+  waitForOutboundCalleeAnswered,
+} from "../services/exotel-outbound-flow";
+import {
   createSession,
   removeSession,
   nextMarkName,
@@ -3225,6 +3229,80 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 break;
               }
 
+              let outboundLinkedId: string | null = null;
+              const outboundIdCandidate = extractOutboundSessionIdFromCustomParameters(
+                details.custom_parameters as Record<string, string> | undefined
+              );
+              if (outboundIdCandidate) {
+                const oCheck = await pool.query(
+                  `SELECT id, metadata FROM exotel_call_sessions
+                   WHERE id = $1::uuid AND customer_id = $2::uuid AND direction = 'outbound'`,
+                  [outboundIdCandidate, customerId]
+                );
+                if (oCheck.rows.length === 0) {
+                  log.warn(
+                    { outboundIdCandidate, customerId },
+                    "voicebot: outbound CustomField session id not found — creating inbound session row"
+                  );
+                } else {
+                  outboundLinkedId = outboundIdCandidate;
+                  const om = oCheck.rows[0].metadata as Record<string, unknown> | null;
+                  if (om?.callee_answered !== true) {
+                    await waitForOutboundCalleeAnswered(outboundLinkedId, log);
+                  }
+                }
+              }
+              if (!outboundLinkedId && details.from && details.to) {
+                const df = String(details.from).replace(/\D/g, "");
+                const dt = String(details.to).replace(/\D/g, "");
+                if (df.length >= 8 && dt.length >= 8) {
+                  const fb = await pool.query(
+                    `SELECT id, metadata FROM exotel_call_sessions
+                     WHERE customer_id = $1::uuid AND direction = 'outbound'
+                       AND COALESCE(metadata->>'voicebot_bridge','') <> 'true'
+                       AND started_at > NOW() - INTERVAL '15 minutes'
+                       AND regexp_replace(coalesce(from_number,''), '\\D', '', 'g') = $2
+                       AND regexp_replace(coalesce(to_number,''), '\\D', '', 'g') = $3
+                     ORDER BY started_at DESC LIMIT 1`,
+                    [customerId, df, dt]
+                  );
+                  if (fb.rows.length > 0) {
+                    outboundLinkedId = fb.rows[0].id as string;
+                    const om = fb.rows[0].metadata as Record<string, unknown> | null;
+                    log.info(
+                      { outboundLinkedId, customerId },
+                      "voicebot: matched outbound session by From/To digits (CustomField missing)"
+                    );
+                    if (om?.callee_answered !== true) {
+                      await waitForOutboundCalleeAnswered(outboundLinkedId, log);
+                    }
+                  }
+                }
+              }
+
+              if (!outboundLinkedId && details.call_sid) {
+                const csid = String(details.call_sid).trim();
+                if (csid) {
+                  const bySid = await pool.query(
+                    `SELECT id, metadata FROM exotel_call_sessions
+                     WHERE customer_id = $1::uuid AND direction = 'outbound'
+                       AND exotel_call_sid = $2`,
+                    [customerId, csid]
+                  );
+                  if (bySid.rows.length > 0) {
+                    outboundLinkedId = bySid.rows[0].id as string;
+                    const om = bySid.rows[0].metadata as Record<string, unknown> | null;
+                    log.info(
+                      { outboundLinkedId, customerId, call_sid: csid },
+                      "voicebot: matched outbound session by Exotel CallSid (ccs / From-To fallback unused)"
+                    );
+                    if (om?.callee_answered !== true) {
+                      await waitForOutboundCalleeAnswered(outboundLinkedId, log);
+                    }
+                  }
+                }
+              }
+
               session = createSession({
                 streamSid: details.stream_sid,
                 callSid: details.call_sid,
@@ -3262,22 +3340,48 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 await applyAgentVoicePersonaToSession(session, {
                   customerSettings: csStart,
                 });
-                session.callSessionDbId = await createCallSession({
-                  customerId,
-                  callSid: details.call_sid,
-                  streamSid: details.stream_sid,
-                  direction: "inbound",
-                  fromNumber: details.from,
-                  toNumber: details.to,
-                  chatSessionId: session.chatSessionId,
-                  metadata: {
+                if (outboundLinkedId) {
+                  const patch = JSON.stringify({
+                    voicebot_bridge: true,
+                    voicebot_started_at: new Date().toISOString(),
                     media_format: details.media_format,
-                    custom_parameters: details.custom_parameters,
-                  },
-                  voicebotMultilingual: session.voicebotMultilingualEffective,
-                  defaultLanguageCode: session.defaultLanguageCode,
-                  currentLanguageCode: session.defaultLanguageCode,
-                });
+                  });
+                  const upd = await pool.query(
+                    `UPDATE exotel_call_sessions
+                     SET exotel_stream_sid = $1,
+                         exotel_call_sid = COALESCE(exotel_call_sid, $2),
+                         metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+                         status = 'active'
+                     WHERE id = $4::uuid AND customer_id = $5::uuid AND direction = 'outbound'
+                     RETURNING id`,
+                    [
+                      details.stream_sid,
+                      details.call_sid,
+                      patch,
+                      outboundLinkedId,
+                      customerId,
+                    ]
+                  );
+                  session.callSessionDbId =
+                    (upd.rows[0]?.id as string | undefined) ?? outboundLinkedId;
+                } else {
+                  session.callSessionDbId = await createCallSession({
+                    customerId,
+                    callSid: details.call_sid,
+                    streamSid: details.stream_sid,
+                    direction: "inbound",
+                    fromNumber: details.from,
+                    toNumber: details.to,
+                    chatSessionId: session.chatSessionId,
+                    metadata: {
+                      media_format: details.media_format,
+                      custom_parameters: details.custom_parameters,
+                    },
+                    voicebotMultilingual: session.voicebotMultilingualEffective,
+                    defaultLanguageCode: session.defaultLanguageCode,
+                    currentLanguageCode: session.defaultLanguageCode,
+                  });
+                }
                 session.currentLanguageCode = normalizeBcp47Tag(
                   session.voicebotMultilingualEffective === true
                     ? session.defaultLanguageCode || "en-IN"
