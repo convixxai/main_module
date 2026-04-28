@@ -50,6 +50,22 @@ export const env = {
 
   adminToken: process.env.ADMIN_TOKEN || "",
 
+  /**
+   * Exotel REST API (Make a Call / Connect Two Numbers).
+   * Set EXOTEL_REST_API_BASE_URL to override host for all tenants (include scheme, no trailing slash).
+   * Otherwise EXOTEL_REST_CLUSTER selects Mumbai vs Singapore (`mumbai` default, `singapore`).
+   */
+  exotel: {
+    restApiBaseUrl: ((): string => {
+      const raw = (process.env.EXOTEL_REST_API_BASE_URL || "").trim();
+      if (raw) return raw.replace(/\/$/, "");
+      const cluster = (process.env.EXOTEL_REST_CLUSTER || "mumbai").toLowerCase();
+      return cluster === "singapore"
+        ? "https://api.exotel.com"
+        : "https://api.in.exotel.com";
+    })(),
+  },
+
   /** Sarvam AI (speech-to-text / text-to-speech). Get key from https://dashboard.sarvam.ai/ */
   sarvam: {
     apiKey: process.env.SARVAM_API_KEY || "",

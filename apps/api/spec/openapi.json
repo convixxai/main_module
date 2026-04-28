@@ -62,7 +62,7 @@
     },
     {
       "name": "Exotel Voicebot",
-      "description": "Multi-tenant Exotel Voicebot WebSocket system. Admin CRUD for per-tenant Exotel settings, live session monitoring, HTTPS bootstrap, and WebSocket status (`x-admin-token`)."
+      "description": "Multi-tenant Exotel Voicebot WebSocket system. Admin CRUD for per-tenant Exotel settings, **outbound PSTN dial** (Exotel Calls/connect API), live session monitoring, HTTPS bootstrap, and WebSocket status (`x-admin-token`)."
     },
     {
       "name": "Admin logs",
@@ -2829,6 +2829,252 @@
                       "ended_at": "2026-04-13T10:02:30.000Z"
                     }
                   ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{customerId}/exotel/outbound-call": {
+      "post": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "Trigger outbound call (Exotel Connect)",
+        "description": "Initiates an outbound PSTN call via Exotel **Connect Two Numbers** (`POST /v1/Accounts/{sid}/Calls/connect`). Exotel rings `from` first, then connects `to`. `callerId` is your ExoPhone / virtual number; if omitted, the server uses `default_outbound_caller_id` or `inbound_phone_number` from Exotel settings.\n\nREST host is configured server-side: `EXOTEL_REST_API_BASE_URL` (full base URL), or `EXOTEL_REST_CLUSTER` (`mumbai` default → `api.in.exotel.com`, `singapore` → `api.exotel.com`).\n\nRequires `x-admin-token`. See docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "minLength": 3,
+                    "description": "Exotel `From` — dialed first (E.164 preferred).",
+                    "example": "+919876543210"
+                  },
+                  "to": {
+                    "type": "string",
+                    "minLength": 3,
+                    "description": "Exotel `To` — second party (E.164 preferred).",
+                    "example": "+9111xxxxxxxx"
+                  },
+                  "callerId": {
+                    "type": "string",
+                    "minLength": 2,
+                    "description": "Exotel `CallerId` (ExoPhone). Optional if defaults exist in Exotel settings.",
+                    "example": "+9111xxxxxxxx"
+                  },
+                  "callType": {
+                    "type": "string",
+                    "example": "trans"
+                  },
+                  "timeLimit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 14400,
+                    "description": "Max call duration in seconds."
+                  },
+                  "timeOut": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Ring timeout in seconds."
+                  },
+                  "record": {
+                    "type": "boolean"
+                  },
+                  "recordingChannels": {
+                    "type": "string",
+                    "enum": [
+                      "single",
+                      "dual"
+                    ]
+                  },
+                  "recordingFormat": {
+                    "type": "string",
+                    "enum": [
+                      "mp3",
+                      "mp3-hq"
+                    ]
+                  },
+                  "waitUrl": {
+                    "type": "string",
+                    "description": "WAV URL played while waiting."
+                  },
+                  "streamUrl": {
+                    "type": "string",
+                    "description": "WebSocket URL for real-time streaming (optional)."
+                  },
+                  "streamBegin": {
+                    "type": "string",
+                    "enum": [
+                      "at Leg1Connect",
+                      "at Leg2Connect"
+                    ]
+                  },
+                  "statusCallback": {
+                    "type": "string",
+                    "description": "Webhook URL for call status updates."
+                  },
+                  "statusCallbackEvents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "terminal",
+                        "answered"
+                      ]
+                    }
+                  },
+                  "statusCallbackContentType": {
+                    "type": "string",
+                    "enum": [
+                      "multipart/form-data",
+                      "application/json"
+                    ]
+                  },
+                  "customField": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "startPlaybackToNew": {
+                    "type": "string",
+                    "enum": [
+                      "Callee",
+                      "Both"
+                    ]
+                  },
+                  "startPlaybackValueNew": {
+                    "type": "string",
+                    "description": "Audio URL for pre-call playback."
+                  }
+                }
+              },
+              "example": {
+                "from": "+919876543210",
+                "to": "+9111xxxxxxxx",
+                "callerId": "+9111xxxxxxxx",
+                "record": true,
+                "callType": "trans"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exotel accepted the connect request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "call": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "nullable": true,
+                      "description": "Exotel `Call` object when present (`Sid`, `Status`, `From`, `To`, …)."
+                    },
+                    "raw": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "description": "Parsed JSON body returned by Exotel."
+                    }
+                  },
+                  "required": [
+                    "raw"
+                  ]
+                },
+                "example": {
+                  "call": {
+                    "Sid": "c5797dcbaaeed7678c4062a4a3ed2f8a",
+                    "Status": "in-progress",
+                    "Direction": "outbound-api",
+                    "From": "+919876543210",
+                    "To": "+9111xxxxxxxx"
+                  },
+                  "raw": {
+                    "Call": {
+                      "Sid": "c5797dcbaaeed7678c4062a4a3ed2f8a",
+                      "Status": "in-progress",
+                      "Direction": "outbound-api"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed, customer has no/disabled Exotel settings, missing credentials, or no Caller ID available",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "callerId is required (or set default_outbound_caller_id / inbound_phone_number on Exotel settings)"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Missing or invalid x-admin-token"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Customer not found"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Exotel rate limit",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Rate limit exceeded. Max 200 requests per minute.",
+                  "exotel_status": 429
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Exotel upstream error (including credential rejection mapped to this status)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Authentication failed. Verify your API key and token.",
+                  "exotel_status": 401
                 }
               }
             }
