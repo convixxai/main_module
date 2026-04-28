@@ -68,7 +68,7 @@ Summary from Exotel — required vs optional:
 | `RecordingChannels` | No | `single` (default) or `dual`. |
 | `RecordingFormat` | No | `mp3` (default) or `mp3-hq`. |
 | `StreamUrl` | No | WebSocket URL for real-time streaming. |
-| `StreamBegin` | No | `at Leg1Connect` or `at Leg2Connect`. |
+| `StreamBegin` | No | Wire format: **`atLeg1connect`** or **`atLeg2connect`** (Exotel rejects spaced/Pascal variants). |
 | `CustomField` | No | Metadata (max 128 chars); forwarded to callbacks/applets. |
 | `StartPlaybackToNew` | No | `Callee` (default) or `Both`. |
 | `StartPlaybackValueNew` | No | Audio URL for pre-call playback. |
@@ -159,11 +159,13 @@ Optional fields (pass through only when present; validate length/types per Exote
 
 ---
 
-## 7. Integration with voicebot / streaming (later)
+## 7. Integration with voicebot / streaming
 
-Inbound voice hits **`exotel-voicebot`** WebSocket bootstrap. **Outbound Connect + Voicebot:** Exotel defaults **`StreamBegin`** such that audio can start on **Leg 1** (caller/agent side first). That causes the Convixx greeting to run **before** the callee answers. Set **`StreamBegin=at Leg2Connect`** on the Connect API (Convixx outbound handler defaults this whenever a **`streamUrl`** is present, including auto-filled Voicebot URLs) so the **`start`** event aligns with the customer leg.
+Inbound voice hits **`exotel-voicebot`** WebSocket bootstrap. **Outbound Connect + Voicebot:** Without **`StreamBegin`**, audio can attach on leg 1 first. Set **`StreamBegin=atLeg2connect`** (Convixx defaults this whenever a **`streamUrl`** is sent) so streaming aligns with the callee.
 
-**Recommendation:** Phase B wiring for **`StreamUrl`**, **`StreamBegin`**, and `exotel_call_sessions` — outbound dial path now sends Voicebot **`streamUrl`** (tenant `wss://…/exotel/voicebot/{customerId}` when not overridden) with **`at Leg2Connect`** unless you pass **`voicebot_stream: false`** or override **`streamBegin`** (see `docs/EXOTEL_VOICE_INTEGRATION.md`).
+Outbound dial persists **`exotel_call_sessions`** with **`direction = outbound`** when Connect returns a **`Sid`** (see implementation). Voicebot WebSocket **`start`** still creates a row with **`direction = inbound`** unless/until unified — you may see two rows per campaign (REST parent vs stream leg).
+
+**Recommendation:** See `docs/EXOTEL_VOICE_INTEGRATION.md` for applet/stream details.
 
 ---
 

@@ -50,6 +50,27 @@ export class ExotelUpstreamError extends Error {
   }
 }
 
+/** Exotel rejects spaced variants — Connect API expects exactly `atLeg1connect` | `atLeg2connect`. */
+export type ExotelStreamBeginWire = "atLeg1connect" | "atLeg2connect";
+
+/**
+ * Normalize docs/UI variants (`at Leg2Connect`, etc.) to wire format Exotel accepts.
+ * Throws {@link ExotelUpstreamError} when `raw` is non-empty but not recognized.
+ */
+export function normalizeStreamBeginForExotel(
+  raw: string | undefined
+): ExotelStreamBeginWire | undefined {
+  if (!raw?.trim()) return undefined;
+  const c = raw.trim().replace(/\s+/g, "").toLowerCase();
+  if (c === "atleg1connect") return "atLeg1connect";
+  if (c === "atleg2connect") return "atLeg2connect";
+  throw new ExotelUpstreamError(
+    `Invalid StreamBegin "${raw}". Use atLeg1connect or atLeg2connect.`,
+    400,
+    400
+  );
+}
+
 function appendForm(params: URLSearchParams, key: string, value: string): void {
   params.append(key, value);
 }
@@ -178,7 +199,10 @@ export async function exotelConnectCall(
   if (params.recordingFormat)
     appendForm(body, "RecordingFormat", params.recordingFormat);
   if (params.streamUrl) appendForm(body, "StreamUrl", params.streamUrl);
-  if (params.streamBegin) appendForm(body, "StreamBegin", params.streamBegin);
+  if (params.streamBegin) {
+    const sb = normalizeStreamBeginForExotel(params.streamBegin);
+    if (sb) appendForm(body, "StreamBegin", sb);
+  }
   if (params.customField) appendForm(body, "CustomField", params.customField);
   if (params.startPlaybackToNew)
     appendForm(body, "StartPlaybackToNew", params.startPlaybackToNew);

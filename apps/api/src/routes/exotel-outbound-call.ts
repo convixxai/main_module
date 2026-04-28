@@ -8,7 +8,8 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
-import { getExotelSettings } from "../services/exotel-settings";
+import { getExotelSettings, createCallSession } from "../services/exotel-settings";
+import { getCustomerSettings } from "../services/customer-settings";
 import {
   exotelConnectCall,
   ExotelUpstreamError,
@@ -30,8 +31,8 @@ const outboundCallBodySchema = z.object({
   recordingFormat: z.enum(["mp3", "mp3-hq"]).optional(),
   waitUrl: z.string().optional(),
   streamUrl: z.string().optional(),
-  /** Omit to default to `at Leg2Connect` when any stream URL is sent — avoids greeting before callee answers (Connect API). */
-  streamBegin: z.enum(["at Leg1Connect", "at Leg2Connect"]).optional(),
+  /** Exotel wire values: `atLeg1connect` or `atLeg2connect` (spaces optional). Default with `streamUrl`: `atLeg2connect`. */
+  streamBegin: z.string().optional(),
   statusCallback: z.string().optional(),
   statusCallbackEvents: z.array(z.enum(["terminal", "answered"])).optional(),
   statusCallbackContentType: z
@@ -121,9 +122,9 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
         if (!streamUrlResolved && attachVoicebot) {
           streamUrlResolved = voicebotUrlsForCustomer(customerId, request).voicebot_wss_url;
         }
-        const streamBeginResolved =
+        const streamBeginPassed =
           body.streamBegin ??
-          (streamUrlResolved ? ("at Leg2Connect" as const) : undefined);
+          (streamUrlResolved ? "atLeg2connect" : undefined);
 
         const result = await exotelConnectCall({
           accountSid,
@@ -143,7 +144,7 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
           recordingChannels: body.recordingChannels,
           recordingFormat: body.recordingFormat,
           streamUrl: streamUrlResolved,
-          streamBegin: streamBeginResolved,
+          streamBegin: streamBeginPassed,
           customField: body.customField?.trim(),
           startPlaybackToNew: body.startPlaybackToNew,
           startPlaybackValueNew: body.startPlaybackValueNew?.trim(),
@@ -163,9 +164,38 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
           "exotel outbound call initiated"
         );
 
+        let exotelCallSessionId: string | undefined;
+        if (sidOut) {
+          try {
+            const cs = await getCustomerSettings(customerId);
+            exotelCallSessionId = await createCallSession({
+              customerId,
+              callSid: sidOut,
+              streamSid: null,
+              direction: "outbound",
+              fromNumber: body.from.trim(),
+              toNumber: body.to.trim(),
+              chatSessionId: null,
+              metadata: {
+                source: "outbound_connect_api",
+                caller_id: callerId,
+              },
+              voicebotMultilingual: cs?.voicebot_multilingual ?? undefined,
+              defaultLanguageCode: cs?.default_language_code ?? null,
+              currentLanguageCode: cs?.default_language_code ?? null,
+            });
+          } catch (err) {
+            request.log.warn(
+              { err, customerId, callSid: sidOut },
+              "exotel outbound: exotel_call_sessions insert failed"
+            );
+          }
+        }
+
         return reply.send({
           call: result.call ?? undefined,
           raw: result.raw,
+          exotel_call_session_id: exotelCallSessionId,
         });
       } catch (err) {
         if (err instanceof ExotelUpstreamError) {

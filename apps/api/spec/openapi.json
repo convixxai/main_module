@@ -2842,7 +2842,7 @@
           "Exotel Voicebot"
         ],
         "summary": "Trigger outbound call (Exotel Connect)",
-        "description": "Initiates an outbound PSTN call via Exotel **Connect Two Numbers** (`POST /v1/Accounts/{sid}/Calls/connect`). Exotel rings `from` first, then connects `to`. `callerId` is your ExoPhone / virtual number; if omitted, the server uses `default_outbound_caller_id` or `inbound_phone_number` from Exotel settings.\n\n**Voicebot:** By default the API attaches your tenant Voicebot `streamUrl` and **`StreamBegin=at Leg2Connect`** when any stream URL applies, so the greeting runs after the callee answers (not while leg A is ringing). Override with `streamBegin` or set `voicebot_stream` to false if you attach streaming only in the Exotel dashboard.\n\nREST host is configured server-side from `exotel_subdomain` (`EXOTEL_REST_API_BASE_URL` / `EXOTEL_REST_CLUSTER` fallback).\n\nRequires `x-api-key` for the **same** customer as `{customerId}` in the path. See docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md.",
+        "description": "Initiates an outbound PSTN call via Exotel **Connect Two Numbers** (`POST /v1/Accounts/{sid}/Calls/connect`). Exotel rings `from` first, then connects `to`. `callerId` is your ExoPhone / virtual number; if omitted, the server uses `default_outbound_caller_id` or `inbound_phone_number` from Exotel settings.\n\n**Voicebot:** By default the API attaches your tenant Voicebot `streamUrl` and **`StreamBegin=atLeg2connect`** when any stream URL applies, so the greeting runs after the callee answers. Override with `streamBegin` or set `voicebot_stream` to false if you attach streaming only in the Exotel dashboard.\n\nReturns **`exotel_call_session_id`** when a row is inserted (`direction=outbound`).\n\nREST host is configured server-side from `exotel_subdomain` (`EXOTEL_REST_API_BASE_URL` / `EXOTEL_REST_CLUSTER` fallback).\n\nRequires `x-api-key` for the **same** customer as `{customerId}` in the path. See docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md.",
         "security": [
           {
             "ApiKey": []
@@ -2937,10 +2937,10 @@
                   "streamBegin": {
                     "type": "string",
                     "enum": [
-                      "at Leg1Connect",
-                      "at Leg2Connect"
+                      "atLeg1connect",
+                      "atLeg2connect"
                     ],
-                    "description": "When unset but `streamUrl` is sent, defaults to **`at Leg2Connect`** so media (and greeting) starts when the callee answers — avoids playing greeting before the customer picks up on outbound Connect calls."
+                    "description": "Exotel wire format (case-sensitive `connect`). When unset but `streamUrl` is sent, defaults to **`atLeg2connect`** so media starts when the callee answers."
                   },
                   "statusCallback": {
                     "type": "string",
@@ -3008,6 +3008,12 @@
                       "type": "object",
                       "additionalProperties": true,
                       "description": "Parsed JSON body returned by Exotel."
+                    },
+                    "exotel_call_session_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "nullable": true,
+                      "description": "Row ID in `exotel_call_sessions` (`direction=outbound`) when insert succeeded."
                     }
                   },
                   "required": [
@@ -3028,7 +3034,8 @@
                       "Status": "in-progress",
                       "Direction": "outbound-api"
                     }
-                  }
+                  },
+                  "exotel_call_session_id": "c01bce13-6fb3-4d78-bede-930c7e46892c"
                 }
               }
             }
