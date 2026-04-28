@@ -1,6 +1,6 @@
 # Exotel outbound call — Make a Call API (design spec)
 
-This document specifies how Convixx should expose **one HTTP API** that triggers an **outbound PSTN call** via Exotel’s **Connect Two Numbers** endpoint. It is **design only** — implementation comes after this spec is agreed.
+This document specifies how Convixx exposes **one HTTP API** that triggers an **outbound PSTN call** via Exotel’s **Connect Two Numbers** endpoint.
 
 **Official reference:** [Connect Two Numbers \| Make a Call API](https://developer.exotel.com/api/make-a-call-api)
 
@@ -127,12 +127,12 @@ Outbound calls must respect **multi-tenant** settings already modeled in `custom
 
 ### 6.1 Suggested route shape
 
-Align with existing admin/customer routes (example pattern used elsewhere — exact prefix may match `buildApp` mounting):
+Align with tenant-scoped routes (`x-api-key`), path includes `customerId` for clarity:
 
 - **`POST`** `/customers/:customerId/exotel/outbound-call`  
   **or** nested under voice if product prefers (`/voice/...`): choose **one** consistent prefix when implementing.
 
-**Authorization:** same style as other sensitive tenant operations (e.g. **`adminAuth`** or a dedicated API key scope) — **do not** leave this public.
+**Authorization:** tenant **`x-api-key`** — the key’s customer must match **`customerId`** in the path (same pattern as KB/agents/voice). Do not expose this route without authentication.
 
 ### 6.2 Suggested JSON body (MVP)
 

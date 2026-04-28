@@ -1,13 +1,13 @@
 // ============================================================
 // Trigger outbound PSTN call via Exotel Connect Two Numbers API
-// POST /customers/:customerId/exotel/outbound-call (admin auth)
+// POST /customers/:customerId/exotel/outbound-call (x-api-key)
 // Reference: docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md
 // ============================================================
 
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
-import { adminAuth } from "../middleware/auth";
+import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { getExotelSettings } from "../services/exotel-settings";
 import {
   exotelConnectCall,
@@ -38,11 +38,18 @@ const outboundCallBodySchema = z.object({
 });
 
 export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<void> {
-  app.post<{ Params: { customerId: string }; Body: unknown }>(
+  app.post(
     "/customers/:customerId/exotel/outbound-call",
-    { preHandler: adminAuth },
-    async (request, reply) => {
-      const { customerId } = request.params;
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      const { customerId } = request.params as { customerId: string };
+      if (
+        request.customerId!.toLowerCase() !== customerId.toLowerCase()
+      ) {
+        return reply.status(403).send({
+          error: "API key is not authorized for this customer",
+        });
+      }
 
       const parsedBody = outboundCallBodySchema.safeParse(request.body);
       if (!parsedBody.success) {

@@ -62,7 +62,7 @@
     },
     {
       "name": "Exotel Voicebot",
-      "description": "Multi-tenant Exotel Voicebot WebSocket system. Admin CRUD for per-tenant Exotel settings, **outbound PSTN dial** (Exotel Calls/connect API), live session monitoring, HTTPS bootstrap, and WebSocket status (`x-admin-token`)."
+      "description": "Multi-tenant Exotel Voicebot WebSocket system. Admin CRUD for per-tenant Exotel settings (**x-admin-token**); tenant outbound PSTN dial via **Exotel Calls/connect** (**x-api-key**); live session monitoring (**x-admin-token**); HTTPS bootstrap and WebSocket status."
     },
     {
       "name": "Admin logs",
@@ -2842,10 +2842,10 @@
           "Exotel Voicebot"
         ],
         "summary": "Trigger outbound call (Exotel Connect)",
-        "description": "Initiates an outbound PSTN call via Exotel **Connect Two Numbers** (`POST /v1/Accounts/{sid}/Calls/connect`). Exotel rings `from` first, then connects `to`. `callerId` is your ExoPhone / virtual number; if omitted, the server uses `default_outbound_caller_id` or `inbound_phone_number` from Exotel settings.\n\nREST host is configured server-side: `EXOTEL_REST_API_BASE_URL` (full base URL), or `EXOTEL_REST_CLUSTER` (`mumbai` default → `api.in.exotel.com`, `singapore` → `api.exotel.com`).\n\nRequires `x-admin-token`. See docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md.",
+        "description": "Initiates an outbound PSTN call via Exotel **Connect Two Numbers** (`POST /v1/Accounts/{sid}/Calls/connect`). Exotel rings `from` first, then connects `to`. `callerId` is your ExoPhone / virtual number; if omitted, the server uses `default_outbound_caller_id` or `inbound_phone_number` from Exotel settings.\n\nREST host is configured server-side: `EXOTEL_REST_API_BASE_URL` (full base URL), or `EXOTEL_REST_CLUSTER` (`mumbai` default → `api.in.exotel.com`, `singapore` → `api.exotel.com`).\n\nRequires `x-api-key` for the **same** customer as `{customerId}` in the path. See docs/EXOTEL_OUTBOUND_CALL_API_SPEC.md.",
         "security": [
           {
-            "AdminToken": []
+            "ApiKey": []
           }
         ],
         "parameters": [
@@ -3038,11 +3038,21 @@
             }
           },
           "401": {
-            "description": "Missing or invalid admin token",
+            "description": "Missing or invalid `x-api-key`",
             "content": {
               "application/json": {
                 "example": {
-                  "error": "Missing or invalid x-admin-token"
+                  "error": "Invalid or inactive API key"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API key belongs to a different customer than `{customerId}`",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "API key is not authorized for this customer"
                 }
               }
             }
