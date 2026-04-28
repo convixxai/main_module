@@ -74,11 +74,12 @@ export const env = {
     ),
     /**
      * If the STT WebSocket never sends a `data` transcript after connect+flush, fail fast (ms) and
-     * fall back to REST — avoids 60s dead air when the socket hangs (common after many playback marks).
+     * fall back to REST. Default 6s balances voice SLO vs flaky WS; raise if Sarvam is legitimately slow.
+     * Env: `SARVAM_STT_WS_FIRST_DATA_MS`.
      */
     sttWsFirstDataTimeoutMs: Math.min(
       90_000,
-      Math.max(3000, parseInt(process.env.SARVAM_STT_WS_FIRST_DATA_MS || "12000", 10) || 12_000)
+      Math.max(3000, parseInt(process.env.SARVAM_STT_WS_FIRST_DATA_MS || "6000", 10) || 6_000)
     ),
     /** Max time waiting on the Sarvam STT WebSocket overall (ms). Voice default below batch REST. */
     sttWsHardTimeoutMs: Math.min(
