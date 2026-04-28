@@ -683,6 +683,7 @@ function multilingualVoicePolicyRules(
 - If the user asks to switch language (e.g. "speak Hindi", "मराठीत बोला"), comply immediately using one of the allowed languages only. Confirm briefly in the language you switched to.
 - NEVER say you cannot speak, or apologize for not speaking, any language whose tag appears in the allowed list above. Just answer in that language.
 - Do not use any language whose tag is not in [${listTags}]. If the user seems to use another language, reply in ${def} and briefly ask them to continue in one of: ${listHuman}.
+- **Grammar and fluency (non-English):** In Hindi, Marathi, or any other allowed non-English language, write **natural, grammatically correct** lines a native speaker would say on a phone call. Avoid stiff word-for-word translations from English; use correct verb forms, agreement, word order, and everyday vocabulary for that language. If the KNOWLEDGEBASE is English, still express the facts in fluent target-language sentences—do not paste broken or mixed grammar.
 `;
 }
 
@@ -1723,6 +1724,8 @@ async function processUtterance(
     stt_provider: sttProvider,
     stt_streaming_enabled: session.sttStreamingForVoice === true,
     stt_implementation: sttImplLine,
+    multilingual,
+    elevenlabs_stt_full_auto: env.voicebot.elevenlabsSttFullAuto,
   });
 
   try {
@@ -1742,12 +1745,33 @@ async function processUtterance(
         return;
       }
       const elModel = resolveElevenLabsSttModelId(csUtterance?.stt_model);
-      const elLang = multilingual
-        ? undefined
-        : bcp47ToElevenLabsLanguage("en-IN", {
-            multilingual: false,
-            forceEnglish: true,
-          });
+      /**
+       * Multilingual + ElevenLabs: without `language_code`, Scribe often auto-picks Hindi on noisy 8 kHz
+       * audio and emits high-confidence unrelated Hindi filler — wrong RAG question. Bias toward tenant
+       * `default_language_code` (single request; no added latency). Opt out: `VOICEBOT_ELEVENLABS_STT_FULL_AUTO=true`.
+       */
+      let elLang: string | undefined;
+      if (!multilingual) {
+        elLang = bcp47ToElevenLabsLanguage("en-IN", {
+          multilingual: false,
+          forceEnglish: true,
+        });
+      } else if (env.voicebot.elevenlabsSttFullAuto) {
+        elLang = undefined;
+      } else {
+        const hintBcp47 = session.defaultLanguageCode?.trim() || "en-IN";
+        elLang =
+          bcp47ToElevenLabsLanguage(hintBcp47, {
+            multilingual: true,
+            forceEnglish: false,
+          }) ?? "en";
+      }
+      voiceTrace(log, "pipeline.stt.elevenlabs_language_hint", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        default_language_code: session.defaultLanguageCode ?? null,
+        language_code_sent: elLang ?? "auto",
+      });
       try {
         stt = await elevenLabsSpeechToText({
           fileBuffer: wavBuffer,

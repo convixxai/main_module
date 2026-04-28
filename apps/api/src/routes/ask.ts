@@ -313,6 +313,13 @@ const RAG_RULES_SUFFIX = `--- RAG rules (apply on top of agent instructions abov
 - Use ANSWER_NOT_FOUND only when no passage reasonably answers the user's question (not merely because the user's wording differs from a KB heading).
 - Keep answers short unless the agent instructions above specify a stricter length.`;
 
+/** Appended to RAG system when \`customer_settings.voicebot_multilingual\` is true. */
+const RAG_MULTILINGUAL_GRAMMAR_RULE = `
+--- Multilingual writing quality (mandatory for non-English replies) ---
+- When you answer in Hindi, Marathi, or any other non-English language the tenant supports, use **fluent, grammatically correct** phrasing a native speaker would use—not a literal translation from English.
+- Pay attention to correct verb agreement, gender/number, natural word order, particles/postpositions, and idioms for that language. Prefer short correct sentences over long incorrect ones.
+- If KNOWLEDGEBASE passages are in English, restate the facts clearly in the user’s language without broken grammar or awkward calques.`;
+
 function buildRAGMessages(
   systemPrompt: string,
   context: string,
@@ -325,6 +332,8 @@ function buildRAGMessages(
     ttsModelRaw?: string | null;
     /** Raw \`customer_settings.tts_model\` — when \`eleven_v3\`, LLM gets strict per-sentence [tag] prefixes. */
     customerTtsModelRaw?: string | null;
+    /** When tenant has multilingual voice/chat enabled, add stricter grammar guidance for non-English. */
+    multilingualGrammarHints?: boolean;
   }
 ) {
   const noKbLine =
@@ -336,11 +345,13 @@ function buildRAGMessages(
     opts?.ttsModelRaw ?? null,
     { customerTtsModelRaw: opts?.customerTtsModelRaw ?? null }
   );
+  const grammarBlock =
+    opts?.multilingualGrammarHints === true ? RAG_MULTILINGUAL_GRAMMAR_RULE : "";
   const messages: { role: "system" | "user" | "assistant"; content: string }[] =
     [
       {
         role: "system",
-        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}${noKbLine}${elHint}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
+        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}${grammarBlock}${noKbLine}${elHint}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
       },
     ];
 
@@ -633,6 +644,7 @@ async function runAskPipeline(params: {
       ttsProvider: custSettings?.tts_provider ?? null,
       ttsModelRaw: agent?.ttsModel ?? custSettings?.tts_model ?? null,
       customerTtsModelRaw: custSettings?.tts_model ?? null,
+      multilingualGrammarHints: multilingual,
     }
   );
 

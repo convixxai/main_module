@@ -139,6 +139,13 @@ export const env = {
       const t = (process.env.VOICEBOT_FILLER_ACK_TEXT || "Go ahead, I'm listening.").trim();
       return t.length > 0 ? t : "Go ahead, I'm listening.";
     })(),
+    /**
+     * ElevenLabs Scribe + `voicebot_multilingual`: when `false` (default), send `language_code` from
+     * `customer_settings.default_language_code` so short English lines are not auto-labeled Hindi with
+     * unrelated filler text. Same latency (single STT). Set `VOICEBOT_ELEVENLABS_STT_FULL_AUTO=true` to
+     * omit `language_code` (full auto-detect; better mixed-language-per-utterance, more mis-detect risk).
+     */
+    elevenlabsSttFullAuto: process.env.VOICEBOT_ELEVENLABS_STT_FULL_AUTO === "true",
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
