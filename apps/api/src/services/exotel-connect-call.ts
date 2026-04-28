@@ -49,14 +49,93 @@ function appendForm(params: URLSearchParams, key: string, value: string): void {
   params.append(key, value);
 }
 
+/** Exotel defaults to XML unless the URL ends with `.json`. See developer.exotel.com Make a Call API. */
+function connectJsonUrl(accountSid: string): string {
+  const base = env.exotel.restApiBaseUrl;
+  return `${base}/v1/Accounts/${encodeURIComponent(accountSid)}/Calls/connect.json`;
+}
+
+/** Pull flat tag text from XML snippet (first match). */
+function xmlInnerTag(xml: string, tag: string): string | null {
+  const re = new RegExp(`<${tag}>([^<]*)</${tag}>`, "i");
+  const m = xml.match(re);
+  return m ? m[1].trim() : null;
+}
+
+/** Parse `<TwilioResponse><RestException>...</RestException>` style errors. */
+function tryParseXmlRestException(text: string): {
+  message: string;
+  status?: number;
+} | null {
+  if (!/<RestException/i.test(text)) return null;
+  const message =
+    xmlInnerTag(text, "Message") ??
+    xmlInnerTag(text, "message") ??
+    "Exotel API error";
+  const statusRaw = xmlInnerTag(text, "Status") ?? xmlInnerTag(text, "status");
+  const statusNum =
+    statusRaw != null && statusRaw !== ""
+      ? parseInt(statusRaw, 10)
+      : undefined;
+  return {
+    message,
+    status: Number.isFinite(statusNum) ? statusNum : undefined,
+  };
+}
+
+/** Parse `<Call>...</Call>` success XML into an object shaped like JSON `Call`. */
+function tryParseXmlCallSuccess(text: string): Record<string, unknown> | null {
+  const block = text.match(/<Call>\s*([\s\S]*?)<\/Call>/i);
+  if (!block) return null;
+  const inner = block[1];
+  const call: Record<string, unknown> = {};
+  const tagRe = /<([A-Za-z][A-Za-z0-9]*)>([^<]*)<\/\1>/g;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(inner)) !== null) {
+    const v = m[2];
+    call[m[1]] = v === "" ? null : v;
+  }
+  return Object.keys(call).length > 0 ? call : null;
+}
+
+function parseExotelResponseBody(text: string): Record<string, unknown> {
+  const trimmed = text.replace(/^\uFEFF/, "").trim();
+  if (!trimmed.length) return {};
+
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    const xmlErr = tryParseXmlRestException(text);
+    if (xmlErr) {
+      const synthetic: Record<string, unknown> = {
+        RestException: {
+          Message: xmlErr.message,
+          ...(xmlErr.status != null ? { Status: xmlErr.status } : {}),
+        },
+      };
+      return synthetic;
+    }
+
+    const callXml = tryParseXmlCallSuccess(text);
+    if (callXml) {
+      return { Call: callXml };
+    }
+
+    const preview = trimmed.replace(/\s+/g, " ").slice(0, 240);
+    throw new ExotelUpstreamError(
+      `Exotel returned a response that is neither JSON nor recognized Exotel XML. First characters: ${preview}`,
+      502
+    );
+  }
+}
+
 /**
  * POST Calls/connect with Basic auth (same semantics as api_key:api_token in URL).
  */
 export async function exotelConnectCall(
   params: ExotelConnectCallParams
 ): Promise<ExotelConnectCallSuccess> {
-  const base = env.exotel.restApiBaseUrl;
-  const url = `${base}/v1/Accounts/${encodeURIComponent(params.accountSid)}/Calls/connect`;
+  const url = connectJsonUrl(params.accountSid);
 
   const body = new URLSearchParams();
   appendForm(body, "From", params.from);
@@ -101,17 +180,7 @@ export async function exotelConnectCall(
   });
 
   const text = await response.text();
-  let parsed: unknown;
-  try {
-    parsed = text.length ? JSON.parse(text) : {};
-  } catch {
-    throw new ExotelUpstreamError(
-      "Exotel returned non-JSON response",
-      response.status || 502
-    );
-  }
-
-  const obj = parsed as Record<string, unknown>;
+  const obj = parseExotelResponseBody(text);
   const restEx = obj.RestException as { Status?: number; Message?: string } | undefined;
   if (restEx?.Message != null) {
     throw new ExotelUpstreamError(
