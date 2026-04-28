@@ -81,6 +81,23 @@ export interface VoicebotSession {
    */
   defaultLanguageCode?: string;
   /**
+   * Active pipeline language (BCP-47). Mirrored from `exotel_call_sessions.current_language_code`;
+   * STT/LLM/TTS must follow this unless a multilingual switch flow updates it.
+   */
+  currentLanguageCode?: string;
+  /**
+   * Count of substantive user turns (non-empty STT) — used for early-window auto language alignment.
+   */
+  customerQueryCount?: number;
+  /** When set, the next utterance is interpreted as yes/no for switching to `targetLanguage`. */
+  pendingLanguageSwitch?: {
+    targetLanguage: string;
+    deferredTranscript: string;
+    fromLanguage: string;
+    confidence: number | null;
+    unclearRetries: number;
+  } | null;
+  /**
    * From `customer_settings.allowed_language_codes` at call `start` (BCP-47 tags).
    */
   allowedLanguageCodes?: string[];

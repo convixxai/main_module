@@ -311,6 +311,7 @@ export async function sarvamSpeechToTextWebsocket(params: {
 
     let lastTranscript = "";
     let lastLang: string | null = null;
+    let lastLangProb: number | null = null;
     let lastRequestId: string | null = null;
     let settled = false;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -366,6 +367,7 @@ export async function sarvamSpeechToTextWebsocket(params: {
             request_id: lastRequestId,
             transcript: lastTranscript,
             language_code: lastLang ?? "en-IN",
+            language_probability: lastLangProb,
           });
         }
       }, idleMs);
@@ -395,6 +397,10 @@ export async function sarvamSpeechToTextWebsocket(params: {
         if (typeof d.transcript === "string") {
           lastTranscript = d.transcript;
           lastLang = typeof d.language_code === "string" ? d.language_code : null;
+          const lp = d.language_probability;
+          if (typeof lp === "number" && Number.isFinite(lp)) {
+            lastLangProb = lp;
+          }
           lastRequestId = typeof d.request_id === "string" ? d.request_id : null;
           if (firstDataTimer) {
             clearTimeout(firstDataTimer);
@@ -439,6 +445,7 @@ export async function sarvamSpeechToTextWebsocket(params: {
             request_id: lastRequestId,
             transcript: lastTranscript,
             language_code: lastLang ?? "en-IN",
+            language_probability: lastLangProb,
           });
         }
       }

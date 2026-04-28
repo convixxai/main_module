@@ -565,6 +565,150 @@ function isLanguageInAllowedList(detectedRaw: string, allowed: string[]): boolea
   );
 }
 
+function languagesLooselyEqual(a: string, b: string): boolean {
+  const na = normalizeBcp47Tag(a);
+  const nb = normalizeBcp47Tag(b);
+  if (na === nb) return true;
+  const pa = na.split("-")[0]?.toLowerCase() ?? "";
+  const pb = nb.split("-")[0]?.toLowerCase() ?? "";
+  return pa.length > 0 && pa === pb;
+}
+
+function persistSessionActiveLanguage(
+  session: VoicebotSession,
+  lang: string,
+  log?: FastifyRequest["log"]
+): void {
+  const n = normalizeBcp47Tag(lang);
+  session.currentLanguageCode = n;
+  if (session.callSessionDbId) {
+    void updateExotelCallSessionLanguage(session.callSessionDbId, n).catch(() => {});
+  }
+  voiceTrace(log, "voicebot.language.active_updated", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    call_sid: session.callSid,
+    exotel_call_session_id: session.callSessionDbId,
+    current_language_code: n,
+  });
+}
+
+type LanguageSwitchPolicyOutcome =
+  | { action: "continue" }
+  | { action: "pending"; target: string; confidence: number | null };
+
+function applyLanguageSwitchPolicy(
+  session: VoicebotSession,
+  params: {
+    multilingual: boolean;
+    nextQueryIndex: number;
+    clampedDetected: string;
+    detectedRaw: string;
+    languageProbability: number | null;
+    sttProvider: string;
+    allowedNorm: string[];
+    log?: FastifyRequest["log"];
+  }
+): LanguageSwitchPolicyOutcome {
+  const {
+    multilingual,
+    nextQueryIndex,
+    clampedDetected,
+    languageProbability,
+    sttProvider,
+    allowedNorm,
+  } = params;
+  if (!multilingual) {
+    return { action: "continue" };
+  }
+  const active = normalizeBcp47Tag(
+    session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+  );
+  if (!isLanguageInAllowedList(clampedDetected, allowedNorm)) {
+    voiceTrace(params.log, "voicebot.language.policy.detected_disallowed", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      clamped_detected: clampedDetected,
+      active_language: active,
+    });
+    return { action: "continue" };
+  }
+  if (languagesLooselyEqual(clampedDetected, active)) {
+    return { action: "continue" };
+  }
+  const conf = sttProvider === "sarvam" ? params.languageProbability : null;
+  const silentOk =
+    nextQueryIndex <= 2 && conf != null && conf > 0.8;
+  if (silentOk) {
+    persistSessionActiveLanguage(session, clampedDetected, params.log);
+    voiceTrace(params.log, "voicebot.language.silent_switch_early_window", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      from: active,
+      to: normalizeBcp47Tag(clampedDetected),
+      query_index: nextQueryIndex,
+      language_probability: conf,
+    });
+    return { action: "continue" };
+  }
+  if (nextQueryIndex <= 2) {
+    voiceTrace(params.log, "voicebot.language.early_no_switch", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      active_language: active,
+      detected_clamped: clampedDetected,
+      language_probability: conf,
+      query_index: nextQueryIndex,
+    });
+    return { action: "continue" };
+  }
+  return {
+    action: "pending",
+    target: normalizeBcp47Tag(clampedDetected),
+    confidence: conf,
+  };
+}
+
+function languageSwitchConfirmPrompt(activeTag: string, targetTag: string): string {
+  return `I detected ${targetTag}. Would you like to continue in that language? Please say yes or no.`;
+}
+
+function parseLanguageSwitchConfirmation(transcript: string): "yes" | "no" | "unclear" {
+  const t = transcript.trim().toLowerCase();
+  if (!t) return "unclear";
+  if (
+    /\bno\b/.test(t) ||
+    /\bnahi\b/.test(t) ||
+    /\bनहीं\b/.test(t) ||
+    /\bmat\b/.test(t) ||
+    /\bcancel\b/.test(t) ||
+    /\bdon't\b/.test(t) ||
+    /\bdo not\b/.test(t) ||
+    /\bnope\b/.test(t) ||
+    /\bdon't switch\b/.test(t)
+  ) {
+    return "no";
+  }
+  if (
+    /\byes\b/.test(t) ||
+    /\byeah\b/.test(t) ||
+    /\bokay\b/.test(t) ||
+    /\bok\b/.test(t) ||
+    /\bsure\b/.test(t) ||
+    /\bhaan\b/.test(t) ||
+    /\bha\b/.test(t) ||
+    /\bहाँ\b/.test(t) ||
+    /\bजी\b/.test(t) ||
+    /\btheek\b/.test(t) ||
+    /\bthik\b/.test(t) ||
+    /\bswitch\b/.test(t)
+  ) {
+    return "yes";
+  }
+  if (/^[ny]$/i.test(t)) return t === "y" || t === "Y" ? "yes" : "no";
+  return "unclear";
+}
+
 /**
  * When Sarvam tags a wrong script language (e.g. gu-IN) for clear English speech, the first transcript
  * is still usually Latin. Skipping the 2nd REST rehint in that case saves ~1s+ (TTFA).
@@ -1642,6 +1786,188 @@ function createStreamingVoiceTts(
 }
 
 /**
+ * RAG + TTS path after STT produced a final `transcript` and `session.effectiveSttLanguageThisTurn` is set.
+ */
+async function runVoicebotReplyPipelineAfterTranscriptReady(
+  ws: WebSocket,
+  session: VoicebotSession,
+  transcript: string,
+  utteranceStartedAt: number,
+  tAfterStt: number,
+  multilingual: boolean,
+  log?: FastifyRequest["log"]
+): Promise<void> {
+  const pipelineBcp = multilingual
+    ? normalizeBcp47Tag(session.currentLanguageCode || session.defaultLanguageCode || "en-IN")
+    : "en-IN";
+  const ttsLanguage = multilingual ? mapToTtsLanguage(pipelineBcp) : "en-IN";
+
+  log?.info(
+    {
+      stream_sid: session.streamSid,
+      transcript,
+      language: pipelineBcp,
+    },
+    "voicebot STT result"
+  );
+
+  if (session.isClosing) return;
+
+  const csTurn = tenantCs(session);
+  if (csTurn?.stop_words?.length && textMatchesAnyPhrase(transcript, csTurn.stop_words)) {
+    voiceTrace(log, "pipeline.stop_word", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      transcript_preview: transcript.slice(0, 200),
+    });
+    return;
+  }
+  if (csTurn?.end_call_keywords?.length && textMatchesAnyPhrase(transcript, csTurn.end_call_keywords)) {
+    const bye =
+      csTurn.handoff_to_human_enabled && csTurn.human_agent_transfer_number
+        ? "Thank you for calling. Connecting you to a team member now."
+        : "Thank you for calling. Goodbye.";
+    voiceTrace(log, "pipeline.end_call_keyword", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      transcript_preview: transcript.slice(0, 200),
+    });
+    await appendVoiceTurnToChat(session, transcript, bye, {
+      assistantSource: "end_call_keyword",
+    });
+    await speakToExotel(ws, session, bye, ttsLanguage, log);
+    return;
+  }
+
+  if (env.voicebot.fillerAckEnabled && isFillerOnlyTranscript(transcript)) {
+    const ack = pickFillerAckPhrase(multilingual ? pipelineBcp : "en-IN", {
+      englishOverride: env.voicebot.fillerAckText,
+    });
+    voiceTrace(log, "pipeline.stt.filler_only", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      call_sid: session.callSid,
+      exotel_call_session_id: session.callSessionDbId,
+      transcript_preview: transcript.slice(0, 120),
+      ack_preview: ack.slice(0, 200),
+    });
+    logVoiceStage(log, "stt.filler_skip_rag", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      transcript_chars: transcript.length,
+    });
+    if (session.isClosing) return;
+    await appendVoiceTurnToChat(session, transcript, ack, {
+      assistantSource: "filler_ack",
+    });
+    await speakToExotel(ws, session, ack, ttsLanguage, log);
+    const tEnd = Date.now();
+    const elapsedMs = tEnd - utteranceStartedAt;
+    const sttMs = tAfterStt - utteranceStartedAt;
+    const fillerMs = tEnd - tAfterStt;
+    voiceTrace(log, "pipeline.utterance.timing", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      stt_ms: sttMs,
+      ask_pipeline_ms: fillerMs,
+      final_tts_ms: 0,
+      total_ms: elapsedMs,
+      spoke_incrementally: false,
+      filler_only: true,
+    });
+    logVoiceStage(log, "utterance.completed", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      llm_source: "filler_ack",
+      elapsed_ms: elapsedMs,
+      timing_stt_ms: sttMs,
+      timing_ask_pipeline_ms: fillerMs,
+      timing_final_tts_ms: 0,
+    });
+    return;
+  }
+
+  voiceTrace(log, "pipeline.rag.start", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    exotel_call_session_id: session.callSessionDbId,
+    question_preview: transcript.slice(0, 500),
+  });
+
+  if (session.isClosing) return;
+
+  const streamToCall =
+    session.ragStreamingForVoice === true && session.ttsStreamingForVoice === true
+      ? { ws, ttsLanguage }
+      : undefined;
+  if (
+    session.ragStreamingForVoice === true &&
+    session.ttsStreamingForVoice !== true &&
+    log
+  ) {
+    voiceTrace(log, "pipeline.rag.tts_streaming_off", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      reason: "full_llm_then_single_tts",
+    });
+  }
+
+  const askResult = await runVoicebotAskPipeline(session, transcript, log, streamToCall);
+  const tAfterAsk = Date.now();
+
+  if (!askResult || !askResult.answer) {
+    await appendVoiceTurnToChat(session, transcript, session.errorText || ERROR_AUDIO_TEXT, {
+      assistantSource: "pipeline_error",
+    });
+    await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, ttsLanguage, log);
+    logVoiceStage(log, "pipeline.fallback_error_audio", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+    });
+    return;
+  }
+
+  log?.info(
+    {
+      stream_sid: session.streamSid,
+      answer: askResult.answer.slice(0, 200),
+      source: askResult.source,
+    },
+    "voicebot pipeline result"
+  );
+
+  if (!askResult.spokeIncrementally) {
+    await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
+  }
+  const tEnd = Date.now();
+  const elapsedMs = tEnd - utteranceStartedAt;
+  const sttMs = tAfterStt - utteranceStartedAt;
+  const askMs = tAfterAsk - tAfterStt;
+  const finalTtsMs = askResult.spokeIncrementally ? 0 : tEnd - tAfterAsk;
+  voiceTrace(log, "pipeline.utterance.timing", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    stt_ms: sttMs,
+    ask_pipeline_ms: askMs,
+    final_tts_ms: finalTtsMs,
+    total_ms: elapsedMs,
+    spoke_incrementally: askResult.spokeIncrementally === true,
+  });
+  logVoiceStage(log, "utterance.completed", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    llm_source: askResult.source,
+    elapsed_ms: elapsedMs,
+    timing_stt_ms: sttMs,
+    timing_ask_pipeline_ms: askMs,
+    timing_final_tts_ms: finalTtsMs,
+  });
+  if (elapsedMs > 15000) {
+    log?.warn({ stream_sid: session.streamSid, elapsedMs }, "voicebot utterance slow path (>15s)");
+  }
+}
+
+/**
  * Process accumulated inbound audio: STT → Pipeline → TTS → Send to Exotel.
  * This is the core voice agent pipeline for a single utterance.
  */
@@ -1735,14 +2061,15 @@ async function processUtterance(
     const wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
 
     /**
-     * Sarvam: with `voicebot_multilingual` and no `language_code`, Sarvam often routes English speech to
-     * Hindi/Marathi scripts with garbage words. Bias with tenant default (same idea as ElevenLabs). Opt out:
-     * `VOICEBOT_SARVAM_STT_FULL_AUTO=true`.
+     * Multilingual + Sarvam: omit `language_code` (HTTP) / use `unknown` (WS) so Sarvam returns
+     * `language_probability` for language-switch policy. Rehint below still sharpens transcripts using
+     * `session.currentLanguageCode`. Non-multilingual keeps `en-IN`. See
+     * `docs/EXOTEL_VOICEBOT_LANGUAGE_SWITCHING_SPEC.md`.
      */
     const sttLanguageHint =
       !multilingual
         ? "en-IN"
-        : env.voicebot.sarvamSttFullAuto
+        : sttProvider === "sarvam"
           ? undefined
           : session.defaultLanguageCode?.trim() || "en-IN";
 
@@ -1750,6 +2077,7 @@ async function processUtterance(
       voiceTrace(log, "pipeline.stt.sarvam_language_hint", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
+        current_language_code: session.currentLanguageCode ?? null,
         default_language_code: session.defaultLanguageCode ?? null,
         language_code_sent: sttLanguageHint ?? "auto",
       });
@@ -1778,7 +2106,10 @@ async function processUtterance(
       } else if (env.voicebot.elevenlabsSttFullAuto) {
         elLang = undefined;
       } else {
-        const hintBcp47 = session.defaultLanguageCode?.trim() || "en-IN";
+        const hintBcp47 =
+          session.currentLanguageCode?.trim() ||
+          session.defaultLanguageCode?.trim() ||
+          "en-IN";
         elLang =
           bcp47ToElevenLabsLanguage(hintBcp47, {
             multilingual: true,
@@ -1818,9 +2149,6 @@ async function processUtterance(
           const wsLanguage = (() => {
             if (sttLanguageHint && sttLanguageHint.trim().length > 0) {
               return sttLanguageHint;
-            }
-            if (multilingual && env.sarvam.sttWssUseDefaultLanguage) {
-              return session.defaultLanguageCode || "en-IN";
             }
             return "unknown";
           })();
@@ -1887,23 +2215,167 @@ async function processUtterance(
 
     let transcript: string;
     let detectedRaw: string;
+    let languageProbability: number | null = null;
     if (sttProvider === "elevenlabs") {
       const shaped = elevenLabsSttToSarvamShape(stt.body);
       transcript = shaped.transcript;
       detectedRaw = shaped.language_code;
     } else {
-      const sttBody = stt.body as { transcript?: string; language_code?: string };
+      const sttBody = stt.body as {
+        transcript?: string;
+        language_code?: string;
+        language_probability?: number;
+      };
       transcript = sttBody.transcript?.trim() || "";
       detectedRaw = sttBody.language_code || "en-IN";
+      const lp = sttBody.language_probability;
+      languageProbability = typeof lp === "number" && Number.isFinite(lp) ? lp : null;
     }
 
-    let effectiveLanguage = multilingual
-      ? clampLanguageToAllowed(
-          detectedRaw,
-          allowedNorm,
-          session.defaultLanguageCode || "en-IN"
-        )
-      : "en-IN";
+    if (session.pendingLanguageSwitch) {
+      const pending = session.pendingLanguageSwitch;
+      const activeBcp = normalizeBcp47Tag(
+        session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+      );
+      const ttsPromptLang = multilingual ? mapToTtsLanguage(activeBcp) : "en-IN";
+      if (!transcript.trim()) {
+        voiceTrace(log, "voicebot.language.confirm_empty_transcript", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+        });
+        return;
+      }
+      const reply = parseLanguageSwitchConfirmation(transcript);
+      if (reply === "yes") {
+        persistSessionActiveLanguage(session, pending.targetLanguage, log);
+        session.pendingLanguageSwitch = null;
+        session.effectiveSttLanguageThisTurn = normalizeBcp47Tag(
+          session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+        );
+        await applyAgentVoicePersonaToSession(session);
+        if (session.callSessionDbId) {
+          void updateExotelCallSessionLanguage(
+            session.callSessionDbId,
+            session.effectiveSttLanguageThisTurn
+          ).catch(() => {});
+        }
+        const tAfterStt = Date.now();
+        await runVoicebotReplyPipelineAfterTranscriptReady(
+          ws,
+          session,
+          pending.deferredTranscript,
+          utteranceStartedAt,
+          tAfterStt,
+          multilingual,
+          log
+        );
+        return;
+      }
+      if (reply === "no") {
+        session.pendingLanguageSwitch = null;
+        const msg = `Okay, we will continue in ${activeBcp}.`;
+        await appendVoiceTurnToChat(session, transcript, msg, {
+          assistantSource: "language_switch_declined",
+        });
+        await speakToExotel(ws, session, msg, ttsPromptLang, log);
+        return;
+      }
+      pending.unclearRetries += 1;
+      if (pending.unclearRetries <= 1) {
+        const prompt = languageSwitchConfirmPrompt(activeBcp, pending.targetLanguage);
+        await appendVoiceTurnToChat(session, transcript, prompt, {
+          assistantSource: "language_switch_reprompt",
+        });
+        await speakToExotel(ws, session, prompt, ttsPromptLang, log);
+        return;
+      }
+      session.pendingLanguageSwitch = null;
+      const msg = `I will continue in ${activeBcp}.`;
+      await appendVoiceTurnToChat(session, transcript, msg, {
+        assistantSource: "language_switch_unclear_abort",
+      });
+      await speakToExotel(ws, session, msg, ttsPromptLang, log);
+      return;
+    }
+
+    if (!transcript) {
+      log?.warn(
+        {
+          stream_sid: session.streamSid,
+          stt_body: safeJsonForLog(stt.body),
+        },
+        "voicebot STT empty transcript — check audio encoding/sample rate vs Exotel media_format"
+      );
+      voiceTrace(log, "pipeline.stt.empty_transcript", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        raw: safeJsonForLog(stt.body),
+      });
+      return;
+    }
+
+    if (!multilingual) {
+      session.currentLanguageCode = normalizeBcp47Tag("en-IN");
+    }
+
+    if (!session.currentLanguageCode?.trim()) {
+      session.currentLanguageCode = normalizeBcp47Tag(
+        session.defaultLanguageCode || "en-IN"
+      );
+    }
+
+    const nextQueryIndex = (session.customerQueryCount ?? 0) + 1;
+    const clampedForPolicy = clampLanguageToAllowed(
+      detectedRaw,
+      allowedNorm,
+      session.defaultLanguageCode || "en-IN"
+    );
+
+    const policyOutcome = applyLanguageSwitchPolicy(session, {
+      multilingual,
+      nextQueryIndex,
+      clampedDetected: clampedForPolicy,
+      detectedRaw,
+      languageProbability,
+      sttProvider,
+      allowedNorm,
+      log,
+    });
+
+    if (policyOutcome.action === "pending") {
+      session.customerQueryCount = nextQueryIndex;
+      const activeBcp = normalizeBcp47Tag(
+        session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+      );
+      session.pendingLanguageSwitch = {
+        targetLanguage: policyOutcome.target,
+        deferredTranscript: transcript,
+        fromLanguage: activeBcp,
+        confidence: policyOutcome.confidence,
+        unclearRetries: 0,
+      };
+      const prompt = languageSwitchConfirmPrompt(activeBcp, policyOutcome.target);
+      const ttsPromptLang = multilingual ? mapToTtsLanguage(activeBcp) : "en-IN";
+      voiceTrace(log, "voicebot.language.pending_confirmation", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        from: activeBcp,
+        to: policyOutcome.target,
+        query_index: nextQueryIndex,
+        language_probability: policyOutcome.confidence,
+      });
+      await appendVoiceTurnToChat(session, transcript, prompt, {
+        assistantSource: "language_switch_prompt",
+      });
+      await speakToExotel(ws, session, prompt, ttsPromptLang, log);
+      return;
+    }
+
+    session.customerQueryCount = nextQueryIndex;
+
+    let effectiveLanguage = normalizeBcp47Tag(
+      session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+    );
 
     // Sarvam auto-detect can label audio as a language outside the tenant allowlist (e.g. gu-IN for
     // English). Policy clamps to en-IN/mr-IN/hi-IN but the transcript can stay in the wrong script;
@@ -1971,11 +2443,6 @@ async function processUtterance(
               } else {
                 transcript = t2;
                 detectedRaw = b.language_code?.trim() || languageHintForRetry;
-                effectiveLanguage = clampLanguageToAllowed(
-                  detectedRaw,
-                  allowedNorm,
-                  session.defaultLanguageCode || "en-IN"
-                );
                 voiceTrace(log, "pipeline.stt.rehint", {
                   customerId: session.customerId,
                   stream_sid: session.streamSid,
@@ -1998,13 +2465,15 @@ async function processUtterance(
       }
     }
 
+    effectiveLanguage = multilingual
+      ? normalizeBcp47Tag(session.currentLanguageCode || session.defaultLanguageCode || "en-IN")
+      : normalizeBcp47Tag("en-IN");
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
     await applyAgentVoicePersonaToSession(session);
     if (session.callSessionDbId) {
-      void updateExotelCallSessionLanguage(
-        session.callSessionDbId,
-        effectiveLanguage
-      ).catch(() => {});
+      void updateExotelCallSessionLanguage(session.callSessionDbId, effectiveLanguage).catch(
+        () => {}
+      );
     }
     logVoiceStage(log, "stt.done", {
       customerId: session.customerId,
@@ -2022,206 +2491,23 @@ async function processUtterance(
       transcript: transcript || "",
       language: effectiveLanguage,
       stt_detected_raw: detectedRaw,
+      language_probability: languageProbability,
       raw: safeJsonForLog(stt.body),
     });
-
-    if (!transcript) {
-      log?.warn(
-        {
-          stream_sid: session.streamSid,
-          stt_body: safeJsonForLog(stt.body),
-        },
-        "voicebot STT empty transcript — check audio encoding/sample rate vs Exotel media_format"
-      );
-      voiceTrace(log, "pipeline.stt.empty_transcript", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        raw: safeJsonForLog(stt.body),
-      });
-      return; // Silence or noise — don't respond
-    }
-
-    log?.info({
-      stream_sid: session.streamSid,
-      transcript,
-      language: effectiveLanguage,
-      stt_detected_raw: detectedRaw,
-    }, "voicebot STT result");
 
     if (session.isClosing) return;
 
     const tAfterStt = Date.now();
 
-    // TTS language for this turn (also used for incremental TTS when RAG streaming is on)
-    const ttsLanguage = multilingual
-      ? mapToTtsLanguage(effectiveLanguage)
-      : "en-IN";
-
-    const csTurn = tenantCs(session);
-    if (
-      csTurn?.stop_words?.length &&
-      textMatchesAnyPhrase(transcript, csTurn.stop_words)
-    ) {
-      voiceTrace(log, "pipeline.stop_word", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        transcript_preview: transcript.slice(0, 200),
-      });
-      return;
-    }
-    if (
-      csTurn?.end_call_keywords?.length &&
-      textMatchesAnyPhrase(transcript, csTurn.end_call_keywords)
-    ) {
-      const bye =
-        csTurn.handoff_to_human_enabled && csTurn.human_agent_transfer_number
-          ? "Thank you for calling. Connecting you to a team member now."
-          : "Thank you for calling. Goodbye.";
-      voiceTrace(log, "pipeline.end_call_keyword", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        transcript_preview: transcript.slice(0, 200),
-      });
-      await appendVoiceTurnToChat(session, transcript, bye, {
-        assistantSource: "end_call_keyword",
-      });
-      await speakToExotel(ws, session, bye, ttsLanguage, log);
-      return;
-    }
-
-    if (env.voicebot.fillerAckEnabled && isFillerOnlyTranscript(transcript)) {
-      const ack = pickFillerAckPhrase(multilingual ? effectiveLanguage : "en-IN", {
-        englishOverride: env.voicebot.fillerAckText,
-      });
-      voiceTrace(log, "pipeline.stt.filler_only", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        call_sid: session.callSid,
-        exotel_call_session_id: session.callSessionDbId,
-        transcript_preview: transcript.slice(0, 120),
-        ack_preview: ack.slice(0, 200),
-      });
-      logVoiceStage(log, "stt.filler_skip_rag", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        transcript_chars: transcript.length,
-      });
-      if (session.isClosing) return;
-      await appendVoiceTurnToChat(session, transcript, ack, {
-        assistantSource: "filler_ack",
-      });
-      await speakToExotel(ws, session, ack, ttsLanguage, log);
-      const tEnd = Date.now();
-      const elapsedMs = tEnd - utteranceStartedAt;
-      const sttMs = tAfterStt - utteranceStartedAt;
-      const fillerMs = tEnd - tAfterStt;
-      voiceTrace(log, "pipeline.utterance.timing", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        stt_ms: sttMs,
-        ask_pipeline_ms: fillerMs,
-        final_tts_ms: 0,
-        total_ms: elapsedMs,
-        spoke_incrementally: false,
-        filler_only: true,
-      });
-      logVoiceStage(log, "utterance.completed", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        llm_source: "filler_ack",
-        elapsed_ms: elapsedMs,
-        timing_stt_ms: sttMs,
-        timing_ask_pipeline_ms: fillerMs,
-        timing_final_tts_ms: 0,
-      });
-      return;
-    }
-
-    voiceTrace(log, "pipeline.rag.start", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      exotel_call_session_id: session.callSessionDbId,
-      question_preview: transcript.slice(0, 500),
-    });
-
-    if (session.isClosing) return;
-
-    // LLM + incremental TTS only when both RAG and TTS streaming are enabled (see SETTINGS catalog).
-    const streamToCall =
-      session.ragStreamingForVoice === true && session.ttsStreamingForVoice === true
-        ? { ws, ttsLanguage }
-        : undefined;
-    if (
-      session.ragStreamingForVoice === true &&
-      session.ttsStreamingForVoice !== true &&
-      log
-    ) {
-      voiceTrace(log, "pipeline.rag.tts_streaming_off", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        reason: "full_llm_then_single_tts",
-      });
-    }
-
-    // === Step 2: Run RAG/Ask Pipeline ===
-    const askResult = await runVoicebotAskPipeline(
+    await runVoicebotReplyPipelineAfterTranscriptReady(
+      ws,
       session,
       transcript,
-      log,
-      streamToCall
+      utteranceStartedAt,
+      tAfterStt,
+      multilingual,
+      log
     );
-    const tAfterAsk = Date.now();
-
-    if (!askResult || !askResult.answer) {
-      await appendVoiceTurnToChat(session, transcript, session.errorText || ERROR_AUDIO_TEXT, {
-        assistantSource: "pipeline_error",
-      });
-      await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, effectiveLanguage, log);
-      logVoiceStage(log, "pipeline.fallback_error_audio", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-      });
-      return;
-    }
-
-    log?.info({
-      stream_sid: session.streamSid,
-      answer: askResult.answer.slice(0, 200),
-      source: askResult.source,
-    }, "voicebot pipeline result");
-
-    // === Step 3: TTS + Send (skip if RAG already streamed audio sentence-by-sentence) ===
-    if (!askResult.spokeIncrementally) {
-      await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
-    }
-    const tEnd = Date.now();
-    const elapsedMs = tEnd - utteranceStartedAt;
-    const sttMs = tAfterStt - utteranceStartedAt;
-    const askMs = tAfterAsk - tAfterStt;
-    const finalTtsMs = askResult.spokeIncrementally
-      ? 0
-      : tEnd - tAfterAsk;
-    voiceTrace(log, "pipeline.utterance.timing", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      stt_ms: sttMs,
-      ask_pipeline_ms: askMs,
-      final_tts_ms: finalTtsMs,
-      total_ms: elapsedMs,
-      spoke_incrementally: askResult.spokeIncrementally === true,
-    });
-    logVoiceStage(log, "utterance.completed", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      llm_source: askResult.source,
-      elapsed_ms: elapsedMs,
-      timing_stt_ms: sttMs,
-      timing_ask_pipeline_ms: askMs,
-      timing_final_tts_ms: finalTtsMs,
-    });
-    if (elapsedMs > 15000) {
-      log?.warn({ stream_sid: session.streamSid, elapsedMs }, "voicebot utterance slow path (>15s)");
-    }
   } catch (err) {
     log?.error({ err, stream_sid: session.streamSid }, "voicebot utterance processing error");
     logVoiceStage(log, "utterance.exception", {
@@ -2913,6 +3199,11 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   defaultLanguageCode: session.defaultLanguageCode,
                   currentLanguageCode: session.defaultLanguageCode,
                 });
+                session.currentLanguageCode = normalizeBcp47Tag(
+                  session.voicebotMultilingualEffective === true
+                    ? session.defaultLanguageCode || "en-IN"
+                    : "en-IN"
+                );
                 notifyCallStartFromSession(session);
                 scheduleMaxCallDurationTimer(session, socket, log);
                 await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
