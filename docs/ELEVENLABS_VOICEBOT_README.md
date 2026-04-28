@@ -23,9 +23,9 @@ This project uses ElevenLabs only when `customer_settings.tts_provider = 'eleven
 - Bracketed tags like `[warmly]`, `[happy]`, `[sighs]` are removed before sending text to ElevenLabs.
 - The LLM prompt now asks for natural punctuation and conversational phrasing instead of bracket tags.
 - Default voice settings are tuned for a human phone voice:
-  - `stability: 0.35`
-  - `similarity_boost: 0.9`
-  - `style: 0.2`
+  - `stability: 0.48`
+  - `similarity_boost: 0.88`
+  - `style: 0.12`
   - `use_speaker_boost: true`
   - `speed: 1.0`
 

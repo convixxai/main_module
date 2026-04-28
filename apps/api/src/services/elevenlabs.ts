@@ -193,12 +193,25 @@ export type ElevenLabsTtsParams = {
 };
 
 const ELEVENLABS_DEFAULT_HUMAN_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
-  stability: 0.35,
-  similarity_boost: 0.9,
-  style: 0.2,
+  /** Higher than legacy 0.35 — smoother prosody across clauses, fewer audible “resets” on telephony. */
+  stability: 0.48,
+  similarity_boost: 0.88,
+  /** Lower than legacy 0.2 — less theatrical drift on short sentences. */
+  style: 0.12,
   use_speaker_boost: true,
   speed: 1.0,
 };
+
+/** Light cleanup before TTS: spacing and newlines; shared by voicebot and HTTP `/ask` paths. */
+export function polishElevenLabsVoicebotText(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\.{2,}/g, ".")
+    .trim();
+}
 
 /**
  * Strip bracket tags for ElevenLabs models that are **not** `eleven_v3` (they often read tags as words).
@@ -224,7 +237,8 @@ export function normalizeElevenV3AudioTagsInText(text: string): string {
 
 /** Text sent to ElevenLabs: v3 keeps (normalized) audio tags unless `env.elevenlabs.v3StripAudioTags`. */
 export function prepareTextForElevenLabsTts(text: string, modelId: string): string {
-  const capped = text.slice(0, 2500);
+  const polished = polishElevenLabsVoicebotText(text);
+  const capped = polished.slice(0, 2500);
   if (env.elevenlabs.v3StripAudioTags || !elevenLabsTtsModelIsV3(modelId)) {
     return sanitizeTextForElevenLabsTts(capped);
   }

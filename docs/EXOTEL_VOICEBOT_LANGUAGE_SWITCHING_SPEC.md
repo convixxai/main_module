@@ -40,6 +40,8 @@ Implementation will follow this spec in code; this file is the source of truth f
 
 **Interpretation of “multilingual”:** Tenant `voicebot_multilingual` indicates the *product* may support multiple languages during the call, but the **pipeline still runs in exactly one active language at a time**. Multilingual must not mean “each subsystem picks its own language per utterance without session policy.” Sarvam may still *detect* a different language on an utterance; that detection is input to §4–§5, not a direct override of STT/LLM/TTS for the rest of the turn unless the policy applies.
 
+**STT hint schedule (implementation):** For multilingual **Sarvam** and **ElevenLabs** STT, queries **1–2** use **open** detection (`language_code` omitted, WebSocket `unknown` where applicable) so Sarvam can return **`language_probability`** for §4. From query **3** onward, the same single STT request **biases** to **`session.current_language_code`** (in-memory `currentLanguageCode`) to improve telephony transcription—see `docs/VOICEBOT_STT_QUALITY_AND_TUNING.md`. Environment flags `VOICEBOT_SARVAM_STT_FULL_AUTO` / `VOICEBOT_ELEVENLABS_STT_FULL_AUTO` force open detection for the **entire** call when set.
+
 ---
 
 ## 4. Early window (first two customer queries): silent alignment

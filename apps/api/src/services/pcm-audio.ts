@@ -150,6 +150,34 @@ export function resamplePcm16(
 }
 
 /**
+ * Linear crossfade across the first `sampleCount` samples of `pcm` with the last `sampleCount`
+ * samples of `prevTail` (same-length s16le mono tail from the prior utterance). Reduces clicks
+ * when concatenating separate TTS syntheses (e.g. incremental ElevenLabs chunks on the voicebot).
+ */
+export function crossfadePcm16MonoUtteranceJoin(
+  prevTail: Buffer,
+  pcm: Buffer,
+  sampleCount: number
+): Buffer {
+  const n = Math.min(
+    sampleCount,
+    Math.floor(prevTail.length / 2),
+    Math.floor(pcm.length / 2)
+  );
+  if (n <= 0) return pcm;
+  const out = Buffer.from(pcm);
+  const prevOffset = prevTail.length - n * 2;
+  for (let i = 0; i < n; i++) {
+    const t = (i + 1) / (n + 1);
+    const p = prevTail.readInt16LE(prevOffset + i * 2);
+    const c = pcm.readInt16LE(i * 2);
+    const mixed = Math.round(p * (1 - t) + c * t);
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, mixed)), i * 2);
+  }
+  return out;
+}
+
+/**
  * Calculate duration in milliseconds for a given number of PCM bytes.
  * Assumes 16-bit (2 bytes/sample) mono.
  */

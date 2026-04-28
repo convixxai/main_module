@@ -45,6 +45,11 @@ export interface VoicebotSession {
   ttsSampleRate?: number | null;
   /** ElevenLabs `voice_settings` when using an elevenlabs avatar / persona. */
   elevenlabsVoiceSettings?: ElevenLabsVoiceSettingsPayload | null;
+  /**
+   * Last outbound PCM samples from the prior ElevenLabs utterance (mono s16le tail),
+   * used to crossfade into the next `speakToExotel` for smoother joins between streaming chunks.
+   */
+  elevenlabsOutboundTailPcm?: Buffer;
   /** Outbound PCM chunk buffer (respects Exotel 320-byte rules). */
   outboundBuffer: PcmChunkBuffer;
   /** Accumulated inbound PCM from caller (for batch STT or VAD). */
@@ -219,10 +224,11 @@ export function getSession(streamSid: string): VoicebotSession | undefined {
 /** Remove session on stream end. */
 export function removeSession(streamSid: string): void {
   const session = activeSessions.get(streamSid);
-  if (session) {
-    session.isClosing = true;
-    session.outboundBuffer.reset();
-    session.inboundPcm = [];
+    if (session) {
+      session.isClosing = true;
+      session.outboundBuffer.reset();
+      session.inboundPcm = [];
+      session.elevenlabsOutboundTailPcm = undefined;
     if (session.playbackFallbackTimer) {
       clearTimeout(session.playbackFallbackTimer);
       session.playbackFallbackTimer = null;

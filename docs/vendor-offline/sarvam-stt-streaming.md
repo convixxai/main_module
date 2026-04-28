@@ -2,7 +2,7 @@
 
 **Source:** [Streaming Speech-to-Text API](https://docs.sarvam.ai/api-reference-docs/api-guides-tutorials/speech-to-text/streaming-api)  
 **Official machine-readable dump:** [llms-full.txt](https://docs.sarvam.ai/api-reference-docs/api-guides-tutorials/speech-to-text/streaming-api/llms-full.txt)  
-**Snapshot purpose:** Offline reference; refresh from Sarvam when debugging STT.
+**Snapshot purpose:** Offline reference; refresh from Sarvam when debugging STT. **Ops guide (hinting, latency, ElevenLabs vs Sarvam):** `docs/VOICEBOT_STT_QUALITY_AND_TUNING.md`.
 
 > Real-time audio transcription and translation with **WebSocket** connections. Low-latency streaming for live applications.
 

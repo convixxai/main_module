@@ -2,6 +2,8 @@
 
 Offline project notes based on ElevenLabs quickstart and streaming text-to-speech documentation shared on 2026-04-27.
 
+**STT (Scribe)—canonical (refresh if links move):** [Speech-to-text capability](https://elevenlabs.io/docs/capabilities/speech-to-text) · [API reference](https://elevenlabs.io/docs/api-reference/speech-to-text). Operational tuning for the voicebot: `docs/VOICEBOT_STT_QUALITY_AND_TUNING.md`.
+
 ## Quickstart
 
 - Create an ElevenLabs API key in the dashboard.

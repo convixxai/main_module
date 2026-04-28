@@ -47,6 +47,7 @@ import {
   parseWavToPcmS16leMono,
   pcmDurationMs,
   resamplePcm16,
+  crossfadePcm16MonoUtteranceJoin,
 } from "../services/pcm-audio";
 import {
   sarvamSpeechToText,
@@ -1210,6 +1211,10 @@ async function speakToExotel(
     const ttsProvider = cs?.tts_provider ?? "sarvam";
     const exotelRate = session.mediaFormat.sample_rate;
 
+    if (ttsProvider !== "elevenlabs") {
+      session.elevenlabsOutboundTailPcm = undefined;
+    }
+
     if (ttsProvider === "elevenlabs") {
       if (!env.elevenlabs.apiKey) {
         session.ttsInProgress = false;
@@ -1275,7 +1280,7 @@ async function speakToExotel(
       const vs = session.elevenlabsVoiceSettings ?? null;
       const ttsBody = {
         voiceId,
-        text: text.slice(0, 2500),
+        text: text.slice(0, 4000),
         modelId,
         outputFormat,
       };
@@ -1391,7 +1396,30 @@ async function speakToExotel(
         pcmOut = resamplePcm16(pcmOut, srcRate, exotelRate);
       }
 
+      const fadeSamples = exotelRate <= 8000 ? 40 : 56;
+      const tailBytes = fadeSamples * 2;
+      const prevTail = session.elevenlabsOutboundTailPcm;
+      if (
+        prevTail &&
+        prevTail.length === tailBytes &&
+        pcmOut.length >= tailBytes
+      ) {
+        pcmOut = crossfadePcm16MonoUtteranceJoin(prevTail, pcmOut, fadeSamples);
+        voiceTrace(log, "pipeline.tts.elevenlabs_utterance_crossfade", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          fade_samples: fadeSamples,
+          exotel_sample_rate: exotelRate,
+        });
+      }
+
       sendAudioToExotel(ws, session, pcmOut, log);
+      session.elevenlabsOutboundTailPcm =
+        pcmOut.length >= tailBytes
+          ? Buffer.from(pcmOut.subarray(pcmOut.length - tailBytes))
+          : pcmOut.length > 0
+            ? Buffer.from(pcmOut)
+            : undefined;
       session.ttsInProgress = false;
       schedulePlaybackMarkFallback(session, pcmOut.length, exotelRate, log);
       logVoiceStage(log, "tts.sent_to_exotel", {
@@ -1752,6 +1780,29 @@ function findNextSpeakCut(s: string): number {
   return -1;
 }
 
+/** Longer streaming chunks for ElevenLabs — fewer TTS round-trips, smoother joins (first chunk may start slightly later when no `.!?`). */
+function findNextSpeakCutElevenLabs(s: string): number {
+  if (s.length === 0) return -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch && ".!?\n।".includes(ch)) {
+      if (i === s.length - 1 || /\s/.test(s[i + 1]!)) return i;
+    }
+  }
+  if (s.length >= 100) {
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === "," && (i === s.length - 1 || /\s/.test(s[i + 1]!))) return i;
+    }
+  }
+  const minLen = 140;
+  if (s.length >= minLen) {
+    const sp = s.lastIndexOf(" ", minLen);
+    if (sp > 40) return sp - 1;
+    return minLen - 1;
+  }
+  return -1;
+}
+
 /**
  * Buffers LLM token deltas and calls `speakToExotel` per sentence (or ~100 chars) so audio can start before the full reply finishes.
  */
@@ -1761,12 +1812,15 @@ function createStreamingVoiceTts(
   ttsLanguage: string,
   log?: FastifyRequest["log"]
 ) {
+  const useElevenLabsCuts =
+    (tenantCs(session)?.tts_provider ?? "sarvam") === "elevenlabs";
+  const cutAt = useElevenLabsCuts ? findNextSpeakCutElevenLabs : findNextSpeakCut;
   let buffer = "";
   return {
     async pushDelta(text: string): Promise<void> {
       buffer += text;
       for (;;) {
-        const cut = findNextSpeakCut(buffer);
+        const cut = cutAt(buffer);
         if (cut < 0) break;
         const piece = buffer.slice(0, cut + 1).trim();
         buffer = buffer.slice(cut + 1).replace(/^\s+/, "");
@@ -2041,37 +2095,52 @@ async function processUtterance(
       ? "websocket"
       : "batch";
 
-  voiceTrace(log, "pipeline.stt.request", {
-    customerId: session.customerId,
-    stream_sid: session.streamSid,
-    call_sid: session.callSid,
-    exotel_call_session_id: session.callSessionDbId,
-    wav_pcm_bytes: combinedPcm.length,
-    sample_rate: session.mediaFormat.sample_rate,
-    stt_provider: sttProvider,
-    stt_streaming_enabled: session.sttStreamingForVoice === true,
-    stt_implementation: sttImplLine,
-    multilingual,
-    elevenlabs_stt_full_auto: env.voicebot.elevenlabsSttFullAuto,
-    sarvam_stt_full_auto: env.voicebot.sarvamSttFullAuto,
-  });
+    voiceTrace(log, "pipeline.stt.request", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      call_sid: session.callSid,
+      exotel_call_session_id: session.callSessionDbId,
+      wav_pcm_bytes: combinedPcm.length,
+      sample_rate: session.mediaFormat.sample_rate,
+      stt_provider: sttProvider,
+      stt_streaming_enabled: session.sttStreamingForVoice === true,
+      stt_implementation: sttImplLine,
+      multilingual,
+      customer_query_count_before: session.customerQueryCount ?? 0,
+      elevenlabs_stt_full_auto: env.voicebot.elevenlabsSttFullAuto,
+      sarvam_stt_full_auto: env.voicebot.sarvamSttFullAuto,
+    });
 
   try {
     // === Step 1: STT ===
     const wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
 
     /**
-     * Multilingual + Sarvam: omit `language_code` (HTTP) / use `unknown` (WS) so Sarvam returns
-     * `language_probability` for language-switch policy. Rehint below still sharpens transcripts using
-     * `session.currentLanguageCode`. Non-multilingual keeps `en-IN`. See
-     * `docs/EXOTEL_VOICEBOT_LANGUAGE_SWITCHING_SPEC.md`.
+     * Sarvam multilingual: first two **completed** user queries (see `customerQueryCount` before this
+     * turn) omit `language_code` / use `unknown` so Sarvam returns `language_probability` for
+     * `docs/EXOTEL_VOICEBOT_LANGUAGE_SWITCHING_SPEC.md`. From the third query onward, send an explicit
+     * hint (`session.currentLanguageCode`) for better narrowband accuracy — still one STT request.
+     * `VOICEBOT_SARVAM_STT_FULL_AUTO` forces open detect for the whole call.
+     * See `docs/VOICEBOT_STT_QUALITY_AND_TUNING.md`.
      */
-    const sttLanguageHint =
-      !multilingual
-        ? "en-IN"
-        : sttProvider === "sarvam"
+    const priorUserQueryCount = session.customerQueryCount ?? 0;
+    const sarvamMultilingualOpenDetect =
+      multilingual &&
+      sttProvider === "sarvam" &&
+      !env.voicebot.sarvamSttFullAuto &&
+      priorUserQueryCount < 2;
+
+    const sttLanguageHint = !multilingual
+      ? "en-IN"
+      : sttProvider === "sarvam"
+        ? sarvamMultilingualOpenDetect
           ? undefined
-          : session.defaultLanguageCode?.trim() || "en-IN";
+          : normalizeBcp47Tag(
+              session.currentLanguageCode ||
+                session.defaultLanguageCode ||
+                "en-IN"
+            )
+        : session.defaultLanguageCode?.trim() || "en-IN";
 
     if (sttProvider === "sarvam") {
       voiceTrace(log, "pipeline.stt.sarvam_language_hint", {
@@ -2079,6 +2148,8 @@ async function processUtterance(
         stream_sid: session.streamSid,
         current_language_code: session.currentLanguageCode ?? null,
         default_language_code: session.defaultLanguageCode ?? null,
+        prior_user_query_count: priorUserQueryCount,
+        sarvam_open_detect_multilingual: sarvamMultilingualOpenDetect,
         language_code_sent: sttLanguageHint ?? "auto",
       });
     }
@@ -2093,9 +2164,9 @@ async function processUtterance(
       }
       const elModel = resolveElevenLabsSttModelId(csUtterance?.stt_model);
       /**
-       * Multilingual + ElevenLabs: without `language_code`, Scribe often auto-picks Hindi on noisy 8 kHz
-       * audio and emits high-confidence unrelated Hindi filler — wrong RAG question. Bias toward tenant
-       * `default_language_code` (single request; no added latency). Opt out: `VOICEBOT_ELEVENLABS_STT_FULL_AUTO=true`.
+       * Multilingual: first two user queries omit `language_code` when not full-auto — mirrors Sarvam
+       * open-detect window for language-switch policy; after that, bias to `session.currentLanguageCode`
+       * for 8 kHz accuracy (`docs/VOICEBOT_STT_QUALITY_AND_TUNING.md`). English-only stays forced English.
        */
       let elLang: string | undefined;
       if (!multilingual) {
@@ -2110,16 +2181,24 @@ async function processUtterance(
           session.currentLanguageCode?.trim() ||
           session.defaultLanguageCode?.trim() ||
           "en-IN";
-        elLang =
-          bcp47ToElevenLabsLanguage(hintBcp47, {
-            multilingual: true,
-            forceEnglish: false,
-          }) ?? "en";
+        const elMultilingualOpenDetect = priorUserQueryCount < 2;
+        elLang = elMultilingualOpenDetect
+          ? undefined
+          : bcp47ToElevenLabsLanguage(hintBcp47, {
+              multilingual: true,
+              forceEnglish: false,
+            }) ?? "en";
       }
       voiceTrace(log, "pipeline.stt.elevenlabs_language_hint", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
+        current_language_code: session.currentLanguageCode ?? null,
         default_language_code: session.defaultLanguageCode ?? null,
+        prior_user_query_count: priorUserQueryCount,
+        elevenlabs_open_detect_multilingual:
+          multilingual &&
+          !env.voicebot.elevenlabsSttFullAuto &&
+          priorUserQueryCount < 2,
         language_code_sent: elLang ?? "auto",
       });
       try {
