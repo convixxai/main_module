@@ -132,13 +132,16 @@ export const env = {
     ),
     /**
      * When true (default), STT lines that are only conversational fillers (hmm, um, uh, …) skip embedding + RAG + LLM
-     * and play `fillerAckText` instead (faster, avoids irrelevant sales prompts). Set `VOICEBOT_FILLER_ACK_ENABLED=false` to restore old behavior.
+     * and play a short acknowledgment from the per-language filler library (random pick). Set `VOICEBOT_FILLER_ACK_ENABLED=false` to restore old behavior.
      */
     fillerAckEnabled: process.env.VOICEBOT_FILLER_ACK_ENABLED !== "false",
-    /** Spoken reply for filler-only turns. Keep short for telephony. */
+    /**
+     * Optional extra **English** line merged into the en-IN filler pool (random pick with built-ins).
+     * Other languages use {@link ../services/voice-filler-acks FILLER_ACK_PHRASES}. Empty = library only.
+     */
     fillerAckText: (() => {
-      const t = (process.env.VOICEBOT_FILLER_ACK_TEXT || "Go ahead, I'm listening.").trim();
-      return t.length > 0 ? t : "Go ahead, I'm listening.";
+      const t = (process.env.VOICEBOT_FILLER_ACK_TEXT || "").trim();
+      return t.length > 0 ? t : "";
     })(),
     /**
      * ElevenLabs Scribe + `voicebot_multilingual`: when `false` (default), send `language_code` from

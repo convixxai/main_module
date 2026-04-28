@@ -37,6 +37,7 @@ import {
   getActiveSessionsForCustomer,
   type VoicebotSession,
 } from "../services/voicebot-session";
+import { pickFillerAckPhrase } from "../services/voice-filler-acks";
 import {
   decodeBase64Pcm,
   encodeBase64Pcm,
@@ -2089,7 +2090,9 @@ async function processUtterance(
     }
 
     if (env.voicebot.fillerAckEnabled && isFillerOnlyTranscript(transcript)) {
-      const ack = env.voicebot.fillerAckText;
+      const ack = pickFillerAckPhrase(multilingual ? effectiveLanguage : "en-IN", {
+        englishOverride: env.voicebot.fillerAckText,
+      });
       voiceTrace(log, "pipeline.stt.filler_only", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
