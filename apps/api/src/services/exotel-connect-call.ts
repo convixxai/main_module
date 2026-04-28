@@ -12,6 +12,11 @@ export interface ExotelConnectCallParams {
   from: string;
   to: string;
   callerId: string;
+  /**
+   * HTTPS origin for REST (`https://api.exotel.com` vs `https://api.in.exotel.com`).
+   * Usually from `customer_exotel_settings.exotel_subdomain`. Omitted → `env.exotel.restApiBaseUrl`.
+   */
+  restApiBaseUrl?: string;
   callType?: string;
   timeLimit?: number;
   timeOut?: number;
@@ -49,9 +54,28 @@ function appendForm(params: URLSearchParams, key: string, value: string): void {
   params.append(key, value);
 }
 
+/**
+ * Maps `customer_exotel_settings.exotel_subdomain` to REST base URL.
+ * Exotel API keys are tied to a regional host (Singapore vs Mumbai); calling the wrong host returns 401.
+ * Accepts values like `api.exotel.com`, `api.in.exotel.com`, or `https://api.exotel.com`.
+ */
+export function restApiBaseUrlFromSubdomain(
+  exotelSubdomain: string | null | undefined
+): string | null {
+  const raw = exotelSubdomain?.trim();
+  if (!raw) return null;
+  const host = raw
+    .replace(/^https?:\/\//i, "")
+    .split("/")[0]
+    ?.trim();
+  if (!host) return null;
+  if (!/[.]/.test(host)) return null;
+  return `https://${host}`;
+}
+
 /** Exotel defaults to XML unless the URL ends with `.json`. See developer.exotel.com Make a Call API. */
-function connectJsonUrl(accountSid: string): string {
-  const base = env.exotel.restApiBaseUrl;
+function connectJsonUrl(accountSid: string, restBase: string): string {
+  const base = restBase.replace(/\/$/, "");
   return `${base}/v1/Accounts/${encodeURIComponent(accountSid)}/Calls/connect.json`;
 }
 
@@ -135,7 +159,9 @@ function parseExotelResponseBody(text: string): Record<string, unknown> {
 export async function exotelConnectCall(
   params: ExotelConnectCallParams
 ): Promise<ExotelConnectCallSuccess> {
-  const url = connectJsonUrl(params.accountSid);
+  const restBase =
+    params.restApiBaseUrl?.trim().replace(/\/$/, "") || env.exotel.restApiBaseUrl;
+  const url = connectJsonUrl(params.accountSid, restBase);
 
   const body = new URLSearchParams();
   appendForm(body, "From", params.from);

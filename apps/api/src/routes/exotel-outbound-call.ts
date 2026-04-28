@@ -12,6 +12,7 @@ import { getExotelSettings } from "../services/exotel-settings";
 import {
   exotelConnectCall,
   ExotelUpstreamError,
+  restApiBaseUrlFromSubdomain,
 } from "../services/exotel-connect-call";
 
 const outboundCallBodySchema = z.object({
@@ -101,11 +102,23 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
         });
       }
 
+      const rawSubdomain = settings.exotel_subdomain?.trim();
+      const restFromSubdomain = restApiBaseUrlFromSubdomain(settings.exotel_subdomain);
+      if (rawSubdomain && !restFromSubdomain) {
+        return reply.status(400).send({
+          error:
+            "exotel_subdomain must be your Exotel REST API hostname (e.g. api.exotel.com or api.in.exotel.com).",
+        });
+      }
+
       try {
         const result = await exotelConnectCall({
           accountSid,
           apiKey,
           apiToken,
+          ...(restFromSubdomain != null
+            ? { restApiBaseUrl: restFromSubdomain }
+            : {}),
           from: body.from.trim(),
           to: body.to.trim(),
           callerId,
