@@ -166,6 +166,12 @@ export interface VoicebotSession {
   utteranceProcessingStartedAt?: number;
   /** Set to true once the first outbound audio for the current answer is sent (reset per utterance). */
   ttfaLogged?: boolean;
+  /**
+   * Count of consecutive filler-only utterances (hmm, um, …) since the last
+   * real speech or filler-ack response. When this reaches the tenant's
+   * `filler_ack_threshold`, the bot responds with an ack and resets to 0.
+   */
+  fillerConsecutiveCount?: number;
 }
 
 /**

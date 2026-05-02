@@ -91,6 +91,10 @@ const settingsPatchSchema = z
     ivr_speech_input_enabled: z.boolean(),
     ivr_fallback_to_agent: z.boolean(),
 
+    // I-bis. Filler acknowledgment (voicebot)
+    filler_ack_enabled: z.boolean(),
+    filler_ack_threshold: z.number().int().min(1).max(10),
+
     // J. Call lifecycle
     max_call_duration_seconds: z.number().int().positive().nullable(),
     max_concurrent_calls: z.number().int().positive(),

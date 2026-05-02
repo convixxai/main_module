@@ -29,12 +29,12 @@ import {
   elevenLabsTextToSpeechStream,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
-  elevenLabsTtsModelIsV3,
   bcp47ToElevenLabsLanguage,
   buildElevenLabsRagAudioTagHintForProvider,
   ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID,
   ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
   elevenLabsTtsIsLibraryOrPaymentError,
+  elevenLabsTtsOutputFormatForTelephony,
 } from "../services/elevenlabs";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
@@ -988,6 +988,7 @@ function parseSttBody(body: unknown): { transcript: string; language_code: strin
 
 /**
  * ElevenLabs `output_format` for /ask/voice (WAV/MP3 file response).
+ * PCM/WAV paths align with {@link elevenLabsTtsOutputFormatForTelephony} (match sample rate, v3@8k → 16 kHz).
  * Streaming requests must not use `wav_*` (API: "WAV is only supported for non-streaming requests").
  */
 function elevenLabsAskTtsOutputFormat(
@@ -1001,22 +1002,10 @@ function elevenLabsAskTtsOutputFormat(
     if (sr <= 22050) return "mp3_22050_32";
     return "mp3_44100_128";
   }
-  if (ttsModelId && elevenLabsTtsModelIsV3(ttsModelId) && sr <= 16000) {
-    return streaming ? "pcm_22050" : "wav_22050";
-  }
-  if (streaming) {
-    if (sr <= 8000) return "pcm_8000";
-    if (sr <= 16000) return "pcm_16000";
-    if (sr <= 22050) return "pcm_22050";
-    if (sr <= 24000) return "pcm_24000";
-    return "pcm_44100";
-  }
-  if (sr <= 8000) return "wav_8000";
-  if (sr <= 16000) return "wav_16000";
-  if (sr <= 22050) return "wav_22050";
-  if (sr <= 24000) return "wav_24000";
-  if (sr <= 32000) return "wav_32000";
-  return "wav_44100";
+  const resolved = resolveElevenLabsTtsModelId(ttsModelId ?? null);
+  return elevenLabsTtsOutputFormatForTelephony(resolved, sr, {
+    streaming: streaming === true,
+  });
 }
 
 export async function askRoutes(app: FastifyInstance) {

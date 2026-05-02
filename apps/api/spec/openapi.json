@@ -156,6 +156,9 @@
           "ivr_speech_input_enabled": { "type": "boolean", "default": true },
           "ivr_fallback_to_agent": { "type": "boolean", "default": true },
 
+          "filler_ack_enabled": { "type": "boolean", "default": false, "description": "When true, filler-only STT transcripts (umm, hmm, …) increment a consecutive counter and may trigger a short TTS acknowledgment instead of RAG. Disabled when env VOICEBOT_FILLER_ACK_ENABLED=false." },
+          "filler_ack_threshold": { "type": "integer", "default": 2, "minimum": 1, "maximum": 10, "description": "Consecutive filler-only utterances before playing an acknowledgment. Admin-only on tenant PATCH; tenants may toggle filler_ack_enabled only." },
+
           "max_call_duration_seconds": { "type": "integer", "nullable": true, "description": "Admin-only. null = no cap." },
           "max_concurrent_calls": { "type": "integer", "default": 10, "description": "Admin-only." },
           "call_transcript_enabled": { "type": "boolean", "default": true },
@@ -185,7 +188,7 @@
       },
       "CustomerSettingsPatch": {
         "type": "object",
-        "description": "Partial update. Every field is OPTIONAL. On the tenant endpoint, admin-only fields (`voicebot_enabled`, `stt_model`, `tts_model`, `tts_default_sample_rate`, `tts_output_codec`, `llm_model_override`, `openai_model`, `vad_*`, `max_utterance_*`, `echo_cancel_level`, `barge_in_min_speech_ms`, `barge_in_energy_threshold`, `language_switch_timeout_ms`, `language_switch_max_attempts`, `max_call_duration_seconds`, `max_concurrent_calls`, `end_call_silence_timeout_sec`, `outbound_enabled`, `webhook_secret`, `webhook_retry_attempts`) return 403. On the admin endpoint, every field is accepted.",
+        "description": "Partial update. Every field is OPTIONAL. On the tenant endpoint, admin-only fields (`voicebot_enabled`, `stt_model`, `tts_model`, `tts_default_sample_rate`, `tts_output_codec`, `llm_model_override`, `openai_model`, `vad_*`, `max_utterance_*`, `echo_cancel_level`, `barge_in_min_speech_ms`, `barge_in_energy_threshold`, `language_switch_timeout_ms`, `language_switch_max_attempts`, `max_call_duration_seconds`, `max_concurrent_calls`, `end_call_silence_timeout_sec`, `outbound_enabled`, `webhook_secret`, `webhook_retry_attempts`, `filler_ack_threshold`) return 403. On the admin endpoint, every field is accepted.",
         "additionalProperties": false,
         "properties": {
           "voicebot_enabled": { "type": "boolean" },
@@ -244,6 +247,8 @@
           "ivr_max_retries": { "type": "integer", "minimum": 0 },
           "ivr_speech_input_enabled": { "type": "boolean" },
           "ivr_fallback_to_agent": { "type": "boolean" },
+          "filler_ack_enabled": { "type": "boolean" },
+          "filler_ack_threshold": { "type": "integer", "minimum": 1, "maximum": 10 },
           "max_call_duration_seconds": { "type": "integer", "minimum": 1, "nullable": true },
           "max_concurrent_calls": { "type": "integer", "minimum": 1 },
           "call_transcript_enabled": { "type": "boolean" },

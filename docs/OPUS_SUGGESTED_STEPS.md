@@ -334,9 +334,12 @@ if (!session.voiceRagAgentCache && session.agentId) {
 
 **Impact:** Saves 20-50ms per turn after the first.
 
-### 3.3 Filler-Word Fast Path (Already Implemented)
+### 3.3 Filler-Word Fast Path (Updated — Per-Customer + Consecutive Count)
 
-The `isFillerOnlyTranscript` check (line 1799) already skips RAG/LLM for "hmm", "um", etc. This is good — keep it.
+The `isFillerOnlyTranscript` check skips RAG/LLM for "hmm", "um", etc. **Updated behavior:**
+- Filler ack is now controlled **per customer** via `customer_settings.filler_ack_enabled` (default `FALSE`). The global env `VOICEBOT_FILLER_ACK_ENABLED` acts as a kill-switch.
+- The bot does NOT respond on the first filler. It counts consecutive filler-only utterances and responds only when the count reaches `customer_settings.filler_ack_threshold` (default `2`). Any real speech resets the counter.
+- See `docs/VOICEBOT_FILLER_ACK_LOGIC.md` for full details.
 
 ### 3.4 Reduce `rag_top_k` for Voice
 

@@ -41,7 +41,10 @@ import {
   getActiveSessionsForCustomer,
   type VoicebotSession,
 } from "../services/voicebot-session";
-import { pickFillerAckPhrase } from "../services/voice-filler-acks";
+import {
+  pickFillerAckPhrase,
+  isFillerOnlyTranscript,
+} from "../services/voice-filler-acks";
 import {
   decodeBase64Pcm,
   encodeBase64Pcm,
@@ -67,6 +70,7 @@ import {
   elevenLabsSttToSarvamShape,
   elevenLabsTextToSpeech,
   elevenLabsTextToSpeechStream,
+  elevenLabsTextToSpeechStreamIncremental,
   pcmSampleRateFromElevenOutputFormat,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
@@ -783,21 +787,6 @@ function rehintLikelyCorruptedFirstPass(first: string, retry: string): boolean {
   return false;
 }
 
-/**
- * True when the transcript is only light fillers (hmm, um, uh, …) with no other words.
- * Used to skip RAG/LLM so "Hmm." does not trigger embeddings + a generic sales line.
- */
-function isFillerOnlyTranscript(raw: string): boolean {
-  const t = raw
-    .trim()
-    .replace(/[\u201c\u201d\u2018\u2019'"`]/g, "")
-    .replace(/\s+/g, " ");
-  if (t.length === 0) return false;
-  return /^(?:(?:hmm|hmmm|hm|mmm|mm|mhm|um|umm|uhm|uh|ah|oh|er|huh)\s*[.,!?…]*\s*)+$/i.test(
-    t
-  );
-}
-
 const LANG_LABEL: Record<string, string> = {
   "en-IN": "English",
   "hi-IN": "Hindi",
@@ -1288,59 +1277,244 @@ async function speakToExotel(
         modelId,
         outputFormat,
       };
-      let elTts = await (useElevenLabsStream
-        ? elevenLabsTextToSpeechStream
-        : elevenLabsTextToSpeech)({
-        ...ttsBody,
-        voiceSettings: vs,
-      });
 
-      if (elTts.status !== 200 && vs) {
+      const fadeSamples = exotelRate <= 8000 ? 40 : 56;
+      const tailBytes = fadeSamples * 2;
+      const prevTailJoin = session.elevenlabsOutboundTailPcm;
+      const pcmFormatRate = pcmSampleRateFromElevenOutputFormat(outputFormat);
+      const useElIncrementalPipe =
+        useElevenLabsStream && pcmFormatRate === exotelRate;
+
+      /** Buffered TTS (`/stream` aggregates when resampling needed or non‑streaming HTTP). */
+      const execElevenBuffered = () =>
+        (useElevenLabsStream ? elevenLabsTextToSpeechStream : elevenLabsTextToSpeech);
+
+      /** Parse ElevenLabs body → PCM at `pcmFormatRate` (via WAV parse or raw `output_format`). */
+      async function pcmFromBufferedResponse(elTts: {
+        status: number;
+        body: Buffer | unknown;
+        contentType?: string;
+      }): Promise<
+        | { ok: false; status: number; body: unknown }
+        | {
+            ok: true;
+            pcmOut: Buffer;
+            contentType: string | undefined;
+          }
+      > {
+        if (elTts.status !== 200) {
+          return { ok: false, status: elTts.status, body: elTts.body };
+        }
+        let pcmCandidate = elTts.body as Buffer;
+        if (!Buffer.isBuffer(pcmCandidate) || pcmCandidate.length === 0) {
+          return { ok: false, status: 500, body: { error: "empty_elevenlabs_tts_body" } };
+        }
+        voiceTrace(log, "pipeline.tts.response", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          pcm_bytes: pcmCandidate.length,
+          tts_provider: "elevenlabs",
+          content_type: elTts.contentType ?? null,
+        });
+
+        let pcmWork = pcmCandidate;
+        let srcRateLocal: number;
+        const wavParsed = parseWavPcm16Mono(pcmWork);
+        if (wavParsed) {
+          pcmWork = wavParsed.pcm;
+          srcRateLocal = wavParsed.sampleRate;
+        } else {
+          log?.warn(
+            {
+              stream_sid: session.streamSid,
+              output_format: outputFormat,
+              content_type: elTts.contentType ?? null,
+              first_bytes: pcmWork.subarray(0, 16).toString("hex"),
+              body_len: pcmWork.length,
+            },
+            "voicebot: ElevenLabs TTS was not a PCM WAV; treating as raw s16le from output_format"
+          );
+          srcRateLocal = pcmSampleRateFromElevenOutputFormat(outputFormat);
+        }
+        if (srcRateLocal !== exotelRate) {
+          voiceTrace(log, "pipeline.tts.resample", {
+            customerId: session.customerId,
+            stream_sid: session.streamSid,
+            pcm_bytes_before: pcmWork.length,
+            from_sample_rate: srcRateLocal,
+            to_sample_rate: exotelRate,
+          });
+          pcmWork = resamplePcm16(pcmWork, srcRateLocal, exotelRate);
+        }
+
+        let pcmOutJoined = pcmWork;
+        if (
+          prevTailJoin &&
+          prevTailJoin.length === tailBytes &&
+          pcmOutJoined.length >= tailBytes
+        ) {
+          pcmOutJoined = crossfadePcm16MonoUtteranceJoin(
+            prevTailJoin,
+            pcmOutJoined,
+            fadeSamples
+          );
+          voiceTrace(log, "pipeline.tts.elevenlabs_utterance_crossfade", {
+            customerId: session.customerId,
+            stream_sid: session.streamSid,
+            fade_samples: fadeSamples,
+            exotel_sample_rate: exotelRate,
+          });
+        }
+
+        sendAudioToExotel(ws, session, pcmOutJoined, log);
+        session.elevenlabsOutboundTailPcm =
+          pcmOutJoined.length >= tailBytes
+            ? Buffer.from(pcmOutJoined.subarray(pcmOutJoined.length - tailBytes))
+            : pcmOutJoined.length > 0
+              ? Buffer.from(pcmOutJoined)
+              : undefined;
+        schedulePlaybackMarkFallback(session, pcmOutJoined.length, exotelRate, log);
+        logVoiceStage(log, "tts.sent_to_exotel", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          pcm_bytes: pcmOutJoined.length,
+          exotel_sample_rate: exotelRate,
+          tts_provider: "elevenlabs",
+        });
+
+        return { ok: true, pcmOut: pcmOutJoined, contentType: elTts.contentType };
+      }
+
+      async function pcmFromIncrementalStream(params: Parameters<
+        typeof elevenLabsTextToSpeechStreamIncremental
+      >[0]): Promise<
+        | { ok: false; status: number; body: unknown }
+        | { ok: true; totalPcmBytes: number }
+      > {
+        let totalBytes = 0;
+        let firstChunk = true;
+        let firstChunkSent = false;
+        let pcmAcc = Buffer.alloc(0);
+
+        try {
+          for await (const rawPiece of elevenLabsTextToSpeechStreamIncremental(params)) {
+            let pcmPiece = rawPiece;
+            if (
+              firstChunk &&
+              prevTailJoin &&
+              prevTailJoin.length === tailBytes &&
+              pcmPiece.length >= tailBytes
+            ) {
+              pcmPiece = crossfadePcm16MonoUtteranceJoin(
+                prevTailJoin,
+                pcmPiece,
+                fadeSamples
+              );
+              voiceTrace(log, "pipeline.tts.elevenlabs_utterance_crossfade", {
+                customerId: session.customerId,
+                stream_sid: session.streamSid,
+                fade_samples: fadeSamples,
+                exotel_sample_rate: exotelRate,
+                streamed: true,
+              });
+            }
+            firstChunk = false;
+            pcmAcc = Buffer.concat([pcmAcc, pcmPiece]);
+
+            if (!firstChunkSent) {
+              voiceTrace(log, "pipeline.tts.first_chunk", {
+                customerId: session.customerId,
+                stream_sid: session.streamSid,
+                chunk_bytes: pcmPiece.length,
+                tts_provider: "elevenlabs",
+              });
+              firstChunkSent = true;
+            }
+
+            sendAudioToExotel(ws, session, pcmPiece, log, { omitMark: true });
+            totalBytes += pcmPiece.length;
+          }
+          if (totalBytes === 0) {
+            return { ok: false, status: 500, body: { error: "empty_stream" } };
+          }
+
+          session.elevenlabsOutboundTailPcm =
+            pcmAcc.length >= tailBytes
+              ? Buffer.from(pcmAcc.subarray(pcmAcc.length - tailBytes))
+              : Buffer.from(pcmAcc);
+
+          schedulePlaybackMarkFallback(session, totalBytes, exotelRate, log);
+          sendExotelPlaybackMark(ws, session, log);
+          logVoiceStage(log, "tts.sent_to_exotel", {
+            customerId: session.customerId,
+            stream_sid: session.streamSid,
+            pcm_bytes: totalBytes,
+            exotel_sample_rate: exotelRate,
+            tts_provider: "elevenlabs",
+            incremental_stream: true,
+          });
+
+          return { ok: true, totalPcmBytes: totalBytes };
+        } catch (e: unknown) {
+          const er = e as Error & { status?: number; responseBody?: unknown };
+          if (typeof er.status === "number") {
+            return { ok: false, status: er.status, body: er.responseBody ?? String(e) };
+          }
+          throw e;
+        }
+      }
+
+      const runAttempt = async (params: typeof ttsBody & { voiceSettings: typeof vs }) => {
+        if (useElIncrementalPipe) {
+          return pcmFromIncrementalStream(params);
+        }
+        const el = await execElevenBuffered()(params);
+        return pcmFromBufferedResponse(el);
+      };
+
+      let r = await runAttempt({ ...ttsBody, voiceId, voiceSettings: vs });
+      if (!r.ok && vs) {
         voiceTrace(log, "pipeline.tts.retry", {
           customerId: session.customerId,
           stream_sid: session.streamSid,
           reason: "without_voice_settings",
-          prior_status: elTts.status,
+          prior_status: r.status,
           eleven_v3: elevenLabsTtsModelIsV3(modelId),
         });
-        elTts = await (useElevenLabsStream
-          ? elevenLabsTextToSpeechStream
-          : elevenLabsTextToSpeech)({ ...ttsBody, voiceSettings: null });
+        r = await runAttempt({ ...ttsBody, voiceId, voiceSettings: null });
       }
 
       if (
-        elTts.status !== 200 &&
-        elevenLabsTtsIsLibraryOrPaymentError(elTts.status, elTts.body) &&
+        !r.ok &&
+        elevenLabsTtsIsLibraryOrPaymentError(r.status, r.body) &&
         voiceId !== ELEVENLABS_PREMADE_API_SAFE_VOICE_ID
       ) {
         voiceTrace(log, "pipeline.tts.retry", {
           customerId: session.customerId,
           stream_sid: session.streamSid,
           reason: "premade_voice_free_tier",
-          prior_status: elTts.status,
+          prior_status: r.status,
           prior_voice_id: voiceId,
           fallback_voice_id: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
         });
-        elTts = await (useElevenLabsStream
-          ? elevenLabsTextToSpeechStream
-          : elevenLabsTextToSpeech)({
+        r = await runAttempt({
           ...ttsBody,
           voiceId: ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
           voiceSettings: null,
         });
       }
 
-      if (elTts.status !== 200) {
+      if (!r.ok) {
         session.ttsInProgress = false;
         log?.error(
-          { status: elTts.status, body: safeJsonForLog(elTts.body) },
+          { status: r.status, body: safeJsonForLog(r.body) },
           "voicebot ElevenLabs TTS failed"
         );
         voiceTrace(log, "pipeline.tts.error", {
           customerId: session.customerId,
           stream_sid: session.streamSid,
-          status: elTts.status,
-          body: safeJsonForLog(elTts.body),
+          status: r.status,
+          body: safeJsonForLog(r.body),
           tts_provider: "elevenlabs",
         });
         logVoiceStage(
@@ -1349,90 +1523,14 @@ async function speakToExotel(
           {
             customerId: session.customerId,
             stream_sid: session.streamSid,
-            status: elTts.status,
+            status: r.status,
           },
           "voicebot ElevenLabs TTS failed"
         );
         return false;
       }
 
-      let pcmOut = elTts.body as Buffer;
-      if (!Buffer.isBuffer(pcmOut) || pcmOut.length === 0) {
-        session.ttsInProgress = false;
-        log?.error("voicebot ElevenLabs TTS returned empty body");
-        return false;
-      }
-
-      voiceTrace(log, "pipeline.tts.response", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        pcm_bytes: pcmOut.length,
-        tts_provider: "elevenlabs",
-        content_type: elTts.contentType ?? null,
-      });
-
-      const parsedEl = parseWavPcm16Mono(pcmOut);
-      let srcRate: number;
-      if (parsedEl) {
-        pcmOut = parsedEl.pcm;
-        srcRate = parsedEl.sampleRate;
-      } else {
-        log?.warn(
-          {
-            stream_sid: session.streamSid,
-            output_format: outputFormat,
-            content_type: elTts.contentType ?? null,
-            first_bytes: pcmOut.subarray(0, 16).toString("hex"),
-            body_len: pcmOut.length,
-          },
-          "voicebot: ElevenLabs TTS was not a PCM WAV; treating as raw s16le from output_format"
-        );
-        srcRate = pcmSampleRateFromElevenOutputFormat(outputFormat);
-      }
-      if (srcRate !== exotelRate) {
-        voiceTrace(log, "pipeline.tts.resample", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          pcm_bytes_before: pcmOut.length,
-          from_sample_rate: srcRate,
-          to_sample_rate: exotelRate,
-        });
-        pcmOut = resamplePcm16(pcmOut, srcRate, exotelRate);
-      }
-
-      const fadeSamples = exotelRate <= 8000 ? 40 : 56;
-      const tailBytes = fadeSamples * 2;
-      const prevTail = session.elevenlabsOutboundTailPcm;
-      if (
-        prevTail &&
-        prevTail.length === tailBytes &&
-        pcmOut.length >= tailBytes
-      ) {
-        pcmOut = crossfadePcm16MonoUtteranceJoin(prevTail, pcmOut, fadeSamples);
-        voiceTrace(log, "pipeline.tts.elevenlabs_utterance_crossfade", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          fade_samples: fadeSamples,
-          exotel_sample_rate: exotelRate,
-        });
-      }
-
-      sendAudioToExotel(ws, session, pcmOut, log);
-      session.elevenlabsOutboundTailPcm =
-        pcmOut.length >= tailBytes
-          ? Buffer.from(pcmOut.subarray(pcmOut.length - tailBytes))
-          : pcmOut.length > 0
-            ? Buffer.from(pcmOut)
-            : undefined;
       session.ttsInProgress = false;
-      schedulePlaybackMarkFallback(session, pcmOut.length, exotelRate, log);
-      logVoiceStage(log, "tts.sent_to_exotel", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        pcm_bytes: pcmOut.length,
-        exotel_sample_rate: exotelRate,
-        tts_provider: "elevenlabs",
-      });
       return true;
     }
 
@@ -1784,24 +1882,19 @@ function findNextSpeakCut(s: string): number {
   return -1;
 }
 
-/** Longer streaming chunks for ElevenLabs — fewer TTS round-trips, smoother joins (first chunk may start slightly later when no `.!?`). */
+/** Longer streaming chunks for ElevenLabs — fewer TTS round-trips (split on sentence end only, wider force-cut). */
 function findNextSpeakCutElevenLabs(s: string): number {
   if (s.length === 0) return -1;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
-    if (ch && ".!?\n।".includes(ch)) {
+    if (ch && ".!?।".includes(ch)) {
       if (i === s.length - 1 || /\s/.test(s[i + 1]!)) return i;
     }
   }
-  if (s.length >= 100) {
-    for (let i = 0; i < s.length; i++) {
-      if (s[i] === "," && (i === s.length - 1 || /\s/.test(s[i + 1]!))) return i;
-    }
-  }
-  const minLen = 140;
+  const minLen = 220;
   if (s.length >= minLen) {
     const sp = s.lastIndexOf(" ", minLen);
-    if (sp > 40) return sp - 1;
+    if (sp > 72) return sp - 1;
     return minLen - 1;
   }
   return -1;
@@ -1897,7 +1990,47 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
     return;
   }
 
-  if (env.voicebot.fillerAckEnabled && isFillerOnlyTranscript(transcript)) {
+  // ------------------------------------------------------------------
+  // Filler-only utterance handling (hmm, um, uh, …)
+  // Controlled by customer_settings.filler_ack_enabled (per-tenant).
+  // The bot does NOT react on the first filler; it waits. Only after
+  // `filler_ack_threshold` consecutive fillers it responds with an ack
+  // phrase and resets the counter. Any real (non-filler) speech also
+  // resets the counter.
+  // ------------------------------------------------------------------
+  const fillerFeatureEnabled =
+    env.voicebot.fillerAckEnabled &&
+    csTurn?.filler_ack_enabled === true;
+
+  if (fillerFeatureEnabled && isFillerOnlyTranscript(transcript)) {
+    const count = (session.fillerConsecutiveCount ?? 0) + 1;
+    const threshold = csTurn?.filler_ack_threshold ?? 2;
+
+    voiceTrace(log, "pipeline.stt.filler_detected", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      call_sid: session.callSid,
+      exotel_call_session_id: session.callSessionDbId,
+      transcript_preview: transcript.slice(0, 120),
+      consecutive_count: count,
+      threshold,
+    });
+
+    if (count < threshold) {
+      // Below threshold — stay silent, wait for the customer to speak
+      session.fillerConsecutiveCount = count;
+      logVoiceStage(log, "stt.filler_wait", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        consecutive_count: count,
+        threshold,
+      });
+      return;
+    }
+
+    // Threshold reached — acknowledge and reset
+    session.fillerConsecutiveCount = 0;
+
     const ack = pickFillerAckPhrase(multilingual ? pipelineBcp : "en-IN", {
       englishOverride: env.voicebot.fillerAckText,
     });
@@ -1908,6 +2041,8 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
       exotel_call_session_id: session.callSessionDbId,
       transcript_preview: transcript.slice(0, 120),
       ack_preview: ack.slice(0, 200),
+      consecutive_count: count,
+      threshold,
     });
     logVoiceStage(log, "stt.filler_skip_rag", {
       customerId: session.customerId,
@@ -1943,6 +2078,11 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
       timing_final_tts_ms: 0,
     });
     return;
+  }
+
+  // Real speech detected — reset consecutive filler counter
+  if (session.fillerConsecutiveCount) {
+    session.fillerConsecutiveCount = 0;
   }
 
   voiceTrace(log, "pipeline.rag.start", {

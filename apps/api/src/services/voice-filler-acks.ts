@@ -64,6 +64,17 @@ export const FILLER_ACK_PHRASES: Record<string, readonly string[]> = {
   ],
 };
 
+export function isFillerOnlyTranscript(raw: string): boolean {
+  const t = raw
+    .trim()
+    .replace(/[\u201c\u201d\u2018\u2019'"`]/g, "")
+    .replace(/\s+/g, " ");
+  if (t.length === 0) return false;
+  return /^(?:(?:hmm|hmmm|hm|mmm|mm|mhm|um|umm|uhm|uh|ah|oh|er|huh)\s*[.,!?…]*\s*)+$/i.test(
+    t
+  );
+}
+
 function normalizeLangKey(tag: string): keyof typeof FILLER_ACK_PHRASES {
   const t = tag.trim().replace(/_/g, "-").toLowerCase();
   if (!t) return "en-IN";

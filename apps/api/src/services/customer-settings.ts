@@ -93,6 +93,10 @@ export interface CustomerSettings {
   ivr_speech_input_enabled: boolean;
   ivr_fallback_to_agent: boolean;
 
+  // I-bis. Filler acknowledgment
+  filler_ack_enabled: boolean;
+  filler_ack_threshold: number;
+
   // J. Call lifecycle
   max_call_duration_seconds: number | null;
   max_concurrent_calls: number;
@@ -156,6 +160,7 @@ export const ADMIN_ONLY_FIELDS = new Set<keyof CustomerSettingsPatch>([
   "outbound_enabled",
   "webhook_secret",
   "webhook_retry_attempts",
+  "filler_ack_threshold",
 ]);
 
 /**
@@ -226,6 +231,9 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   "ivr_welcome_menu_id",
   "ivr_input_timeout_ms",
   "ivr_max_retries",
+  // I-bis — Filler ack
+  "filler_ack_enabled",
+  "filler_ack_threshold",
   "ivr_speech_input_enabled",
   "ivr_fallback_to_agent",
   // J
@@ -342,6 +350,26 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
   for (const f of numericFields) {
     out[f] = toNumberOrNull(row[f]);
   }
+
+  const fa = row["filler_ack_enabled"];
+  out["filler_ack_enabled"] =
+    fa === true ||
+    fa === "t" ||
+    fa === "true" ||
+    fa === 1 ||
+    fa === "1";
+
+  const th = row["filler_ack_threshold"];
+  const tn =
+    typeof th === "number" && Number.isFinite(th)
+      ? th
+      : typeof th === "string" && th.trim() !== ""
+        ? Number(th)
+        : NaN;
+  out["filler_ack_threshold"] = Number.isFinite(tn)
+    ? Math.min(10, Math.max(1, Math.round(tn)))
+    : 2;
+
   return out as unknown as CustomerSettings;
 }
 

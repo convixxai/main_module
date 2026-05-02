@@ -192,15 +192,62 @@ export type ElevenLabsTtsParams = {
   voiceSettings?: ElevenLabsVoiceSettingsPayload | null;
 };
 
-const ELEVENLABS_DEFAULT_HUMAN_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
-  /** Higher than legacy 0.35 — smoother prosody across clauses, fewer audible “resets” on telephony. */
-  stability: 0.48,
-  similarity_boost: 0.88,
-  /** Lower than legacy 0.2 — less theatrical drift on short sentences. */
-  style: 0.12,
+/** Defaults when synthesizing with `eleven_v3`. */
+export const ELEVENLABS_V3_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
+  stability: 0.55,
+  similarity_boost: 0.85,
+  style: 0.15,
   use_speaker_boost: true,
   speed: 1.0,
 };
+
+/** Defaults for turbo/flash and other non‑v3 models (telephony-oriented). */
+export const ELEVENLABS_TURBO_FLASH_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
+  stability: 0.65,
+  similarity_boost: 0.8,
+  style: 0.05,
+  use_speaker_boost: false,
+  speed: 1.05,
+};
+
+function defaultVoiceSettingsForModel(
+  modelId: string | null | undefined
+): Required<ElevenLabsVoiceSettingsPayload> {
+  if (elevenLabsTtsModelIsV3(modelId)) {
+    return { ...ELEVENLABS_V3_VOICE_SETTINGS };
+  }
+  return { ...ELEVENLABS_TURBO_FLASH_VOICE_SETTINGS };
+}
+
+export function normalizeVoiceSettingsForApi(
+  raw: ElevenLabsVoiceSettingsPayload | null | undefined,
+  modelId?: string | null
+): ElevenLabsVoiceSettingsPayload | null {
+  const o: ElevenLabsVoiceSettingsPayload = { ...defaultVoiceSettingsForModel(modelId) };
+  if (!raw || typeof raw !== "object") return o;
+  const r = raw as Record<string, unknown>;
+  const maxSpeed = elevenLabsTtsModelIsV3(modelId) ? 1.0 : 1.2;
+  const num = (k: string, min: number, max: number) => {
+    const v = r[k];
+    if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
+    return Math.min(max, Math.max(min, v));
+  };
+  const bool = (k: string) => {
+    const v = r[k];
+    return typeof v === "boolean" ? v : undefined;
+  };
+  const stability = num("stability", 0, 1);
+  const similarity_boost = num("similarity_boost", 0, 1);
+  const style = num("style", 0, 1);
+  const speed = num("speed", 0.7, maxSpeed);
+  const use_speaker_boost = bool("use_speaker_boost");
+  if (stability !== undefined) o.stability = stability;
+  if (similarity_boost !== undefined) o.similarity_boost = similarity_boost;
+  if (style !== undefined) o.style = style;
+  if (speed !== undefined) o.speed = speed;
+  if (use_speaker_boost !== undefined) o.use_speaker_boost = use_speaker_boost;
+  return o;
+}
 
 /** Light cleanup before TTS: spacing and newlines; shared by voicebot and HTTP `/ask` paths. */
 export function polishElevenLabsVoicebotText(text: string): string {
@@ -245,9 +292,19 @@ export function prepareTextForElevenLabsTts(text: string, modelId: string): stri
   return normalizeElevenV3AudioTagsInText(capped);
 }
 
-/** Append to RAG system prompts when tenant TTS is ElevenLabs (non–v3 models). */
-export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs TTS delivery ---
-Your reply will be read by ElevenLabs text-to-speech. Do NOT use square-bracket tags like [happy] or [sighs] unless the tenant uses model **eleven_v3** (this rule applies to other ElevenLabs models). For natural speech here, use wording, commas, and periods only.`;
+/** Append to RAG system prompts when tenant TTS is ElevenLabs but `tts_model` is not `eleven_v3`. */
+export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs TTS delivery (phone call) ---
+Your response will be read aloud by text-to-speech on a live phone call.
+
+Rules:
+- Keep answers to 1-3 SHORT sentences. Phone listeners can't absorb long answers.
+- Use commas and periods where a human would naturally pause or breathe.
+- Write like you're talking, not writing. Use contractions (don't, we're, that's).
+- Start responses warmly but briefly ("Sure!", "Of course.", "Great question.").
+- DO NOT use bullet points, numbered lists, markdown, or any formatting.
+- DO NOT use square brackets, parentheses, or special characters like [happy] or [sighs].
+- Prefer simple, everyday words over formal vocabulary.
+- End with a short question to keep the conversation going when appropriate.`;
 
 /** True when the resolved TTS model id is ElevenLabs v3 (expressive / audio-tag oriented). */
 export function elevenLabsTtsModelIsV3(modelId: string | null | undefined): boolean {
@@ -283,26 +340,20 @@ Requirements:
 - Keep content accurate per the KNOWLEDGEBASE and obey all language/locale rules.`;
 
 /**
- * Fragment to append under RAG rules when tenant uses ElevenLabs TTS.
- * When `customer_settings.tts_model` is `eleven_v3`, adds strict per-sentence tag rules (LLM).
- * Otherwise, if the resolved model is `eleven_v3` (agent/customer after {@link resolveElevenLabsTtsModelId}), adds the lighter v3 hint.
+ * Fragment for RAG when tenant uses ElevenLabs TTS.
+ * Only `customer_settings.tts_model` (via `customerTtsModelRaw`) decides v3 strict tags — avoids
+ * {@link resolveElevenLabsTtsModelId}'s env default falsely adding v3 tag rules for turbo/flash.
  */
 export function buildElevenLabsRagAudioTagHintForProvider(
   ttsProvider: string | null | undefined,
-  ttsModelRaw: string | null | undefined,
+  _ttsModelRaw: string | null | undefined,
   opts?: { customerTtsModelRaw?: string | null }
 ): string {
   if (ttsProvider !== "elevenlabs") return "";
-  const customerV3 = elevenLabsTtsModelIsV3(opts?.customerTtsModelRaw);
-  if (customerV3) {
+  if (elevenLabsTtsModelIsV3(opts?.customerTtsModelRaw)) {
     return `\n${ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE}\n`;
   }
-  const resolved = resolveElevenLabsTtsModelId(ttsModelRaw);
-  let s = `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`;
-  if (elevenLabsTtsModelIsV3(resolved)) {
-    s += `\n${ELEVENLABS_V3_AUDIO_DELIVERY_RULE}\n`;
-  }
-  return s;
+  return `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`;
 }
 
 export async function elevenLabsTextToSpeech(
@@ -315,7 +366,7 @@ export async function elevenLabsTextToSpeech(
     text: cleanText,
     model_id: params.modelId,
   };
-  const vs = normalizeVoiceSettingsForApi(params.voiceSettings);
+  const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
   if (vs) bodyObj.voice_settings = vs;
 
   const res = await fetch(
@@ -342,9 +393,9 @@ export async function elevenLabsTextToSpeech(
   return { status: res.status, body: buf, contentType: ct };
 }
 
-export async function elevenLabsTextToSpeechStream(
+async function elevenLabsOpenTtsStreamResponse(
   params: ElevenLabsTtsParams
-): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
+): Promise<Response> {
   const key = requireElevenLabsKey();
   const q = new URLSearchParams({ output_format: params.outputFormat });
   const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
@@ -352,10 +403,10 @@ export async function elevenLabsTextToSpeechStream(
     text: cleanText,
     model_id: params.modelId,
   };
-  const vs = normalizeVoiceSettingsForApi(params.voiceSettings);
+  const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
   if (vs) bodyObj.voice_settings = vs;
 
-  const res = await fetch(
+  return fetch(
     `${ELEVEN_BASE}/v1/text-to-speech/${encodeURIComponent(params.voiceId)}/stream?${q}`,
     {
       method: "POST",
@@ -368,22 +419,68 @@ export async function elevenLabsTextToSpeechStream(
       signal: AbortSignal.timeout(60_000),
     }
   );
+}
 
-  const ct = res.headers.get("content-type") || "";
+/**
+ * Incremental PCM (or WAV) payloads from ElevenLabs `/stream` as they arrive — for telephony piping.
+ */
+export async function* elevenLabsTextToSpeechStreamIncremental(
+  params: ElevenLabsTtsParams
+): AsyncGenerator<Buffer, void, unknown> {
+  const res = await elevenLabsOpenTtsStreamResponse(params);
   if (!res.ok) {
+    const ct = res.headers.get("content-type") || "";
     const errBody = ct.includes("json") ? await readJsonBody(res) : await res.text();
-    return { status: res.status, body: errBody, contentType: ct };
+    const err = new Error(`ElevenLabs TTS stream HTTP ${res.status}`) as Error & {
+      status?: number;
+      responseBody?: unknown;
+    };
+    err.status = res.status;
+    err.responseBody = errBody;
+    throw err;
   }
-
-  const chunks: Buffer[] = [];
-  if (res.body) {
-    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-      if (chunk && chunk.length > 0) chunks.push(Buffer.from(chunk));
+  if (!res.body) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 0) yield buf;
+    return;
+  }
+  const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) yield Buffer.from(value);
     }
-  } else {
-    chunks.push(Buffer.from(await res.arrayBuffer()));
+  } finally {
+    reader.releaseLock();
   }
-  return { status: res.status, body: Buffer.concat(chunks), contentType: ct };
+}
+
+export async function elevenLabsTextToSpeechStream(
+  params: ElevenLabsTtsParams
+): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
+  const chunks: Buffer[] = [];
+  try {
+    for await (const c of elevenLabsTextToSpeechStreamIncremental(params)) {
+      chunks.push(c);
+    }
+    return {
+      status: 200,
+      body: Buffer.concat(chunks),
+      contentType: "audio/basic",
+    };
+  } catch (e: unknown) {
+    const err = e as Error & { status?: number; responseBody?: unknown };
+    if (typeof err.status === "number") {
+      return {
+        status: err.status,
+        body: err.responseBody ?? String(e),
+        contentType:
+          typeof err.responseBody === "object" ? "application/json" : "text/plain",
+      };
+    }
+    throw e;
+  }
 }
 
 /** Prefer WAV for telephony: same PCM payload as `pcm_*` but with a RIFF header (matches Sarvam path). */
@@ -398,9 +495,8 @@ export function elevenLabsWavOutputFormat(sampleRate: number): string {
 }
 
 /**
- * ElevenLabs `output_format` for Exotel-style streams. `eleven_v3` often rejects or mishandles
- * `wav_8000` / low-rate WAV; synthesize at 22.05 kHz linear PCM and let the caller resample to
- * the trunk sample rate (e.g. 8000 Hz).
+ * ElevenLabs `output_format` for Exotel `slin` PCM — match negotiated sample rate where possible so
+ * the voicebot skips heavy resampling. `eleven_v3` at 8 kHz trunk: use `pcm_16000` (16k→8k is milder than 22.05→8).
  *
  * **Streaming** (`/v1/text-to-speech/.../stream`): API returns 400 for `wav_*` — use `pcm_*` only.
  */
@@ -409,11 +505,14 @@ export function elevenLabsTtsOutputFormatForTelephony(
   exotelSampleRate: number,
   opts?: { streaming?: boolean }
 ): string {
-  if (elevenLabsTtsModelIsV3(modelId)) {
-    return "pcm_22050";
-  }
   if (opts?.streaming === true) {
+    if (elevenLabsTtsModelIsV3(modelId) && exotelSampleRate <= 8000) {
+      return "pcm_16000";
+    }
     return elevenLabsPcmOutputFormat(exotelSampleRate);
+  }
+  if (elevenLabsTtsModelIsV3(modelId) && exotelSampleRate <= 8000) {
+    return "pcm_16000";
   }
   return elevenLabsWavOutputFormat(exotelSampleRate);
 }
@@ -473,34 +572,6 @@ export async function elevenLabsListVoices(
   });
   const body = await readJsonBody(res);
   return { status: res.status, body };
-}
-
-function normalizeVoiceSettingsForApi(
-  raw: ElevenLabsVoiceSettingsPayload | null | undefined
-): ElevenLabsVoiceSettingsPayload | null {
-  const o: ElevenLabsVoiceSettingsPayload = { ...ELEVENLABS_DEFAULT_HUMAN_VOICE_SETTINGS };
-  if (!raw || typeof raw !== "object") return o;
-  const r = raw as Record<string, unknown>;
-  const num = (k: string, min: number, max: number) => {
-    const v = r[k];
-    if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
-    return Math.min(max, Math.max(min, v));
-  };
-  const bool = (k: string) => {
-    const v = r[k];
-    return typeof v === "boolean" ? v : undefined;
-  };
-  const stability = num("stability", 0, 1);
-  const similarity_boost = num("similarity_boost", 0, 1);
-  const style = num("style", 0, 1);
-  const speed = num("speed", 0.7, 1.0);
-  const use_speaker_boost = bool("use_speaker_boost");
-  if (stability !== undefined) o.stability = stability;
-  if (similarity_boost !== undefined) o.similarity_boost = similarity_boost;
-  if (style !== undefined) o.style = style;
-  if (speed !== undefined) o.speed = speed;
-  if (use_speaker_boost !== undefined) o.use_speaker_boost = use_speaker_boost;
-  return o;
 }
 
 async function readJsonBody(res: Response): Promise<unknown> {

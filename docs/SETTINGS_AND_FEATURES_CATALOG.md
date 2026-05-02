@@ -129,6 +129,17 @@ into interruption and pick the flavour of UX.
 | `ivr_speech_input_enabled`  | BOOLEAN | TRUE    | tenant-editable | Allow saying the option name. |
 | `ivr_fallback_to_agent`     | BOOLEAN | TRUE    | tenant-editable | After retries, hand off to RAG agent. |
 
+## I-bis. Filler Acknowledgment (see `VOICEBOT_FILLER_ACK_LOGIC.md`)
+
+When fillers (hmm, um, uh, …) are detected by STT, the bot waits for N
+consecutive fillers before responding with a short ack phrase. This avoids
+the jarring experience of the bot speaking after a single "hmm".
+
+| Key                          | Type    | Default | Scope           | Notes |
+|------------------------------|---------|---------|-----------------|-------|
+| `filler_ack_enabled`         | BOOLEAN | FALSE   | tenant-editable | Per-customer toggle. The global env `VOICEBOT_FILLER_ACK_ENABLED` acts as a kill-switch on top. |
+| `filler_ack_threshold`       | INT     | 2       | admin-only      | Consecutive filler-only utterances before the bot responds. Range 1–10. Default 2 means the bot ignores the first filler and responds on the second. |
+
 ## J. Call lifecycle
 
 | Key                             | Type    | Default | Scope           | Notes |
