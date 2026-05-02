@@ -97,6 +97,9 @@ export interface CustomerSettings {
   filler_ack_enabled: boolean;
   filler_ack_threshold: number;
 
+  stt_domain_words: Record<string, string>;
+  industry_context: Record<string, any>;
+
   // J. Call lifecycle
   max_call_duration_seconds: number | null;
   max_concurrent_calls: number;
@@ -236,6 +239,8 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   "filler_ack_threshold",
   "ivr_speech_input_enabled",
   "ivr_fallback_to_agent",
+  "stt_domain_words",
+  "industry_context",
   // J
   "max_call_duration_seconds",
   "max_concurrent_calls",
@@ -265,6 +270,8 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
 const JSONB_FIELDS = new Set<keyof CustomerSettingsPatch>([
   "business_hours",
   "holiday_calendar",
+  "stt_domain_words",
+  "industry_context",
 ]);
 
 // ---------- Cache ----------

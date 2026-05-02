@@ -359,3 +359,51 @@ export async function prepareQuestionForKbEmbedding(
 
 /** Same as `DEFAULT_ELEVENLABS_TTS_VOICE_ID` in config — default ElevenLabs voice when `tts_provider` is elevenlabs. */
 export { DEFAULT_ELEVENLABS_TTS_VOICE_ID } from "../config/env";
+
+/** Corrects a transcript using GPT-4o with multimodal audio input (safety net). */
+export async function correctUtteranceWithOpenAI(
+  audioBuffer: Buffer,
+  sttTranscript: string,
+  allowedLanguages: string[]
+): Promise<string | null> {
+  try {
+    const base64Audio = audioBuffer.toString("base64");
+    const allowedText = allowedLanguages.length > 0
+      ? allowedLanguages.join(", ")
+      : "English, Hindi, Marathi";
+
+    const res = await openaiClient.chat.completions.create({
+      model: env.openai.model || "gpt-4o",
+      messages: [
+        {
+          role: "system",
+          content: `You are an expert audio correction assistant.
+          The Speech-to-Text system transcribed the audio as: "${sttTranscript}".
+          However, the user is repeating themselves and it's likely the transcription was incorrect.
+          Listen to the actual audio provided and correct the transcript.
+          Focus on proper nouns (such as 'Chhavani').
+          Only return the corrected transcript text directly. Do not add any conversational filler.
+          Allowed languages to transcribe are strictly: ${allowedText}.`
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_audio",
+              input_audio: {
+                data: base64Audio,
+                format: "wav"
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    const outputText = res.choices[0]?.message?.content?.trim();
+    return outputText || null;
+  } catch (err) {
+    return null;
+  }
+}
+

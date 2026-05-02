@@ -91,6 +91,7 @@ import {
 } from "../services/voicebot-trace";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { createRagTrace } from "../services/rag-trace";
+import { correctUtteranceWithOpenAI } from "../services/llm";
 import {
   fireTenantWebhook,
   postSlackIncomingWebhook,
@@ -300,6 +301,13 @@ async function applyCustomerVoiceSettingsToSession(
   const ltp = cs?.llm_top_p != null ? Number(cs.llm_top_p) : null;
   session.llmTopPVoice =
     ltp != null && Number.isFinite(ltp) ? ltp : null;
+
+  session.sttDomainWords = (cs?.stt_domain_words && typeof cs.stt_domain_words === "object")
+    ? cs.stt_domain_words as Record<string, string>
+    : {};
+  session.industryContext = (cs?.industry_context && typeof cs.industry_context === "object")
+    ? cs.industry_context as Record<string, any>
+    : {};
 }
 
 function vadSilenceTimeoutMs(session: VoicebotSession): number {
@@ -2278,7 +2286,7 @@ async function processUtterance(
       ? "en-IN"
       : sttProvider === "sarvam"
         ? sarvamMultilingualOpenDetect
-          ? undefined
+          ? normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
           : normalizeBcp47Tag(
               session.currentLanguageCode ||
                 session.defaultLanguageCode ||
@@ -2327,7 +2335,10 @@ async function processUtterance(
           "en-IN";
         const elMultilingualOpenDetect = priorUserQueryCount < 2;
         elLang = elMultilingualOpenDetect
-          ? undefined
+          ? bcp47ToElevenLabsLanguage(hintBcp47, {
+              multilingual: true,
+              forceEnglish: false,
+            }) ?? "en"
           : bcp47ToElevenLabsLanguage(hintBcp47, {
               multilingual: true,
               forceEnglish: false,
@@ -2454,6 +2465,39 @@ async function processUtterance(
       const lp = sttBody.language_probability;
       languageProbability = typeof lp === "number" && Number.isFinite(lp) ? lp : null;
     }
+
+    if (session.sttDomainWords && Object.keys(session.sttDomainWords).length > 0) {
+      for (const [misrecognised, correctWord] of Object.entries(session.sttDomainWords)) {
+        if (!misrecognised) continue;
+        const escaped = misrecognised.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`\\b${escaped}\\b`, "gi");
+        transcript = transcript.replace(re, correctWord);
+      }
+    }
+
+    if (session.lastUserQuery && transcript) {
+      const last = session.lastUserQuery.trim().toLowerCase();
+      const current = transcript.trim().toLowerCase();
+      const isRepetitive = last.includes(current) || current.includes(last);
+      if (isRepetitive) {
+        session.consecutiveRepeatCount = (session.consecutiveRepeatCount || 0) + 1;
+      } else {
+        session.consecutiveRepeatCount = 0;
+      }
+
+      if (session.consecutiveRepeatCount >= 2 && csUtterance?.rag_use_openai_only === true) {
+        const corrected = await correctUtteranceWithOpenAI(
+          wavBuffer,
+          transcript,
+          session.allowedLanguageCodes || []
+        );
+        if (corrected) {
+          transcript = corrected;
+        }
+      }
+    }
+    session.lastUserQuery = transcript;
+
 
     if (session.pendingLanguageSwitch) {
       const pending = session.pendingLanguageSwitch;
@@ -2596,99 +2640,7 @@ async function processUtterance(
 
     session.customerQueryCount = nextQueryIndex;
 
-    let effectiveLanguage = normalizeBcp47Tag(
-      session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
-    );
-
-    // Sarvam auto-detect can label audio as a language outside the tenant allowlist (e.g. gu-IN for
-    // English). Policy clamps to en-IN/mr-IN/hi-IN but the transcript can stay in the wrong script;
-    // the LLM may mirror that. Re-transcribe once with an explicit language hint (costly ~1s+).
-    // `VOICEBOT_STT_REHINT=auto` (default): skip when first transcript is mostly Latin (English fast path)
-    // or mostly non-Latin (Telugu/Malayalam/etc. — rehint with en-IN often yields garbage like "Result").
-    // `always` / `never` override. See `env.voicebot.sttRehint`.
-    {
-      const rehintMode = env.voicebot.sttRehint;
-      const outOfList =
-        multilingual &&
-        sttProvider === "sarvam" &&
-        !isLanguageInAllowedList(detectedRaw, allowedNorm);
-      const nonLatinScriptHeavy = transcriptIsPrimarilyNonLatinScript(transcript, 0.22);
-      const shouldRehint =
-        outOfList &&
-        (rehintMode === "never"
-          ? false
-          : rehintMode === "always"
-            ? true
-            : !transcriptLooksLatinHeavyForRehintSkip(transcript, 0.5) &&
-              !nonLatinScriptHeavy);
-
-      if (outOfList && !shouldRehint && rehintMode === "auto") {
-        voiceTrace(log, "pipeline.stt.rehint_skipped", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          call_sid: session.callSid,
-          exotel_call_session_id: session.callSessionDbId,
-          stt_detected: detectedRaw,
-          reason: nonLatinScriptHeavy
-            ? "non_latin_transcript"
-            : "latin_transcript_fast_path",
-        });
-      }
-      if (shouldRehint) {
-        const sttModel = csUtterance?.stt_model?.trim() || "saaras:v3";
-        const firstDetected = detectedRaw;
-        const firstPassTranscript = transcript;
-        const languageHintForRetry = effectiveLanguage;
-        try {
-          const sttRetry = await sarvamSpeechToText({
-            fileBuffer: wavBuffer,
-            filename: "utterance.wav",
-            mimeType: "audio/wav",
-            model: sttModel,
-            mode: "transcribe",
-            language_code: languageHintForRetry,
-          });
-          if (sttRetry.status === 200) {
-            const b = sttRetry.body as { transcript?: string; language_code?: string };
-            const t2 = b.transcript?.trim() || "";
-            if (t2) {
-              if (rehintLikelyCorruptedFirstPass(firstPassTranscript, t2)) {
-                voiceTrace(log, "pipeline.stt.rehint_reverted", {
-                  customerId: session.customerId,
-                  stream_sid: session.streamSid,
-                  call_sid: session.callSid,
-                  exotel_call_session_id: session.callSessionDbId,
-                  stt_detected_before: firstDetected,
-                  language_code_hint: languageHintForRetry,
-                  first_pass_preview: firstPassTranscript.slice(0, 200),
-                  retry_preview: t2.slice(0, 200),
-                });
-              } else {
-                transcript = t2;
-                detectedRaw = b.language_code?.trim() || languageHintForRetry;
-                voiceTrace(log, "pipeline.stt.rehint", {
-                  customerId: session.customerId,
-                  stream_sid: session.streamSid,
-                  call_sid: session.callSid,
-                  exotel_call_session_id: session.callSessionDbId,
-                  stt_detected_before: firstDetected,
-                  language_code_hint: languageHintForRetry,
-                  stt_detected_after: detectedRaw,
-                  transcript_preview: transcript.slice(0, 200),
-                });
-              }
-            }
-          }
-        } catch (err) {
-          log?.warn(
-            { err, stream_sid: session.streamSid },
-            "voicebot STT rehint failed; using first pass"
-          );
-        }
-      }
-    }
-
-    effectiveLanguage = multilingual
+    let effectiveLanguage = multilingual
       ? normalizeBcp47Tag(session.currentLanguageCode || session.defaultLanguageCode || "en-IN")
       : normalizeBcp47Tag("en-IN");
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
@@ -3067,11 +3019,25 @@ async function runVoicebotAskPipeline(
       session.ttsModel ?? csRag?.tts_model ?? null,
       { customerTtsModelRaw: csRag?.tts_model ?? null }
     );
+
+    let industryContextPrompt = "";
+    if (session.industryContext && Object.keys(session.industryContext).length > 0) {
+      industryContextPrompt = "\n--- INDUSTRY CONTEXT & TONE GUIDELINES ---\n";
+      for (const [key, val] of Object.entries(session.industryContext)) {
+        if (typeof val === "string") {
+          industryContextPrompt += `- ${key}: ${val}\n`;
+        } else {
+          industryContextPrompt += `- ${key}: ${JSON.stringify(val)}\n`;
+        }
+      }
+      industryContextPrompt += "--- END INDUSTRY CONTEXT ---\n";
+    }
+
     const ragRules = `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}`;
+- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}${industryContextPrompt}`;
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {

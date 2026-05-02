@@ -172,6 +172,11 @@ export interface VoicebotSession {
    * `filler_ack_threshold`, the bot responds with an ack and resets to 0.
    */
   fillerConsecutiveCount?: number;
+  sttDomainWords?: Record<string, string>;
+  industryContext?: Record<string, any>;
+  lastUserQuery?: string | null;
+  lastBotResponse?: string | null;
+  consecutiveRepeatCount?: number;
 }
 
 /**
@@ -216,6 +221,11 @@ export function createSession(params: {
     startedAt: Date.now(),
     customParameters: params.customParameters || {},
     isClosing: false,
+    sttDomainWords: {},
+    industryContext: {},
+    lastUserQuery: null,
+    lastBotResponse: null,
+    consecutiveRepeatCount: 0,
   };
 
   activeSessions.set(params.streamSid, session);

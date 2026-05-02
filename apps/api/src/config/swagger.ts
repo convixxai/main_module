@@ -78,6 +78,32 @@ export const swaggerOption = {
             fallback_reason: { type: "string", nullable: true },
           },
         },
+        IndustryContext: {
+          type: "object",
+          properties: {
+            industry_context: {
+              type: "object",
+              additionalProperties: true,
+              description: "Custom sentiment guidelines and industry/brand facts"
+            },
+          },
+        },
+        SarvamSettingsResponse: {
+          type: "object",
+          properties: {
+            stt_provider: { type: "string" },
+            stt_model: { type: "string" },
+            tts_provider: { type: "string" },
+            tts_model: { type: "string" },
+          },
+        },
+        BulkKBUploadResponse: {
+          type: "object",
+          properties: {
+            message: { type: "string" },
+            customer_id: { type: "string", format: "uuid" },
+          },
+        },
       },
     },
   },

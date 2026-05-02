@@ -120,6 +120,8 @@ const settingsPatchSchema = z
     email_notify_call_end: z.boolean(),
     email_recipients: z.array(z.string().email()),
     slack_webhook_url: z.string().url().nullable(),
+    stt_domain_words: z.record(z.string(), z.string()).optional(),
+    industry_context: z.record(z.string(), z.any()).optional(),
   })
   .partial();
 
@@ -193,6 +195,60 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // ---- Legacy: keep GET/PATCH /settings/rag working (now backed by customer_settings) ----
+
+  app.get(
+    "/settings/sarvam",
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      const customerId = request.customerId!;
+      const settings = await getCustomerSettings(customerId);
+      if (!settings) {
+        return reply.status(404).send({ error: "Customer not found" });
+      }
+      return {
+        stt_provider: settings.stt_provider,
+        stt_model: settings.stt_model,
+        tts_provider: settings.tts_provider,
+        tts_model: settings.tts_model,
+      };
+    }
+  );
+
+  app.get(
+    "/settings/industry-context",
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      const customerId = request.customerId!;
+      const settings = await getCustomerSettings(customerId);
+      if (!settings) {
+        return reply.status(404).send({ error: "Customer not found" });
+      }
+      return {
+        industry_context: settings.industry_context,
+      };
+    }
+  );
+
+  app.patch(
+    "/settings/industry-context",
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      const body = z.object({ industry_context: z.record(z.string(), z.any()) }).safeParse(request.body ?? {});
+      if (!body.success) {
+        return reply.status(400).send({ error: body.error.flatten() });
+      }
+      const customerId = request.customerId!;
+      const result = await updateCustomerSettings(
+        customerId,
+        { industry_context: body.data.industry_context },
+        { enforceTenantScope: true }
+      );
+      if (!result.settings) {
+        return reply.status(404).send({ error: "Customer not found" });
+      }
+      return { industry_context: result.settings.industry_context };
+    }
+  );
 
   app.get(
     "/settings/rag",

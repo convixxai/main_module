@@ -183,4 +183,105 @@ export async function kbRoutes(app: FastifyInstance) {
       return { message: "KB entry deleted", id };
     }
   );
+
+  // GET /kb/sample — Sample JSON to download
+  app.get(
+    "/kb/sample",
+    { preHandler: apiKeyAuth },
+    async (request, reply) => {
+      const sampleData = [
+        {
+          question: "What are the check-in and check-out timings at Chhavani Resort?",
+          answer: "Our standard check-in time is 2:00 PM and check-out time is 11:00 AM."
+        },
+        {
+          question: "Do you have dynamic industry context/tone support?",
+          answer: "Yes! You can define custom sentiment guidelines and tonality per-tenant."
+        }
+      ];
+      return reply
+        .header("Content-Disposition", 'attachment; filename="kb_sample.json"')
+        .header("Content-Type", "application/json")
+        .send(JSON.stringify(sampleData, null, 2));
+    }
+  );
+
+  // POST /kb/upload-file — Accepts a JSON file upload containing an array of Q&A pairs
+  app.post(
+    "/kb/upload-file",
+    { preHandler: apiKeyAuth },
+    async (request: any, reply) => {
+      const customerId = request.customerId!;
+      let rawData = "";
+
+      if (request.isMultipart?.()) {
+        const fileData = await request.file();
+        if (!fileData) {
+          return reply.status(400).send({ error: "No file uploaded" });
+        }
+        const buffer = await fileData.toBuffer();
+        rawData = buffer.toString("utf-8");
+      } else {
+        // Fallback to text/plain or raw JSON body
+        if (typeof request.body === "string") {
+          rawData = request.body;
+        } else if (typeof request.body === "object" && request.body !== null) {
+          rawData = JSON.stringify(request.body);
+        }
+      }
+
+      let entries: any[] = [];
+      try {
+        const parsed = JSON.parse(rawData);
+        if (Array.isArray(parsed)) {
+          entries = parsed;
+        } else if (parsed && Array.isArray(parsed.entries)) {
+          entries = parsed.entries;
+        } else {
+          return reply.status(400).send({ error: "Invalid file format. Must be a JSON array of entries or an object containing an 'entries' array." });
+        }
+      } catch (e) {
+        return reply.status(400).send({ error: "Invalid JSON in file. Please provide valid JSON content." });
+      }
+
+      if (entries.length === 0) {
+        return reply.status(400).send({ error: "No entries found in file" });
+      }
+
+      const embeddings = await Promise.all(
+        entries.map(async (e: any) => {
+          if (!e.question || !e.answer) {
+            throw new Error("Each entry must contain both a 'question' and 'answer' field");
+          }
+          return generateEmbedding(e.question);
+        })
+      );
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        for (let i = 0; i < entries.length; i++) {
+          const embeddingStr = `[${embeddings[i].join(",")}]`;
+          await client.query(
+            `INSERT INTO kb_entries (customer_id, question, answer, embedding)
+             VALUES ($1, $2, $3, $4)`,
+            [customerId, entries[i].question, entries[i].answer, embeddingStr]
+          );
+        }
+
+        await client.query("COMMIT");
+      } catch (err: any) {
+        await client.query("ROLLBACK");
+        return reply.status(500).send({ error: err.message || "Failed to save entries to the database" });
+      } finally {
+        client.release();
+      }
+
+      return reply.status(201).send({
+        message: `${entries.length} Q&A entries uploaded from file successfully`,
+        customer_id: customerId,
+      });
+    }
+  );
 }
