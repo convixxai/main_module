@@ -2282,8 +2282,13 @@ async function processUtterance(
       !env.voicebot.sarvamSttFullAuto &&
       priorUserQueryCount < 2;
 
-    const sttLanguageHint = !multilingual
-      ? "en-IN"
+    const allowedNorm = normalizeAllowedLangList(
+      session.allowedLanguageCodes,
+      session.defaultLanguageCode || "en-IN"
+    );
+
+    let sttLanguageHint = !multilingual
+      ? normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
       : sttProvider === "sarvam"
         ? sarvamMultilingualOpenDetect
           ? normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
@@ -2293,6 +2298,12 @@ async function processUtterance(
                 "en-IN"
             )
         : session.defaultLanguageCode?.trim() || "en-IN";
+
+    sttLanguageHint = clampLanguageToAllowed(
+      sttLanguageHint,
+      allowedNorm,
+      session.defaultLanguageCode || "en-IN"
+    );
 
     if (sttProvider === "sarvam") {
       voiceTrace(log, "pipeline.stt.sarvam_language_hint", {
@@ -2582,13 +2593,33 @@ async function processUtterance(
     }
 
     if (!multilingual) {
-      session.currentLanguageCode = normalizeBcp47Tag("en-IN");
+      session.currentLanguageCode = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
     }
 
     if (!session.currentLanguageCode?.trim()) {
       session.currentLanguageCode = normalizeBcp47Tag(
         session.defaultLanguageCode || "en-IN"
       );
+    }
+
+    const isAllowed = isLanguageInAllowedList(detectedRaw, allowedNorm) || transcriptLooksLatinHeavyForRehintSkip(transcript, 0.5);
+    if (!isAllowed) {
+      voiceTrace(log, "pipeline.stt.disallowed_language_detected", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        detected_raw: detectedRaw,
+        allowed_languages: allowedNorm,
+      });
+
+      const fallbackLang = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
+      const listHuman = humanizeAllowedList(allowedNorm);
+      const msg = `Sorry, I only understand ${listHuman}. Please speak in one of these languages.`;
+
+      await appendVoiceTurnToChat(session, transcript, msg, {
+        assistantSource: "disallowed_language_abort",
+      });
+      await speakToExotel(ws, session, msg, fallbackLang, log);
+      return;
     }
 
     const nextQueryIndex = (session.customerQueryCount ?? 0) + 1;
@@ -3011,8 +3042,9 @@ async function runVoicebotAskPipeline(
         languageRule += `\n- This user turn is handled as **${turn}** (${label}) after tenant language policy; prefer that language for your reply when it matches the user's intent and KB.\n`;
       }
     } else {
-      languageRule =
-        "\n- ALWAYS respond in English regardless of the question language.";
+      const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
+      const label = LANG_LABEL[def] ?? def;
+      languageRule = `\n- ALWAYS respond in ${label} (${def}) regardless of the question language.\n- Strictly generate responses ONLY in ${label} (${def}).\n- NEVER generate responses in any other language or a mixture of languages.\n`;
     }
     const elevenLabsTagHint = buildElevenLabsRagAudioTagHintForProvider(
       csRag?.tts_provider,
@@ -3033,11 +3065,16 @@ async function runVoicebotAskPipeline(
       industryContextPrompt += "--- END INDUSTRY CONTEXT ---\n";
     }
 
+    const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
+    const listHuman = humanizeAllowedList(allowedNorm);
+    const listTags = allowedNorm.join(", ");
+    const strictConstraint = `\n- CRITICAL: You MUST strictly generate the response ONLY in one of the allowed languages: ${listHuman} (${listTags}).\n- NEVER generate garbled, non-words, or mixed-language text. Ensure the script matches the selected language perfectly.\n- If the user query is in any disallowed language other than ${listTags}, you MUST ignore it and answer only in ${LANG_LABEL[def] ?? def} asking the user to use an allowed language.`;
+
     const ragRules = `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}${industryContextPrompt}`;
+- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`;
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {

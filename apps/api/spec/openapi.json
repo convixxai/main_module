@@ -85,6 +85,22 @@
       }
     },
     "schemas": {
+      "SarvamSettingsResponse": {
+        "type": "object",
+        "properties": {
+          "stt_provider": { "type": "string" },
+          "stt_model": { "type": "string" },
+          "tts_provider": { "type": "string" },
+          "tts_model": { "type": "string" }
+        }
+      },
+      "BulkKBUploadResponse": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" },
+          "customer_id": { "type": "string", "format": "uuid" }
+        }
+      },
       "CustomerSettings": {
         "type": "object",
         "description": "Full customer_settings row. See docs/SETTINGS_AND_FEATURES_CATALOG.md for field-by-field scope and defaults.",
@@ -1718,6 +1734,53 @@
         }
       }
     },
+    "/kb/upload-file": {
+      "post": {
+        "tags": [
+          "Knowledgebase"
+        ],
+        "summary": "Bulk upload KB entries from file",
+        "description": "Uploads a JSON file containing Q&A pairs to the customer knowledgebase. Requires x-api-key.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "JSON file containing an array of Q&A entries"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Entries uploaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkKBUploadResponse"
+                },
+                "example": {
+                  "message": "10 Q&A entries uploaded from file successfully",
+                  "customer_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/kb/entries": {
       "get": {
         "tags": [
@@ -1941,6 +2004,38 @@
               "application/json": {
                 "example": {
                   "rag_use_openai_only": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/sarvam": {
+      "get": {
+        "tags": [
+          "Settings"
+        ],
+        "summary": "Get Sarvam settings",
+        "description": "Returns current Sarvam-related STT and TTS settings. Requires x-api-key.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current Sarvam settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SarvamSettingsResponse"
+                },
+                "example": {
+                  "stt_provider": "sarvam",
+                  "stt_model": "saaras:v3",
+                  "tts_provider": "sarvam",
+                  "tts_model": "bulbul:v2"
                 }
               }
             }
