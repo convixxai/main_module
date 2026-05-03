@@ -694,6 +694,16 @@ function parseLanguageSwitchConfirmation(transcript: string): "yes" | "no" | "un
   const t = transcript.trim().toLowerCase();
   if (!t) return "unclear";
   if (
+    /\bhindi\b/.test(t) ||
+    /\bmarathi\b/.test(t) ||
+    /\benglish\b/.test(t) ||
+    /\bgujarati\b/.test(t) ||
+    /\bchange\b/.test(t) ||
+    /\bswitch\b/.test(t)
+  ) {
+    return "yes";
+  }
+  if (
     /\bno\b/.test(t) ||
     /\bnahi\b/.test(t) ||
     /\bनहीं\b/.test(t) ||
@@ -2537,16 +2547,35 @@ async function processUtterance(
             session.effectiveSttLanguageThisTurn
           ).catch(() => {});
         }
-        const tAfterStt = Date.now();
-        await runVoicebotReplyPipelineAfterTranscriptReady(
-          ws,
-          session,
-          pending.deferredTranscript,
-          utteranceStartedAt,
-          tAfterStt,
-          multilingual,
-          log
-        );
+
+        const targetLabel = LANG_LABEL[pending.targetLanguage] ?? pending.targetLanguage;
+        let ackMsg = `Okay, let's continue in ${targetLabel}. How can I help you?`;
+        if (pending.targetLanguage.startsWith("hi")) {
+          ackMsg = `ठीक है, अब हम हिंदी में बात करेंगे। मैं आपकी क्या मदद कर सकता हूँ?`;
+        } else if (pending.targetLanguage.startsWith("mr")) {
+          ackMsg = `ठीक आहे, आता आपण मराठीत बोलूया. मी तुम्हाला कशी मदत करू?`;
+        }
+
+        const cleanedConfirm = transcript.toLowerCase().replace(/\b(yes|yeah|okay|sure|haan|ha|ji|switch|hindi|english|marathi|gujarati)\b/gi, "").trim();
+
+        if (cleanedConfirm.length > 3) {
+          const tAfterStt = Date.now();
+          await runVoicebotReplyPipelineAfterTranscriptReady(
+            ws,
+            session,
+            cleanedConfirm,
+            utteranceStartedAt,
+            tAfterStt,
+            multilingual,
+            log
+          );
+        } else {
+          await appendVoiceTurnToChat(session, transcript, ackMsg, {
+            assistantSource: "language_switch_acknowledged",
+          });
+          const ttsLang = multilingual ? mapToTtsLanguage(pending.targetLanguage) : "en-IN";
+          await speakToExotel(ws, session, ackMsg, ttsLang, log);
+        }
         return;
       }
       if (reply === "no") {
@@ -2629,44 +2658,36 @@ async function processUtterance(
       session.defaultLanguageCode || "en-IN"
     );
 
-    const policyOutcome = applyLanguageSwitchPolicy(session, {
-      multilingual,
-      nextQueryIndex,
-      clampedDetected: clampedForPolicy,
-      detectedRaw,
-      languageProbability,
-      sttProvider,
-      allowedNorm,
-      log,
-    });
+    const activeBcp = normalizeBcp47Tag(
+      session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+    );
 
-    if (policyOutcome.action === "pending") {
-      session.customerQueryCount = nextQueryIndex;
-      const activeBcp = normalizeBcp47Tag(
-        session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
-      );
+    const isDifferentLang = !languagesLooselyEqual(clampedForPolicy, activeBcp);
+    if (isDifferentLang) {
+      if (session.discrepantLanguageTarget === clampedForPolicy) {
+        session.discrepantLanguageCount = (session.discrepantLanguageCount || 0) + 1;
+      } else {
+        session.discrepantLanguageTarget = clampedForPolicy;
+        session.discrepantLanguageCount = 1;
+      }
+    } else {
+      session.discrepantLanguageCount = 0;
+      session.discrepantLanguageTarget = null;
+    }
+
+    if (session.discrepantLanguageCount >= 2 && session.voicebotMultilingualEffective === true) {
       session.pendingLanguageSwitch = {
-        targetLanguage: policyOutcome.target,
-        deferredTranscript: transcript,
+        targetLanguage: clampedForPolicy,
+        deferredTranscript: "",
         fromLanguage: activeBcp,
-        confidence: policyOutcome.confidence,
+        confidence: 1.0,
         unclearRetries: 0,
       };
-      const prompt = languageSwitchConfirmPrompt(activeBcp, policyOutcome.target);
-      const ttsPromptLang = multilingual ? mapToTtsLanguage(activeBcp) : "en-IN";
-      voiceTrace(log, "voicebot.language.pending_confirmation", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        from: activeBcp,
-        to: policyOutcome.target,
-        query_index: nextQueryIndex,
-        language_probability: policyOutcome.confidence,
-      });
-      await appendVoiceTurnToChat(session, transcript, prompt, {
-        assistantSource: "language_switch_prompt",
-      });
-      await speakToExotel(ws, session, prompt, ttsPromptLang, log);
-      return;
+
+      session.addLanguagePromptRule = {
+        targetLanguage: clampedForPolicy,
+        fromLanguage: activeBcp,
+      };
     }
 
     session.customerQueryCount = nextQueryIndex;

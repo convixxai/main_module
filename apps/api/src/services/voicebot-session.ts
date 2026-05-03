@@ -177,6 +177,12 @@ export interface VoicebotSession {
   lastUserQuery?: string | null;
   lastBotResponse?: string | null;
   consecutiveRepeatCount?: number;
+  discrepantLanguageCount?: number;
+  discrepantLanguageTarget?: string | null;
+  addLanguagePromptRule?: {
+    targetLanguage: string;
+    fromLanguage: string;
+  } | null;
 }
 
 /**
