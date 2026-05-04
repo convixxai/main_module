@@ -983,34 +983,20 @@ function isMissingExotelColumnError(err: unknown): boolean {
 }
 
 /** Persist user + assistant lines for this voice turn (encrypted content). Tagged with Exotel call row id when present. */
-async function appendVoiceTurnToChat(
+async function appendUserChatLine(
   session: VoicebotSession,
-  userText: string,
-  assistantText: string,
-  opts?: { assistantSource?: string | null; openaiCostUsd?: number | null }
+  userText: string
 ): Promise<void> {
-  if (!session.chatSessionId) return;
+  if (!session.chatSessionId || !userText || !userText.trim()) return;
+  session.lastUserQuery = userText;
   const callId = exotelCallIdForMessages(session);
   const { encrypt } = await import("../services/crypto");
   const uq = [session.chatSessionId, "user", encrypt(userText), "voice", callId] as const;
-  const aq = [
-    session.chatSessionId,
-    "assistant",
-    encrypt(assistantText),
-    opts?.assistantSource ?? "voice",
-    opts?.openaiCostUsd ?? null,
-    callId,
-  ] as const;
   try {
     await pool.query(
       `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
        VALUES ($1, $2, $3, $4, $5)`,
       [...uq]
-    );
-    await pool.query(
-      `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd, exotel_call_session_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [...aq]
     );
   } catch (err) {
     if (!isMissingExotelColumnError(err)) throw err;
@@ -1018,12 +1004,23 @@ async function appendVoiceTurnToChat(
       `INSERT INTO chat_messages (session_id, role, content, source) VALUES ($1, $2, $3, $4)`,
       [uq[0], uq[1], uq[2], uq[3]]
     );
-    await pool.query(
-      `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd) VALUES ($1, $2, $3, $4, $5)`,
-      [aq[0], aq[1], aq[2], aq[3], aq[4]]
-    );
   }
   await touchChatSession(session.chatSessionId);
+}
+
+async function appendVoiceTurnToChat(
+  session: VoicebotSession,
+  userText: string,
+  assistantText: string,
+  opts?: { assistantSource?: string | null; openaiCostUsd?: number | null }
+): Promise<void> {
+  if (!session.chatSessionId) return;
+
+  if (userText && userText !== session.lastUserQuery) {
+    appendUserChatLine(session, userText).catch(() => {});
+  }
+  await appendAssistantChatLine(session, assistantText, opts?.assistantSource || "voice", opts?.openaiCostUsd);
+
   fireTranscriptWebhookIfEnabled(session, {
     user: userText,
     assistant: assistantText,
@@ -1035,24 +1032,25 @@ async function appendVoiceTurnToChat(
 async function appendAssistantChatLine(
   session: VoicebotSession,
   text: string,
-  source: string
+  source: string,
+  openaiCostUsd?: number | null
 ): Promise<void> {
-  if (!session.chatSessionId) return;
+  if (!session.chatSessionId || !text) return;
 
   const { encrypt } = await import("../services/crypto");
   const callId = exotelCallIdForMessages(session);
-  const row = [session.chatSessionId, "assistant", encrypt(text), source, callId] as const;
+  const row = [session.chatSessionId, "assistant", encrypt(text), source, openaiCostUsd ?? null, callId] as const;
   try {
     await pool.query(
-      `INSERT INTO chat_messages (session_id, role, content, source, exotel_call_session_id)
-       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd, exotel_call_session_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
       [...row]
     );
   } catch (err) {
     if (!isMissingExotelColumnError(err)) throw err;
     await pool.query(
-      `INSERT INTO chat_messages (session_id, role, content, source) VALUES ($1, $2, $3, $4)`,
-      [row[0], row[1], row[2], row[3]]
+      `INSERT INTO chat_messages (session_id, role, content, source, openai_cost_usd) VALUES ($1, $2, $3, $4, $5)`,
+      [row[0], row[1], row[2], row[3], row[4]]
     );
   }
   await touchChatSession(session.chatSessionId);
@@ -1981,6 +1979,12 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
   );
 
   if (session.isClosing) return;
+
+  if (transcript && transcript.trim().length > 0) {
+    appendUserChatLine(session, transcript).catch((err) => {
+      log?.error({ err }, "voicebot: failed to persist user query in background");
+    });
+  }
 
   const csTurn = tenantCs(session);
   if (csTurn?.stop_words?.length && textMatchesAnyPhrase(transcript, csTurn.stop_words)) {
