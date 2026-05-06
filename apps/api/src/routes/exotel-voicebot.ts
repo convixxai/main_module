@@ -204,6 +204,7 @@ async function preWarmGreetingCache(
 
 /** Same as `DIRECT_MATCH_THRESHOLD` in ask.ts (pgvector distance). Skips LLM on first user turn when match is strong. */
 const VOICEBOT_DIRECT_KB_DISTANCE = 0.3;
+const VOICEBOT_RELATED_SCOPE_DISTANCE_DEFAULT = 0.55;
 
 /** Energy threshold for voice activity detection.
  *  PCM chunks with RMS energy below this are treated as silence.
@@ -346,6 +347,23 @@ function ragDirectKbDistanceThreshold(session: VoicebotSession): number {
   const v = tenantCs(session)?.rag_distance_threshold;
   if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2) return Number(v);
   return VOICEBOT_DIRECT_KB_DISTANCE;
+}
+
+function allowRelatedGeneralAnswersVoice(session: VoicebotSession): boolean {
+  return tenantCs(session)?.allow_related_general_answers === true;
+}
+
+function relatedScopeDistanceThresholdVoice(session: VoicebotSession): number {
+  const v = tenantCs(session)?.related_scope_distance_threshold;
+  if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2)
+    return Number(v);
+  return VOICEBOT_RELATED_SCOPE_DISTANCE_DEFAULT;
+}
+
+function outOfScopeMessageVoice(session: VoicebotSession): string {
+  const custom = tenantCs(session)?.out_of_scope_message?.trim();
+  if (custom) return custom;
+  return "I can help with questions related to this business and its services, but I can't answer unrelated topics.";
 }
 
 function resolvedOpenAiModelForVoice(session: VoicebotSession): string | undefined {
@@ -2983,8 +3001,9 @@ async function runVoicebotAskPipeline(
     });
 
     if (kbResult.rows.length === 0) {
-      const noKbAnswer =
-        "I don't have enough information to answer that question.";
+      const noKbAnswer = allowRelatedGeneralAnswersVoice(session)
+        ? outOfScopeMessageVoice(session)
+        : "I don't have enough information to answer that question.";
       voiceTrace(log, "pipeline.rag.kb_miss", {
         customerId: session.customerId,
         stream_sid: session.streamSid,
@@ -3015,6 +3034,29 @@ async function runVoicebotAskPipeline(
       distance: number | string;
     };
     const dist = Number(top.distance);
+    const relatedScopeTh = relatedScopeDistanceThresholdVoice(session);
+    if (
+      allowRelatedGeneralAnswersVoice(session) &&
+      Number.isFinite(dist) &&
+      dist > relatedScopeTh
+    ) {
+      const out = outOfScopeMessageVoice(session);
+      voiceTrace(log, "pipeline.rag.out_of_scope_distance_gate", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        exotel_call_session_id: session.callSessionDbId,
+        distance: dist,
+        related_scope_distance_threshold: relatedScopeTh,
+      });
+      await appendVoiceTurnToChat(session, question, out, {
+        assistantSource: "out-of-scope",
+      });
+      return {
+        answer: out,
+        source: "none",
+        session_id: session.chatSessionId || "",
+      };
+    }
     const priorUserTurns = history.filter((h) => h.role === "user").length;
     const directTh = ragDirectKbDistanceThreshold(session);
     // Allow kb-direct on ANY turn: first turn uses the full threshold; subsequent
@@ -3095,7 +3137,16 @@ async function runVoicebotAskPipeline(
     const listTags = allowedNorm.join(", ");
     const strictConstraint = `\n- CRITICAL: You MUST strictly generate the response ONLY in one of the allowed languages: ${listHuman} (${listTags}).\n- NEVER generate garbled, non-words, or mixed-language text. Ensure the script matches the selected language perfectly.\n- If the user query is in any disallowed language other than ${listTags}, you MUST ignore it and answer only in ${LANG_LABEL[def] ?? def} asking the user to use an allowed language.`;
 
-    const ragRules = `--- RAG rules ---
+    const ragRules = allowRelatedGeneralAnswersVoice(session)
+      ? `--- RAG rules ---
+- The KNOWLEDGEBASE below is authoritative for tenant/business facts.
+- Keep answers SHORT and conversational — suitable for voice/phone.
+- Avoid bullet points and complex formatting; speak naturally.
+- If exact fact is missing but the query is related to this business/domain, answer with grounded general knowledge, estimation, or simple calculation.
+- For inferred/estimated values, clearly mention they are approximate.
+- Never invent tenant-specific operational details not present in KB.
+- If the question is unrelated to the tenant/business domain, respond with exactly OUT_OF_SCOPE.${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`
+      : `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
@@ -3156,8 +3207,12 @@ async function runVoicebotAskPipeline(
         voiceRagOpts
       );
       await ttsq.flushRest();
-      const answer =
+      const rawAnswer =
         llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
+      const answer = allowRelatedGeneralAnswersVoice(session) &&
+        rawAnswer.toLowerCase().includes("out_of_scope")
+        ? outOfScopeMessageVoice(session)
+        : rawAnswer;
 
       logVoiceStage(log, "rag.llm.done", {
         customerId: session.customerId,
@@ -3193,8 +3248,12 @@ async function runVoicebotAskPipeline(
       ragTrace,
       voiceRagOpts
     );
-    const answer =
+    const rawAnswer =
       llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
+    const answer = allowRelatedGeneralAnswersVoice(session) &&
+      rawAnswer.toLowerCase().includes("out_of_scope")
+      ? outOfScopeMessageVoice(session)
+      : rawAnswer;
 
     logVoiceStage(log, "rag.llm.done", {
       customerId: session.customerId,

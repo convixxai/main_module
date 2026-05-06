@@ -15,6 +15,7 @@ export type BargeInMode = "immediate" | "finish_then_answer" | "finish_turn";
 export type TtsProvider = "sarvam" | "elevenlabs";
 export type SttProvider = "sarvam" | "elevenlabs";
 export type TtsCodec = "wav" | "mp3";
+export type RelatedAnswerStrictness = "strict" | "balanced" | "permissive";
 
 export interface CustomerSettings {
   customer_id: string;
@@ -57,6 +58,10 @@ export interface CustomerSettings {
   llm_fallback_to_openai: boolean;
   openai_model: string;
   no_kb_fallback_instruction: string | null;
+  allow_related_general_answers: boolean;
+  related_scope_distance_threshold: number;
+  related_answer_strictness: RelatedAnswerStrictness;
+  out_of_scope_message: string | null;
 
   // E. VAD / audio handling
   vad_silence_timeout_ms: number;
@@ -206,6 +211,10 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   "llm_fallback_to_openai",
   "openai_model",
   "no_kb_fallback_instruction",
+  "allow_related_general_answers",
+  "related_scope_distance_threshold",
+  "related_answer_strictness",
+  "out_of_scope_message",
   // E
   "vad_silence_timeout_ms",
   "vad_energy_threshold",
@@ -352,6 +361,7 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
     "llm_temperature",
     "llm_top_p",
     "llm_verification_threshold",
+    "related_scope_distance_threshold",
   ];
   const out = { ...row } as Record<string, unknown>;
   for (const f of numericFields) {

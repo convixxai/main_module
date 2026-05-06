@@ -55,6 +55,10 @@ const settingsPatchSchema = z
     llm_fallback_to_openai: z.boolean(),
     openai_model: z.string().min(1),
     no_kb_fallback_instruction: z.string().nullable(),
+    allow_related_general_answers: z.boolean(),
+    related_scope_distance_threshold: z.number().min(0).max(2),
+    related_answer_strictness: z.enum(["strict", "balanced", "permissive"]),
+    out_of_scope_message: z.string().nullable(),
 
     // E. VAD / audio handling
     vad_silence_timeout_ms: z.number().int().nonnegative(),

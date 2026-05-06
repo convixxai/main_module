@@ -68,6 +68,7 @@ interface ChatMessage {
 }
 
 const DIRECT_MATCH_THRESHOLD = 0.3;
+const RELATED_SCOPE_DISTANCE_THRESHOLD_DEFAULT = 0.55;
 
 function ragTopKAsk(cs: CustomerSettings | null): number {
   const v = cs?.rag_top_k;
@@ -81,6 +82,23 @@ function ragDirectThresholdAsk(cs: CustomerSettings | null): number {
   if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2)
     return Number(v);
   return DIRECT_MATCH_THRESHOLD;
+}
+
+function allowRelatedGeneralAnswersAsk(cs: CustomerSettings | null): boolean {
+  return cs?.allow_related_general_answers === true;
+}
+
+function relatedScopeDistanceThresholdAsk(cs: CustomerSettings | null): number {
+  const v = cs?.related_scope_distance_threshold;
+  if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2)
+    return Number(v);
+  return RELATED_SCOPE_DISTANCE_THRESHOLD_DEFAULT;
+}
+
+function outOfScopeMessageAsk(cs: CustomerSettings | null): string {
+  const custom = cs?.out_of_scope_message?.trim();
+  if (custom) return custom;
+  return "I can help with questions related to this business and its services, but I can't answer unrelated topics.";
 }
 
 function trimAskHistoryForRag(
@@ -313,6 +331,14 @@ const RAG_RULES_SUFFIX = `--- RAG rules (apply on top of agent instructions abov
 - Use ANSWER_NOT_FOUND only when no passage reasonably answers the user's question (not merely because the user's wording differs from a KB heading).
 - Keep answers short unless the agent instructions above specify a stricter length.`;
 
+const RAG_RULES_SUFFIX_RELATED = `--- RAG rules (apply on top of agent instructions above) ---
+- The KNOWLEDGEBASE block below is authoritative for tenant/business facts. Do not contradict it.
+- Prefer KB facts first. If the exact answer is not in KB but the question is still related to this business/domain, you may answer using general knowledge, estimation, or basic calculation grounded in KB context.
+- For estimates or inferred values, clearly say they are approximate.
+- Do NOT invent tenant-specific operational details (pricing, policy, inventory, timings, contact details) when missing from KB.
+- If the question is unrelated to the tenant/business domain represented by KB, respond with exactly OUT_OF_SCOPE.
+- Keep answers short unless agent instructions require more detail.`;
+
 /** Appended to RAG system when \`customer_settings.voicebot_multilingual\` is true. */
 const RAG_MULTILINGUAL_GRAMMAR_RULE = `
 --- Multilingual writing quality (mandatory for non-English replies) ---
@@ -334,6 +360,7 @@ function buildRAGMessages(
     customerTtsModelRaw?: string | null;
     /** When tenant has multilingual voice/chat enabled, add stricter grammar guidance for non-English. */
     multilingualGrammarHints?: boolean;
+    allowRelatedGeneralAnswers?: boolean;
   }
 ) {
   const noKbLine =
@@ -347,11 +374,15 @@ function buildRAGMessages(
   );
   const grammarBlock =
     opts?.multilingualGrammarHints === true ? RAG_MULTILINGUAL_GRAMMAR_RULE : "";
+  const rulesSuffix =
+    opts?.allowRelatedGeneralAnswers === true
+      ? RAG_RULES_SUFFIX_RELATED
+      : RAG_RULES_SUFFIX;
   const messages: { role: "system" | "user" | "assistant"; content: string }[] =
     [
       {
         role: "system",
-        content: `${systemPrompt}\n\n${RAG_RULES_SUFFIX}${grammarBlock}${noKbLine}${elHint}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
+        content: `${systemPrompt}\n\n${rulesSuffix}${grammarBlock}${noKbLine}${elHint}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
       },
     ];
 
@@ -372,6 +403,7 @@ const NOT_FOUND_MARKERS = [
   "no information available",
   "don't have information",
 ];
+const OUT_OF_SCOPE_MARKERS = ["out_of_scope", "out of scope"];
 
 /** Shown to users when the model signals no KB match (instead of raw ANSWER_NOT_FOUND). */
 const RAG_NO_ANSWER_USER_MESSAGE =
@@ -380,6 +412,11 @@ const RAG_NO_ANSWER_USER_MESSAGE =
 function isNotFound(answer: string): boolean {
   const lower = answer.toLowerCase();
   return NOT_FOUND_MARKERS.some((m) => lower.includes(m));
+}
+
+function isOutOfScope(answer: string): boolean {
+  const lower = answer.trim().toLowerCase();
+  return OUT_OF_SCOPE_MARKERS.some((m) => lower.includes(m));
 }
 
 function logOpenAIUsage(
@@ -551,6 +588,11 @@ async function runAskPipeline(params: {
 
   const kbLimit = ragTopKAsk(custSettings ?? null);
   const directTh = ragDirectThresholdAsk(custSettings ?? null);
+  const allowRelatedGeneralAnswers = allowRelatedGeneralAnswersAsk(
+    custSettings ?? null
+  );
+  const relatedScopeTh = relatedScopeDistanceThresholdAsk(custSettings ?? null);
+  const outOfScopeMessage = outOfScopeMessageAsk(custSettings ?? null);
 
   const tVec0 = Date.now();
   const [matches, history] = await Promise.all([
@@ -590,7 +632,9 @@ async function runAskPipeline(params: {
   });
 
   if (matches.length === 0) {
-    const noKbAnswer = "No knowledgebase entries found for this customer.";
+    const noKbAnswer = allowRelatedGeneralAnswers
+      ? outOfScopeMessage
+      : "No knowledgebase entries found for this customer.";
     trace?.("pipeline_exit", { branch: "no_kb", reason: "zero_kb_matches" });
     saveMessage(sessionId, "assistant", noKbAnswer, "none");
     const timings = baseTimings();
@@ -608,6 +652,33 @@ async function runAskPipeline(params: {
   }
 
   const topMatch = matches[0];
+  const topDistance = Number(topMatch.distance);
+  const definitelyOutOfScope =
+    allowRelatedGeneralAnswers &&
+    Number.isFinite(topDistance) &&
+    topDistance > relatedScopeTh;
+
+  if (definitelyOutOfScope) {
+    trace?.("pipeline_exit", {
+      branch: "rag_last_resort",
+      answer_source: "out_of_scope_distance_gate",
+      top_distance: topDistance,
+      related_scope_distance_threshold: relatedScopeTh,
+    });
+    saveMessage(sessionId, "assistant", outOfScopeMessage, "none");
+    return {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_name: agentName,
+      answer: outOfScopeMessage,
+      source: "none",
+      openai_cost_usd: null,
+      response_time_ms: Date.now() - start,
+      ...(includeTimings
+        ? { pipeline_timings: { ...baseTimings(), branch: "rag_last_resort" } }
+        : {}),
+    };
+  }
 
   if (topMatch.distance < directTh && history.length === 0) {
     trace?.("pipeline_exit", {
@@ -645,6 +716,7 @@ async function runAskPipeline(params: {
       ttsModelRaw: agent?.ttsModel ?? custSettings?.tts_model ?? null,
       customerTtsModelRaw: custSettings?.tts_model ?? null,
       multilingualGrammarHints: multilingual,
+      allowRelatedGeneralAnswers,
     }
   );
 
@@ -782,6 +854,27 @@ async function runAskPipeline(params: {
     const oa = openaiResult?.answer?.trim() || "";
 
     if (openaiResult && oa && !isNotFound(oa)) {
+      if (allowRelatedGeneralAnswers && isOutOfScope(oa)) {
+        saveMessage(
+          sessionId,
+          "assistant",
+          outOfScopeMessage,
+          "openai",
+          openaiResult.costUsd
+        );
+        return {
+          session_id: sessionId,
+          agent_id: agentId,
+          agent_name: agentName,
+          answer: outOfScopeMessage,
+          source: "openai",
+          openai_cost_usd: openaiResult.costUsd,
+          response_time_ms: Date.now() - start,
+          ...(includeTimings
+            ? { pipeline_timings: ragTimings("rag_openai") }
+            : {}),
+        };
+      }
       trace?.("pipeline_exit", {
         branch: "rag_openai",
         answer_source: "openai",
@@ -879,6 +972,19 @@ async function runAskPipeline(params: {
   const selfHostedFailed = !selfHostedAnswer || isNotFound(selfHostedAnswer);
 
   if (!selfHostedFailed) {
+    if (allowRelatedGeneralAnswers && isOutOfScope(selfHostedAnswer)) {
+      saveMessage(sessionId, "assistant", outOfScopeMessage, "self-hosted");
+      return {
+        session_id: sessionId,
+        agent_id: agentId,
+        agent_name: agentName,
+        answer: outOfScopeMessage,
+        source: "self-hosted",
+        openai_cost_usd: null,
+        response_time_ms: Date.now() - start,
+        ...(includeTimings ? { pipeline_timings: ragTimings("rag_self_hosted") } : {}),
+      };
+    }
     trace?.("pipeline_exit", {
       branch: "rag_self_hosted",
       answer_source: "self-hosted",
