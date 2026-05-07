@@ -3553,7 +3553,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   outboundLinkedId = outboundIdCandidate;
                   const om = oCheck.rows[0].metadata as Record<string, unknown> | null;
                   if (om?.callee_answered !== true) {
-                    await waitForOutboundCalleeAnswered(outboundLinkedId, log);
+                    // We no longer block here; we rely on VAD in the media handler
                   }
                 }
               }
@@ -3579,7 +3579,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                       "voicebot: matched outbound session by From/To digits (CustomField missing)"
                     );
                     if (om?.callee_answered !== true) {
-                      await waitForOutboundCalleeAnswered(outboundLinkedId, log);
+                      // We no longer block here; we rely on VAD in the media handler
                     }
                   }
                 }
@@ -3602,7 +3602,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                       "voicebot: matched outbound session by Exotel CallSid (ccs / From-To fallback unused)"
                     );
                     if (om?.callee_answered !== true) {
-                      await waitForOutboundCalleeAnswered(outboundLinkedId, log);
+                      // We no longer block here; we rely on VAD in the media handler
                     }
                   }
                 }
