@@ -282,6 +282,7 @@ export function parseWavToPcmS16leMono(
     buffer.toString("ascii", 0, 4) !== "RIFF" ||
     buffer.toString("ascii", 8, 12) !== "WAVE"
   ) {
+    console.warn("parseWavToPcmS16leMono: invalid RIFF/WAVE header or too short", { len: buffer.length });
     return null;
   }
 
@@ -302,7 +303,9 @@ export function parseWavToPcmS16leMono(
     let actualSize = size;
     if (id === "data" && (payloadStart + size > buffer.length || size === 0 || size === 0xFFFFFFFF)) {
       actualSize = buffer.length - payloadStart;
+      console.warn(`parseWavToPcmS16leMono: dummy data chunk size ${size}, adjusted to ${actualSize}`);
     } else if (payloadStart + size > buffer.length) {
+      console.warn(`parseWavToPcmS16leMono: chunk ${id} size ${size} exceeds buffer length. Breaking.`);
       break;
     }
 
@@ -311,17 +314,25 @@ export function parseWavToPcmS16leMono(
       numChannels = buffer.readUInt16LE(payloadStart + 2);
       sampleRate = buffer.readUInt32LE(payloadStart + 4);
       bitsPerSample = buffer.readUInt16LE(payloadStart + 14);
+      console.info(`parseWavToPcmS16leMono: fmt chunk: format=${audioFormat}, channels=${numChannels}, sr=${sampleRate}, bps=${bitsPerSample}`);
     }
     if (id === "data") {
       dataChunk = buffer.subarray(payloadStart, payloadStart + actualSize);
+      console.info(`parseWavToPcmS16leMono: found data chunk, length=${dataChunk.length}`);
       break;
     }
 
     offset = payloadStart + actualSize + (actualSize % 2);
   }
 
-  if (!dataChunk || dataChunk.length === 0) return null;
-  if (numChannels < 1 || numChannels > 2) return null;
+  if (!dataChunk || dataChunk.length === 0) {
+    console.warn("parseWavToPcmS16leMono: missing or empty data chunk");
+    return null;
+  }
+  if (numChannels < 1 || numChannels > 2) {
+    console.warn(`parseWavToPcmS16leMono: unsupported channels: ${numChannels}`);
+    return null;
+  }
 
   if (audioFormat === WAVE_FORMAT_PCM && bitsPerSample === 16) {
     if (numChannels === 1) return { pcm: dataChunk, sampleRate };
@@ -333,6 +344,8 @@ export function parseWavToPcmS16leMono(
     }
     return { pcm: interleavedF32StereoToMonoS16le(dataChunk), sampleRate };
   }
+  
+  console.warn(`parseWavToPcmS16leMono: unsupported format. format=${audioFormat}, bps=${bitsPerSample}`);
   return null;
 }
 
