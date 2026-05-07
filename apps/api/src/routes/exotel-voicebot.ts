@@ -1199,6 +1199,8 @@ function sendAudioToExotel(
     exotelCallDbId: session.callSessionDbId,
   };
 
+  // Exotel might drop the connection if we blast too many messages instantly.
+  // Instead of a tight loop, if it's a huge buffer, we should pace it, but for now we will just log if it's huge.
   for (const chunk of allChunks) {
     const b64 = encodeBase64Pcm(chunk);
     totalB64 += b64.length;
@@ -1250,6 +1252,55 @@ function sendAudioToExotel(
 
   // Send a mark after the last chunk so we know when playback completes
   if (allChunks.length > 0 && !omitMark) {
+    sendExotelPlaybackMark(ws, session, log);
+  }
+}
+
+/**
+ * Paced version of sendAudioToExotel for large files (campaign scripts).
+ * Prevents blowing up Exotel's WebSocket ingress buffer which causes immediate disconnects.
+ */
+async function sendAudioPaced(
+  ws: WebSocket,
+  session: VoicebotSession,
+  pcmBuffer: Buffer,
+  log?: FastifyRequest["log"]
+): Promise<void> {
+  const chunkBuffer = new PcmChunkBuffer();
+  const chunks = chunkBuffer.push(pcmBuffer);
+  const flushed: Buffer[] = [];
+  let piece: Buffer | null;
+  while ((piece = chunkBuffer.flush()) !== null) {
+    flushed.push(piece);
+  }
+  const allChunks = flushed.length > 0 ? [...chunks, ...flushed] : chunks;
+  
+  log?.info({ streamSid: session.streamSid, chunks: allChunks.length }, "voicebot: pacing outbound audio");
+
+  const ctx: VoiceTraceCtx = {
+    customerId: session.customerId,
+    streamSid: session.streamSid,
+    callSid: session.callSid,
+    exotelCallDbId: session.callSessionDbId,
+  };
+
+  for (let i = 0; i < allChunks.length; i++) {
+    const chunk = allChunks[i];
+    const b64 = encodeBase64Pcm(chunk);
+    const media: ExotelOutboundMedia = {
+      event: "media",
+      stream_sid: session.streamSid,
+      media: { payload: b64 },
+    };
+    sendToExotel(ws, media, log, ctx, { skipTrace: true });
+    
+    // Pace: every 10 chunks (200ms of audio), sleep for 50ms to let the buffer drain
+    if (i > 0 && i % 10 === 0) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
+  if (allChunks.length > 0) {
     sendExotelPlaybackMark(ws, session, log);
   }
 }
@@ -3867,6 +3918,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
 
                 const campaignAudio = await loadCampaignAudio(session.campaignId);
                 if (campaignAudio) {
+                  log.info({ campaignId: session.campaignId, size: campaignAudio.length }, "voicebot: loaded campaign audio file");
                   const wavParsed = parseWavToPcmS16leMono(campaignAudio);
                   if (wavParsed) {
                     let pcm = wavParsed.pcm;
@@ -3875,7 +3927,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                       pcm = resamplePcm16(pcm, wavParsed.sampleRate, sr);
                     }
                     session.ttsInProgress = true;
-                    sendAudioToExotel(socket, session, pcm, log);
+                    log.info({ pcm_length: pcm.length }, "voicebot: sending campaign PCM to Exotel");
+                    await sendAudioPaced(socket, session, pcm, log);
                     session.ttsInProgress = false;
                     schedulePlaybackMarkFallback(session, pcm.length, sr, log);
 
@@ -3888,6 +3941,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                         appendAssistantChatLine(session!, r.rows[0].script_text, "campaign_script");
                       }
                     });
+                  } else {
+                    log.error({ campaignId: session.campaignId }, "voicebot: parseWavToPcmS16leMono failed for campaign audio");
                   }
                 } else {
                   log.error({ campaignId: session.campaignId }, "voicebot: campaign audio file not found");
