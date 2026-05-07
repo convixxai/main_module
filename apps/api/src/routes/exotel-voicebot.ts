@@ -367,6 +367,10 @@ function allowRelatedGeneralAnswersVoice(session: VoicebotSession): boolean {
   return tenantCs(session)?.allow_related_general_answers === true;
 }
 
+function relatedAnswerStrictnessVoice(session: VoicebotSession): string {
+  return tenantCs(session)?.related_answer_strictness || "balanced";
+}
+
 function relatedScopeDistanceThresholdVoice(session: VoicebotSession): number {
   const v = tenantCs(session)?.related_scope_distance_threshold;
   if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2)
@@ -3153,6 +3157,16 @@ async function runVoicebotAskPipeline(
     const listTags = allowedNorm.join(", ");
     const strictConstraint = `\n- CRITICAL: You MUST strictly generate the response ONLY in one of the allowed languages: ${listHuman} (${listTags}).\n- NEVER generate garbled, non-words, or mixed-language text. Ensure the script matches the selected language perfectly.\n- If the user query is in any disallowed language other than ${listTags}, you MUST ignore it and answer only in ${LANG_LABEL[def] ?? def} asking the user to use an allowed language.`;
 
+    let strictnessHint = "";
+    const s = relatedAnswerStrictnessVoice(session);
+    if (s === "permissive") {
+      strictnessHint = "- STRICTNESS: PERMISSIVE. Be highly helpful. If a fact is missing but you can provide a helpful estimate or use general knowledge (especially for travel and general queries), do so. Prioritize helpfulness over silence.";
+    } else if (s === "strict") {
+      strictnessHint = "- STRICTNESS: STRICT. Even in related mode, if the KB doesn't have the specific answer, prefer to say you don't know rather than estimating.";
+    } else {
+      strictnessHint = "- STRICTNESS: BALANCED. Use general knowledge for related topics, but be cautious and mention when you are estimating.";
+    }
+
     const ragRules = allowRelatedGeneralAnswersVoice(session)
       ? `--- RAG rules ---
 - The KNOWLEDGEBASE below is authoritative for tenant/business facts.
@@ -3160,7 +3174,8 @@ async function runVoicebotAskPipeline(
 - Avoid bullet points and complex formatting; speak naturally.
 - If exact fact is missing but the query is related to this business/domain (e.g., travel distance, nearby cities, landmarks), answer with grounded general knowledge, estimation, or simple calculation.
 - For inferred/estimated values, clearly mention they are approximate.
-- Never invent tenant-specific operational details (pricing, policy, inventory) not present in KB. General travel distances/times are permitted if location is known.${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`
+- Never invent tenant-specific operational details (pricing, policy, inventory) not present in KB. General travel distances/times are permitted if location is known.
+- ${strictnessHint}${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`
       : `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.

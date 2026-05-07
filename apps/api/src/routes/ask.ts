@@ -13,6 +13,7 @@ import {
 import {
   getCustomerSettings,
   type CustomerSettings,
+  type RelatedAnswerStrictness,
 } from "../services/customer-settings";
 import {
   createRagTrace,
@@ -99,6 +100,10 @@ function outOfScopeMessageAsk(cs: CustomerSettings | null): string {
   const custom = cs?.out_of_scope_message?.trim();
   if (custom) return custom;
   return "I can help with questions related to this business and its services, but I can't answer unrelated topics.";
+}
+
+function relatedAnswerStrictnessAsk(cs: CustomerSettings | null): RelatedAnswerStrictness {
+  return cs?.related_answer_strictness || "balanced";
 }
 
 function trimAskHistoryForRag(
@@ -336,6 +341,7 @@ const RAG_RULES_SUFFIX_RELATED = `--- RAG rules (apply on top of agent instructi
 - Prefer KB facts first. If the exact answer is not in KB but the question is still related to this business/domain (e.g., travel distance, nearby cities, landmarks), you may answer using general knowledge, estimation, or basic calculation grounded in KB context.
 - For estimates or inferred values, clearly say they are approximate.
 - Do NOT invent tenant-specific operational details (pricing, policy, inventory, exact contact details) when missing from KB. However, general travel distances/times are permitted if the business location is known.
+- {STRICTNESS_HINT}
 - If the question is unrelated to the tenant/business domain represented by KB, respond with exactly OUT_OF_SCOPE.
 - Keep answers short unless agent instructions require more detail.`;
 
@@ -361,6 +367,7 @@ function buildRAGMessages(
     /** When tenant has multilingual voice/chat enabled, add stricter grammar guidance for non-English. */
     multilingualGrammarHints?: boolean;
     allowRelatedGeneralAnswers?: boolean;
+    relatedAnswerStrictness?: RelatedAnswerStrictness;
   }
 ) {
   const noKbLine =
@@ -374,10 +381,24 @@ function buildRAGMessages(
   );
   const grammarBlock =
     opts?.multilingualGrammarHints === true ? RAG_MULTILINGUAL_GRAMMAR_RULE : "";
-  const rulesSuffix =
+  let rulesSuffix =
     opts?.allowRelatedGeneralAnswers === true
       ? RAG_RULES_SUFFIX_RELATED
       : RAG_RULES_SUFFIX;
+
+  if (opts?.allowRelatedGeneralAnswers === true) {
+    let strictnessHint = "";
+    const s = opts.relatedAnswerStrictness || "balanced";
+    if (s === "permissive") {
+      strictnessHint = "- STRICTNESS: PERMISSIVE. Be highly helpful. If a fact is missing but you can provide a helpful estimate or use general knowledge (especially for travel and general queries), do so. Prioritize helpfulness over silence.";
+    } else if (s === "strict") {
+      strictnessHint = "- STRICTNESS: STRICT. Even in related mode, if the KB doesn't have the specific answer, prefer to say you don't know rather than estimating.";
+    } else {
+      strictnessHint = "- STRICTNESS: BALANCED. Use general knowledge for related topics, but be cautious and mention when you are estimating.";
+    }
+    rulesSuffix = rulesSuffix.replace("{STRICTNESS_HINT}", strictnessHint);
+  }
+
   const messages: { role: "system" | "user" | "assistant"; content: string }[] =
     [
       {
@@ -719,6 +740,7 @@ async function runAskPipeline(params: {
       customerTtsModelRaw: custSettings?.tts_model ?? null,
       multilingualGrammarHints: multilingual,
       allowRelatedGeneralAnswers,
+      relatedAnswerStrictness: relatedAnswerStrictnessAsk(custSettings ?? null),
     }
   );
 
