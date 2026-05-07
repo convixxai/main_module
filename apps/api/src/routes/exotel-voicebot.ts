@@ -238,9 +238,21 @@ async function loadCampaignAudio(campaignId: string): Promise<Buffer | null> {
     [campaignId]
   );
   if (result.rows.length === 0 || !result.rows[0].audio_file_path) return null;
-  const filePath = result.rows[0].audio_file_path;
-  if (!fs.existsSync(filePath)) return null;
-  return fs.readFileSync(filePath);
+  const dbPath = result.rows[0].audio_file_path;
+  
+  // Try absolute path from DB
+  if (fs.existsSync(dbPath)) return fs.readFileSync(dbPath);
+  
+  // Try resolving relative to current working directory
+  const baseName = path.basename(dbPath);
+  const localPath = path.join(process.cwd(), "uploads", "campaigns", baseName);
+  if (fs.existsSync(localPath)) return fs.readFileSync(localPath);
+  
+  // Try resolving relative to monorepo structure
+  const nestedPath = path.join(process.cwd(), "apps", "api", "uploads", "campaigns", baseName);
+  if (fs.existsSync(nestedPath)) return fs.readFileSync(nestedPath);
+
+  return null;
 }
 
 /** If Exotel never sends inbound `mark` after our outbound audio, unblock STT after this slack past estimated play time. */

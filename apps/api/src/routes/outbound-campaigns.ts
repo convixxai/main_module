@@ -12,7 +12,7 @@ import { exotelConnectCall, restApiBaseUrlFromSubdomain } from "../services/exot
 import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
 import { env } from "../config/env";
 
-const CAMPAIGN_UPLOAD_DIR = path.join(process.cwd(), "apps", "api", "uploads", "campaigns");
+const CAMPAIGN_UPLOAD_DIR = path.join(process.cwd(), "uploads", "campaigns");
 
 // Ensure upload directory exists
 if (!fs.existsSync(CAMPAIGN_UPLOAD_DIR)) {
