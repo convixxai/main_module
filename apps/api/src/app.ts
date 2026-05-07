@@ -32,6 +32,14 @@ export async function buildApp(): Promise<FastifyInstance> {
   attachPoolQueryLogging(app.log);
 
   registerRequestLogging(app);
+  
+  // Debug hook to trace all Exotel Voicebot connection attempts
+  app.addHook("preHandler", async (request) => {
+    if (request.url.startsWith("/exotel/voicebot/")) {
+      request.log.info({ url: request.url, method: request.method, headers: request.headers }, "Exotel Voicebot route hit");
+    }
+  });
+
   await app.register(cors, { origin: true }); // Allow all origins (required for Swagger UI Try it out)
   await app.register(websocket);               // Enable WebSocket support for Exotel Voicebot
   await app.register(formbody);                // Parse application/x-www-form-urlencoded (Exotel StatusCallbacks)
