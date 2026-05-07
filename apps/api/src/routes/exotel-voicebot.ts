@@ -3158,10 +3158,9 @@ async function runVoicebotAskPipeline(
 - The KNOWLEDGEBASE below is authoritative for tenant/business facts.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- If exact fact is missing but the query is related to this business/domain, answer with grounded general knowledge, estimation, or simple calculation.
+- If exact fact is missing but the query is related to this business/domain (e.g., travel distance, nearby cities, landmarks), answer with grounded general knowledge, estimation, or simple calculation.
 - For inferred/estimated values, clearly mention they are approximate.
-- Never invent tenant-specific operational details not present in KB.
-- If the question is unrelated to the tenant/business domain, respond with exactly OUT_OF_SCOPE.${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`
+- Never invent tenant-specific operational details (pricing, policy, inventory) not present in KB. General travel distances/times are permitted if location is known.${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`
       : `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.

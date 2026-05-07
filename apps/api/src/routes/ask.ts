@@ -333,9 +333,9 @@ const RAG_RULES_SUFFIX = `--- RAG rules (apply on top of agent instructions abov
 
 const RAG_RULES_SUFFIX_RELATED = `--- RAG rules (apply on top of agent instructions above) ---
 - The KNOWLEDGEBASE block below is authoritative for tenant/business facts. Do not contradict it.
-- Prefer KB facts first. If the exact answer is not in KB but the question is still related to this business/domain, you may answer using general knowledge, estimation, or basic calculation grounded in KB context.
+- Prefer KB facts first. If the exact answer is not in KB but the question is still related to this business/domain (e.g., travel distance, nearby cities, landmarks), you may answer using general knowledge, estimation, or basic calculation grounded in KB context.
 - For estimates or inferred values, clearly say they are approximate.
-- Do NOT invent tenant-specific operational details (pricing, policy, inventory, timings, contact details) when missing from KB.
+- Do NOT invent tenant-specific operational details (pricing, policy, inventory, exact contact details) when missing from KB. However, general travel distances/times are permitted if the business location is known.
 - If the question is unrelated to the tenant/business domain represented by KB, respond with exactly OUT_OF_SCOPE.
 - Keep answers short unless agent instructions require more detail.`;
 
