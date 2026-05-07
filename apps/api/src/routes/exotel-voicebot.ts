@@ -1293,10 +1293,12 @@ async function sendAudioPaced(
       media: { payload: b64 },
     };
     sendToExotel(ws, media, log, ctx, { skipTrace: true });
-    
-    // Pace: every 10 chunks (200ms of audio), sleep for 50ms to let the buffer drain
-    if (i > 0 && i % 10 === 0) {
-      await new Promise(r => setTimeout(r, 50));
+    // Pace: wait for roughly 50% of the chunk's real-time duration before sending the next.
+    // At 8kHz 16-bit mono, 1 ms = 16 bytes.
+    // 6400 bytes = 400ms. Sleeping for 200ms ensures the buffer stays full but never overflows.
+    const durationMs = chunk.length / 16;
+    if (i < allChunks.length - 1) {
+      await new Promise(r => setTimeout(r, Math.floor(durationMs * 0.5)));
     }
   }
 
