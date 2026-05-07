@@ -3162,11 +3162,11 @@ async function runVoicebotAskPipeline(
     let strictnessHint = "";
     const s = relatedAnswerStrictnessVoice(session);
     if (s === "permissive") {
-      strictnessHint = "- STRICTNESS: PERMISSIVE. Be highly helpful. If a fact is missing but you can provide a helpful estimate or use general knowledge (especially for travel and general queries), do so. Prioritize helpfulness over silence.";
+      strictnessHint = "- STRICTNESS: PERMISSIVE. You are explicitly AUTHORIZED and ENCOURAGED to use your internal general knowledge to answer questions that are not explicitly in the Knowledgebase, as long as they are related to the business (e.g., travel distances, nearby locations, weather, local culture). DO NOT say 'I don't know' for these topics. Instead, use your best estimation or calculation based on the context. You have permission to bypass any previous 'Knowledgebase only' instructions for these helpful estimations.";
     } else if (s === "strict") {
-      strictnessHint = "- STRICTNESS: STRICT. Even in related mode, if the KB doesn't have the specific answer, prefer to say you don't know rather than estimating.";
+      strictnessHint = "- STRICTNESS: STRICT. Even in related mode, if the KB doesn't have the specific answer, you MUST say you don't know rather than estimating. Stick strictly to the provided facts.";
     } else {
-      strictnessHint = "- STRICTNESS: BALANCED. Use general knowledge for related topics, but be cautious and mention when you are estimating.";
+      strictnessHint = "- STRICTNESS: BALANCED. Use general knowledge for related topics (like distances), but be cautious and clearly mention that you are providing an estimate.";
     }
 
 

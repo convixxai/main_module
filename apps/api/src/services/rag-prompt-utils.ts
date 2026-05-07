@@ -9,5 +9,8 @@ export function relaxAgentPrompt(prompt: string, allowRelated: boolean): string 
     .replace(/Answer using ONLY information from (the )?KNOWLEDGEBASE/gi, "Answer primarily using information from the KNOWLEDGEBASE")
     .replace(/only if you don't have answer in knowledgebase/gi, "if you don't have a specific answer in the knowledgebase")
     .replace(/only use information from (the )?provided context/gi, "primarily use information from the provided context")
-    .replace(/strictly use the knowledgebase/gi, "primarily use the knowledgebase");
+    .replace(/strictly use the knowledgebase/gi, "primarily use the knowledgebase")
+    .replace(/answer from given knowledgebase/gi, "answer primarily from given knowledgebase")
+    .replace(/don't have answer in knowledgebase/gi, "don't have a specific answer in the knowledgebase")
+    .replace(/only if you don't have answer/gi, "if you don't have a specific answer");
 }
