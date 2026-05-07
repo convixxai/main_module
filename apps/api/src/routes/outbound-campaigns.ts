@@ -242,6 +242,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
             customField,
             statusCallback,
             statusCallbackEvents: ["answered", "terminal"],
+            statusCallbackContentType: "application/json",
           });
 
           const callSid = exotelResult.call?.Sid;
@@ -360,6 +361,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
           customField,
           statusCallback,
           statusCallbackEvents: ["answered", "terminal"],
+          statusCallbackContentType: "application/json",
         });
 
         const callSid = exotelResult.call?.Sid;
