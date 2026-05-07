@@ -296,20 +296,28 @@ export function parseWavToPcmS16leMono(
     const id = buffer.toString("ascii", offset, offset + 4);
     const size = buffer.readUInt32LE(offset + 4);
     const payloadStart = offset + 8;
-    if (payloadStart + size > buffer.length) break;
+    
+    // For streamed WAVs, the data chunk size is often set to a dummy large value (or 0)
+    // because the total length isn't known when writing the header.
+    let actualSize = size;
+    if (id === "data" && (payloadStart + size > buffer.length || size === 0 || size === 0xFFFFFFFF)) {
+      actualSize = buffer.length - payloadStart;
+    } else if (payloadStart + size > buffer.length) {
+      break;
+    }
 
-    if (id === "fmt " && size >= 16) {
+    if (id === "fmt " && actualSize >= 16) {
       audioFormat = buffer.readUInt16LE(payloadStart);
       numChannels = buffer.readUInt16LE(payloadStart + 2);
       sampleRate = buffer.readUInt32LE(payloadStart + 4);
       bitsPerSample = buffer.readUInt16LE(payloadStart + 14);
     }
     if (id === "data") {
-      dataChunk = buffer.subarray(payloadStart, payloadStart + size);
+      dataChunk = buffer.subarray(payloadStart, payloadStart + actualSize);
       break;
     }
 
-    offset = payloadStart + size + (size % 2);
+    offset = payloadStart + actualSize + (actualSize % 2);
   }
 
   if (!dataChunk || dataChunk.length === 0) return null;
