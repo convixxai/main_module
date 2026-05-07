@@ -2083,6 +2083,37 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
   if (session.isClosing) return;
 
+  // --- CAMPAIGN SCRIPT PLAYBACK ---
+  // Wait until we have a confirmed transcript (e.g., the customer actually said "Hello")
+  // to prevent background noise from triggering the script prematurely.
+  if (session.waitingForFirstSpeech && session.campaignId) {
+    session.waitingForFirstSpeech = false;
+    log?.info({ campaignId: session.campaignId, transcript }, "voicebot: customer speech confirmed via STT — playing campaign script");
+
+    try {
+      const campaignRes = await pool.query(
+        "SELECT script_text, language_code FROM outbound_campaigns WHERE id = $1",
+        [session.campaignId]
+      );
+      
+      if (campaignRes.rows.length > 0 && campaignRes.rows[0].script_text) {
+        const scriptText = campaignRes.rows[0].script_text;
+        const langCode = campaignRes.rows[0].language_code || "en-IN";
+        log?.info({ campaignId: session.campaignId, chars: scriptText.length }, "voicebot: synthesizing realtime TTS for campaign script");
+        
+        await speakToExotel(ws, session, scriptText, langCode, log);
+
+        // Link to chat session as initial bot message
+        appendAssistantChatLine(session, scriptText, "campaign_script").catch(() => {});
+      } else {
+        log?.warn({ campaignId: session.campaignId }, "voicebot: campaign script not found in db");
+      }
+    } catch (err) {
+      log?.error({ err, campaignId: session.campaignId }, "voicebot: error synthesizing campaign script");
+    }
+    return; // Do NOT proceed to RAG
+  }
+
   if (transcript && transcript.trim().length > 0) {
     appendUserChatLine(session, transcript).catch((err) => {
       log?.error({ err }, "voicebot: failed to persist user query in background");
@@ -3935,30 +3966,6 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               // A simple timeout-based VAD would never fire because chunks always arrive.
               // Instead, measure the audio energy (loudness) to distinguish speech from silence.
               const isSpeech = energy > vadEnergyThresholdForListening(session);
-
-              if (isSpeech && session.waitingForFirstSpeech && session.campaignId) {
-                session.waitingForFirstSpeech = false;
-                log.info({ campaignId: session.campaignId }, "voicebot: customer speech detected — playing campaign script");
-
-                const campaignRes = await pool.query(
-                  "SELECT script_text, language_code FROM outbound_campaigns WHERE id = $1",
-                  [session.campaignId]
-                );
-                
-                if (campaignRes.rows.length > 0 && campaignRes.rows[0].script_text) {
-                  const scriptText = campaignRes.rows[0].script_text;
-                  const langCode = campaignRes.rows[0].language_code || "en-IN";
-                  log.info({ campaignId: session.campaignId, chars: scriptText.length }, "voicebot: synthesizing realtime TTS for campaign script");
-                  
-                  await speakToExotel(socket, session, scriptText, langCode, log);
-
-                  // Link to chat session as initial bot message
-                  appendAssistantChatLine(session!, scriptText, "campaign_script");
-                } else {
-                  log.warn({ campaignId: session.campaignId }, "voicebot: campaign script not found in db");
-                }
-                break;
-              }
 
               if (isSpeech) {
                 // Caller is speaking — buffer this chunk
