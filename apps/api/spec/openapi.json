@@ -3805,6 +3805,37 @@
       }
     },
     "/outbound/campaigns": {
+      "get": {
+        "tags": ["Outbound Campaigns"],
+        "summary": "List campaigns",
+        "description": "Returns all campaigns for the customer, including aggregated stats for total/active/completed leads.",
+        "security": [{ "ApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "allOf": [
+                      { "$ref": "#/components/schemas/OutboundCampaign" },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "total_leads": { "type": "integer" },
+                          "active_calls": { "type": "integer" },
+                          "completed_calls": { "type": "integer" }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": ["Outbound Campaigns"],
         "summary": "Create campaign",

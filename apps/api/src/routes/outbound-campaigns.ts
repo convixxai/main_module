@@ -387,4 +387,32 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       }
     }
   );
+
+  // 5. List all campaigns for a customer
+  app.get(
+    "/outbound/campaigns",
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      const customerId = request.customerId!;
+      
+      try {
+        const result = await pool.query(
+          `SELECT 
+             c.*,
+             (SELECT COUNT(*) FROM outbound_campaign_leads WHERE campaign_id = c.id) as total_leads,
+             (SELECT COUNT(*) FROM outbound_campaign_leads WHERE campaign_id = c.id AND status = 'calling') as active_calls,
+             (SELECT COUNT(*) FROM outbound_campaign_leads WHERE campaign_id = c.id AND status = 'completed') as completed_calls
+           FROM outbound_campaigns c
+           WHERE customer_id = $1
+           ORDER BY created_at DESC`,
+          [customerId]
+        );
+
+        return reply.send(result.rows);
+      } catch (err) {
+        app.log.error({ err, customerId }, "Failed to list campaigns");
+        return reply.status(500).send({ error: "Internal Server Error" });
+      }
+    }
+  );
 }
