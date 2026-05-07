@@ -3671,8 +3671,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 const recent = await pool.query(
                   `SELECT id, metadata FROM exotel_call_sessions
                    WHERE customer_id = $1::uuid AND direction = 'outbound'
-                     AND created_at > NOW() - INTERVAL '30 seconds'
-                   ORDER BY created_at DESC LIMIT 1`,
+                     AND started_at > NOW() - INTERVAL '30 seconds'
+                   ORDER BY started_at DESC LIMIT 1`,
                   [customerId]
                 );
                 if (recent.rows.length > 0) {
@@ -3940,36 +3940,22 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 session.waitingForFirstSpeech = false;
                 log.info({ campaignId: session.campaignId }, "voicebot: customer speech detected — playing campaign script");
 
-                const campaignAudio = await loadCampaignAudio(session.campaignId);
-                if (campaignAudio) {
-                  log.info({ campaignId: session.campaignId, size: campaignAudio.length }, "voicebot: loaded campaign audio file");
-                  const wavParsed = parseWavToPcmS16leMono(campaignAudio);
-                  if (wavParsed) {
-                    let pcm = wavParsed.pcm;
-                    const sr = session.mediaFormat.sample_rate;
-                    if (wavParsed.sampleRate !== sr) {
-                      pcm = resamplePcm16(pcm, wavParsed.sampleRate, sr);
-                    }
-                    session.ttsInProgress = true;
-                    log.info({ pcm_length: pcm.length }, "voicebot: sending campaign PCM to Exotel");
-                    await sendAudioPaced(socket, session, pcm, log);
-                    session.ttsInProgress = false;
-                    schedulePlaybackMarkFallback(session, pcm.length, sr, log);
+                const campaignRes = await pool.query(
+                  "SELECT script_text, language_code FROM outbound_campaigns WHERE id = $1",
+                  [session.campaignId]
+                );
+                
+                if (campaignRes.rows.length > 0 && campaignRes.rows[0].script_text) {
+                  const scriptText = campaignRes.rows[0].script_text;
+                  const langCode = campaignRes.rows[0].language_code || "en-IN";
+                  log.info({ campaignId: session.campaignId, chars: scriptText.length }, "voicebot: synthesizing realtime TTS for campaign script");
+                  
+                  await speakToExotel(socket, session, scriptText, langCode, log);
 
-                    // Link to chat session as initial bot message
-                    await pool.query(
-                      "SELECT script_text FROM outbound_campaigns WHERE id = $1",
-                      [session.campaignId]
-                    ).then(r => {
-                      if (r.rows.length > 0) {
-                        appendAssistantChatLine(session!, r.rows[0].script_text, "campaign_script");
-                      }
-                    });
-                  } else {
-                    log.error({ campaignId: session.campaignId }, "voicebot: parseWavToPcmS16leMono failed for campaign audio");
-                  }
+                  // Link to chat session as initial bot message
+                  appendAssistantChatLine(session!, scriptText, "campaign_script");
                 } else {
-                  log.error({ campaignId: session.campaignId }, "voicebot: campaign audio file not found");
+                  log.warn({ campaignId: session.campaignId }, "voicebot: campaign script not found in db");
                 }
                 break;
               }
