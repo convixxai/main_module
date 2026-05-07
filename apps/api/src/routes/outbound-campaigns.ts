@@ -29,6 +29,14 @@ const addLeadsSchema = z.object({
   phone_numbers: z.array(z.string().min(3)).min(1),
 });
 
+const normalOutboundCallSchema = z.object({
+  phone_number: z.string().min(3),
+});
+
+const triggerCampaignSchema = z.object({
+  phone_numbers: z.array(z.string().min(3)).optional(),
+});
+
 export async function outboundCampaignRoutes(app: FastifyInstance) {
   // 1. Create Campaign
   app.post(
@@ -129,7 +137,13 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
     { preHandler: apiKeyAuth },
     async (request: AuthenticatedRequest, reply) => {
       const { id } = request.params as { id: string };
+      const body = triggerCampaignSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.status(400).send({ error: body.error.flatten() });
+      }
+
       const customerId = request.customerId!;
+      const { phone_numbers } = body.data;
 
       const campaignRes = await pool.query(
         "SELECT * FROM outbound_campaigns WHERE id = $1 AND customer_id = $2",
@@ -148,6 +162,27 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       const customerSettings = await getCustomerSettings(customerId);
       if (!settings || !settings.is_enabled) {
         return reply.status(400).send({ error: "Exotel not configured" });
+      }
+
+      // If phone_numbers provided, add them as leads first
+      if (phone_numbers && phone_numbers.length > 0) {
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          for (const phone of phone_numbers) {
+            await client.query(
+              "INSERT INTO outbound_campaign_leads (campaign_id, phone_number) VALUES ($1, $2)",
+              [id, phone]
+            );
+          }
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          app.log.error({ err }, "Failed to add leads during trigger");
+          return reply.status(500).send({ error: "Failed to add leads" });
+        } finally {
+          client.release();
+        }
       }
 
       // Update status to running
@@ -265,6 +300,80 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       );
 
       return reply.send({ message: "Campaign deleted and audio file removed" });
+    }
+  );
+
+  // 5. Normal Outbound Call (No campaign)
+  app.post(
+    "/outbound/call",
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      const body = normalOutboundCallSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.status(400).send({ error: body.error.flatten() });
+      }
+
+      const customerId = request.customerId!;
+      const { phone_number } = body.data;
+
+      const settings = await getExotelSettings(customerId);
+      const customerSettings = await getCustomerSettings(customerId);
+      if (!settings || !settings.is_enabled) {
+        return reply.status(400).send({ error: "Exotel not configured" });
+      }
+
+      try {
+        const streamUrl = voicebotUrlsForCustomer(customerId, request).voicebot_wss_url;
+        
+        const pendingSessionId = await createCallSession({
+          customerId,
+          callSid: null,
+          streamSid: null,
+          direction: "outbound",
+          fromNumber: settings.default_outbound_caller_id || settings.inbound_phone_number || "",
+          toNumber: phone_number,
+          chatSessionId: null,
+          metadata: {
+            source: "normal_outbound",
+          },
+          voicebotMultilingual: customerSettings?.voicebot_multilingual,
+          defaultLanguageCode: customerSettings?.default_language_code,
+          currentLanguageCode: customerSettings?.default_language_code,
+        });
+
+        const customField = `ccs=${pendingSessionId}`;
+        const callerId = settings.default_outbound_caller_id || settings.inbound_phone_number;
+
+        const exotelResult = await exotelConnectCall({
+          accountSid: settings.exotel_account_sid!,
+          apiKey: settings.exotel_api_key!,
+          apiToken: settings.exotel_api_token!,
+          restApiBaseUrl: restApiBaseUrlFromSubdomain(settings.exotel_subdomain) || undefined,
+          from: phone_number,
+          to: settings.default_outbound_caller_id || settings.inbound_phone_number || "",
+          callerId: callerId!,
+          streamUrl,
+          streamBegin: "atLeg2connect",
+          customField,
+        });
+
+        const callSid = exotelResult.call?.Sid;
+        if (callSid) {
+          await pool.query(
+            "UPDATE exotel_call_sessions SET exotel_call_sid = $1 WHERE id = $2",
+            [callSid, pendingSessionId]
+          );
+        }
+
+        return reply.send({
+          message: "Outbound call initiated",
+          call_sid: callSid,
+          session_id: pendingSessionId
+        });
+      } catch (err) {
+        app.log.error({ err, phone_number }, "Failed to trigger normal outbound call");
+        return reply.status(500).send({ error: "Internal Server Error" });
+      }
     }
   );
 }

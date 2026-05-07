@@ -3828,6 +3828,44 @@
         }
       }
     },
+    "/outbound/call": {
+      "post": {
+        "tags": ["Exotel Voicebot"],
+        "summary": "Normal outbound call",
+        "description": "Initiates a single outbound PSTN call using the tenant's default agent greeting and settings (no campaign script). Requires `x-api-key`.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["phone_number"],
+                "properties": {
+                  "phone_number": { "type": "string", "example": "+91XXXXXXXXXX" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Call initiated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Outbound call initiated",
+                  "call_sid": "...",
+                  "session_id": "..."
+                }
+              }
+            }
+          },
+          "400": { "description": "Exotel not configured" },
+          "500": { "description": "Internal Server Error" }
+        }
+      }
+    },
     "/outbound/campaigns/{id}": {
       "delete": {
         "tags": ["Outbound Campaigns"],
@@ -3870,11 +3908,19 @@
       "post": {
         "tags": ["Outbound Campaigns"],
         "summary": "Trigger campaign calls",
-        "description": "Initiates outbound calls to all leads in the campaign that are in 'pending' status.",
+        "description": "Initiates outbound calls to all leads in the campaign that are in 'pending' status. Optionally accepts a list of phone numbers to add as leads before triggering.",
         "security": [{ "ApiKey": [] }],
         "parameters": [
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OutboundCampaignLeadsAdd" }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Campaign finished triggering",
