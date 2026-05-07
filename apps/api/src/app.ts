@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
+import formbody from "@fastify/formbody";
 import { healthRoutes } from "./routes/health";
 import { customerRoutes } from "./routes/customers";
 import { kbRoutes } from "./routes/kb";
@@ -33,6 +34,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   registerRequestLogging(app);
   await app.register(cors, { origin: true }); // Allow all origins (required for Swagger UI Try it out)
   await app.register(websocket);               // Enable WebSocket support for Exotel Voicebot
+  await app.register(formbody);                // Parse application/x-www-form-urlencoded (Exotel StatusCallbacks)
   await registerSwagger(app);
 
   app.register(healthRoutes);
