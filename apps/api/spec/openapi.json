@@ -67,6 +67,10 @@
     {
       "name": "Admin logs",
       "description": "Daily rotating API log files on disk (`convixx-YYYY-MM-DD.log`). Listing and download require `x-admin-token`. Logs are written whenever the server process runs (PM2, systemd, etc.), not only when an SSH session is open."
+    },
+    {
+      "name": "Outbound Campaigns",
+      "description": "Manage outbound call campaigns. Set up scripts (script-to-audio), add leads, and trigger automated calls. Requires `x-api-key`."
     }
   ],
   "components": {
@@ -606,6 +610,40 @@
           "next_page_token": {
             "type": "string",
             "description": "Pass to `next_page_token` query param for the next page (ElevenLabs)."
+          }
+        }
+      },
+      "OutboundCampaign": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "customer_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "script_text": { "type": "string" },
+          "language_code": { "type": "string", "default": "en-IN" },
+          "status": { "type": "string", "enum": ["draft", "ready", "running", "completed", "deleted"] },
+          "audio_file_path": { "type": "string", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "OutboundCampaignCreate": {
+        "type": "object",
+        "required": ["name", "script_text"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "script_text": { "type": "string", "minLength": 1 },
+          "language_code": { "type": "string", "default": "en-IN" }
+        }
+      },
+      "OutboundCampaignLeadsAdd": {
+        "type": "object",
+        "required": ["phone_numbers"],
+        "properties": {
+          "phone_numbers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
           }
         }
       }
@@ -3762,6 +3800,93 @@
         ],
         "responses": {
           "200": { "description": "Updated avatar", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ElevenlabsAvatar" } } } },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/outbound/campaigns": {
+      "post": {
+        "tags": ["Outbound Campaigns"],
+        "summary": "Create campaign",
+        "description": "Creates an outbound campaign and generates script audio using TTS. Audio is stored temporarily until campaign is deleted.",
+        "security": [{ "ApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OutboundCampaignCreate" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OutboundCampaign" } } }
+          },
+          "400": { "description": "Validation error" },
+          "502": { "description": "TTS generation failed" }
+        }
+      }
+    },
+    "/outbound/campaigns/{id}": {
+      "delete": {
+        "tags": ["Outbound Campaigns"],
+        "summary": "Delete campaign",
+        "description": "Soft deletes the campaign and removes the generated audio file from the server.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Deleted", "content": { "application/json": { "example": { "message": "Campaign deleted" } } } },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/outbound/campaigns/{id}/leads": {
+      "post": {
+        "tags": ["Outbound Campaigns"],
+        "summary": "Add leads to campaign",
+        "description": "Adds one or more phone numbers to the campaign lead list.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OutboundCampaignLeadsAdd" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Leads added", "content": { "application/json": { "example": { "message": "10 leads added to campaign" } } } },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/outbound/campaigns/{id}/trigger": {
+      "post": {
+        "tags": ["Outbound Campaigns"],
+        "summary": "Trigger campaign calls",
+        "description": "Initiates outbound calls to all leads in the campaign that are in 'pending' status.",
+        "security": [{ "ApiKey": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campaign finished triggering",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Campaign triggering process finished",
+                  "results": { "total": 10, "triggered": 8, "failed": 2 }
+                }
+              }
+            }
+          },
           "404": { "description": "Not found" }
         }
       }

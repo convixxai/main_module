@@ -16,6 +16,7 @@ import { exotelSettingsRoutes } from "./routes/exotel-settings";
 import { exotelOutboundCallRoutes } from "./routes/exotel-outbound-call";
 import { exotelStatusCallbackRoutes } from "./routes/exotel-status-callback";
 import { adminLogsRoutes } from "./routes/adminLogs";
+import { outboundCampaignRoutes } from "./routes/outbound-campaigns";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -49,6 +50,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(exotelOutboundCallRoutes);       // Exotel outbound dial (REST Connect API)
   app.register(exotelStatusCallbackRoutes);      // Exotel HTTP StatusCallback (answered)
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)
+  app.register(outboundCampaignRoutes);         // Outbound Campaign management & triggering
 
   return app;
 }

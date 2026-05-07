@@ -10,6 +10,8 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { WebSocket } from "ws";
+import fs from "fs";
+import path from "path";
 import { pool } from "../config/db";
 import { env } from "../config/env";
 import {
@@ -225,6 +227,18 @@ function pcmRmsEnergy(pcm: Buffer): number {
     sumSq += sample * sample;
   }
   return Math.sqrt(sumSq / sampleCount);
+}
+
+/** Load pre-rendered campaign audio script from file. */
+async function loadCampaignAudio(campaignId: string): Promise<Buffer | null> {
+  const result = await pool.query(
+    "SELECT audio_file_path FROM outbound_campaigns WHERE id = $1",
+    [campaignId]
+  );
+  if (result.rows.length === 0 || !result.rows[0].audio_file_path) return null;
+  const filePath = result.rows[0].audio_file_path;
+  if (!fs.existsSync(filePath)) return null;
+  return fs.readFileSync(filePath);
 }
 
 /** If Exotel never sends inbound `mark` after our outbound audio, unblock STT after this slack past estimated play time. */
@@ -3544,6 +3558,18 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 customParameters: details.custom_parameters,
               });
 
+              const campaignId = details.custom_parameters?.campaign_id;
+              if (campaignId) {
+                session.mode = "outbound_campaign";
+                session.campaignId = campaignId;
+                session.waitingForFirstSpeech = true;
+                log.info({ campaignId }, "voicebot: identified as outbound campaign call");
+              } else if (outboundLinkedId) {
+                session.mode = "outbound";
+              } else {
+                session.mode = "inbound";
+              }
+
               log.info({
                 stream_sid: details.stream_sid,
                 call_sid: details.call_sid,
@@ -3616,19 +3642,29 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 );
                 notifyCallStartFromSession(session);
                 scheduleMaxCallDurationTimer(session, socket, log);
-                await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
-                voiceTrace(log, "call.session_ready", {
-                  customerId,
-                  chat_session_id: session.chatSessionId,
-                  exotel_call_session_id: session.callSessionDbId,
-                  stream_sid: session.streamSid,
-                  call_sid: session.callSid,
-                });
+                
+                if (session.mode === "outbound_campaign") {
+                  log.info({ stream_sid: session.streamSid }, "voicebot: campaign mode — waiting for first customer speech before playing script");
+                  session.greetingPending = false; // Not really "pending" in the traditional sense
+                } else {
+                  await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
+                  voiceTrace(log, "call.session_ready", {
+                    customerId,
+                    chat_session_id: session.chatSessionId,
+                    exotel_call_session_id: session.callSessionDbId,
+                    stream_sid: session.streamSid,
+                    call_sid: session.callSid,
+                  });
+                }
               } catch (err) {
                 log.error({ err }, "voicebot: failed to bootstrap chat/call session rows");
               }
 
               try {
+                if (session.mode === "outbound_campaign") {
+                  // Skip immediate greeting for campaigns
+                  break;
+                }
                 if (voiceTtsCanRun(session)) {
                   logVoiceStage(log, "greeting.sending", {
                     customerId,
@@ -3758,6 +3794,40 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               // A simple timeout-based VAD would never fire because chunks always arrive.
               // Instead, measure the audio energy (loudness) to distinguish speech from silence.
               const isSpeech = energy > vadEnergyThresholdForListening(session);
+
+              if (isSpeech && session.waitingForFirstSpeech && session.campaignId) {
+                session.waitingForFirstSpeech = false;
+                log.info({ campaignId: session.campaignId }, "voicebot: customer speech detected — playing campaign script");
+                
+                const campaignAudio = await loadCampaignAudio(session.campaignId);
+                if (campaignAudio) {
+                  const wavParsed = parseWavToPcmS16leMono(campaignAudio);
+                  if (wavParsed) {
+                    let pcm = wavParsed.pcm;
+                    const sr = session.mediaFormat.sample_rate;
+                    if (wavParsed.sampleRate !== sr) {
+                      pcm = resamplePcm16(pcm, wavParsed.sampleRate, sr);
+                    }
+                    session.ttsInProgress = true;
+                    sendAudioToExotel(socket, session, pcm, log);
+                    session.ttsInProgress = false;
+                    schedulePlaybackMarkFallback(session, pcm.length, sr, log);
+                    
+                    // Link to chat session as initial bot message
+                    await pool.query(
+                      "SELECT script_text FROM outbound_campaigns WHERE id = $1",
+                      [session.campaignId]
+                    ).then(r => {
+                      if (r.rows.length > 0) {
+                        appendAssistantChatLine(session!, r.rows[0].script_text, "campaign_script");
+                      }
+                    });
+                  }
+                } else {
+                  log.error({ campaignId: session.campaignId }, "voicebot: campaign audio file not found");
+                }
+                break;
+              }
 
               if (isSpeech) {
                 // Caller is speaking — buffer this chunk

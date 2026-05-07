@@ -183,6 +183,12 @@ export interface VoicebotSession {
     targetLanguage: string;
     fromLanguage: string;
   } | null;
+  /** Call mode: 'inbound', 'outbound', or 'outbound_campaign'. */
+  mode?: "inbound" | "outbound" | "outbound_campaign";
+  /** If in campaign mode, true until the customer speaks for the first time. */
+  waitingForFirstSpeech?: boolean;
+  /** Linked campaign ID if in campaign mode. */
+  campaignId?: string | null;
 }
 
 /**
@@ -232,6 +238,9 @@ export function createSession(params: {
     lastUserQuery: null,
     lastBotResponse: null,
     consecutiveRepeatCount: 0,
+    mode: "inbound", // default
+    waitingForFirstSpeech: false,
+    campaignId: null,
   };
 
   activeSessions.set(params.streamSid, session);
