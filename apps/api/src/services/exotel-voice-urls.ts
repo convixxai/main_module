@@ -14,6 +14,6 @@ export function voicebotUrlsForCustomer(
   return {
     voicebot_wss_url: `${wsProto}://${host}/exotel/voicebot/${customerId}`,
     voicebot_bootstrap_https_url: `${proto}://${host}/exotel/voicebot/bootstrap/${customerId}`,
-    voicebot_status_callback_url: `${proto}://${host}/exotel/voicebot/status-callback`,
+    voicebot_status_callback_url: `${proto}://${host}/exotel-callback/status`,
   };
 }
