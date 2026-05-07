@@ -3535,6 +3535,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               }
 
               let outboundLinkedId: string | null = null;
+              let outboundMetadata: Record<string, unknown> | null = null;
+              
               const outboundIdCandidate = extractOutboundSessionIdFromCustomParameters(
                 details.custom_parameters as Record<string, string> | undefined
               );
@@ -3551,8 +3553,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   );
                 } else {
                   outboundLinkedId = outboundIdCandidate;
-                  const om = oCheck.rows[0].metadata as Record<string, unknown> | null;
-                  if (om?.callee_answered !== true) {
+                  outboundMetadata = oCheck.rows[0].metadata as Record<string, unknown> | null;
+                  if (outboundMetadata?.callee_answered !== true) {
                     // We no longer block here; we rely on VAD in the media handler
                   }
                 }
@@ -3573,12 +3575,12 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   );
                   if (fb.rows.length > 0) {
                     outboundLinkedId = fb.rows[0].id as string;
-                    const om = fb.rows[0].metadata as Record<string, unknown> | null;
+                    outboundMetadata = fb.rows[0].metadata as Record<string, unknown> | null;
                     log.info(
                       { outboundLinkedId, customerId },
                       "voicebot: matched outbound session by From/To digits (CustomField missing)"
                     );
-                    if (om?.callee_answered !== true) {
+                    if (outboundMetadata?.callee_answered !== true) {
                       // We no longer block here; we rely on VAD in the media handler
                     }
                   }
@@ -3596,12 +3598,12 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   );
                   if (bySid.rows.length > 0) {
                     outboundLinkedId = bySid.rows[0].id as string;
-                    const om = bySid.rows[0].metadata as Record<string, unknown> | null;
+                    outboundMetadata = bySid.rows[0].metadata as Record<string, unknown> | null;
                     log.info(
                       { outboundLinkedId, customerId, call_sid: csid },
                       "voicebot: matched outbound session by Exotel CallSid (ccs / From-To fallback unused)"
                     );
-                    if (om?.callee_answered !== true) {
+                    if (outboundMetadata?.callee_answered !== true) {
                       // We no longer block here; we rely on VAD in the media handler
                     }
                   }
@@ -3622,10 +3624,10 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 customParameters: details.custom_parameters,
               });
 
-              const campaignId = details.custom_parameters?.campaign_id;
+              const campaignId = details.custom_parameters?.campaign_id || outboundMetadata?.campaign_id;
               if (campaignId) {
                 session.mode = "outbound_campaign";
-                session.campaignId = campaignId;
+                session.campaignId = String(campaignId);
                 session.waitingForFirstSpeech = true;
                 log.info({ campaignId }, "voicebot: identified as outbound campaign call");
               } else if (outboundLinkedId) {
