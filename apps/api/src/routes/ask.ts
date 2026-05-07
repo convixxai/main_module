@@ -653,10 +653,12 @@ async function runAskPipeline(params: {
 
   const topMatch = matches[0];
   const topDistance = Number(topMatch.distance);
+  const isShortQuery = question.trim().length < 20;
   const definitelyOutOfScope =
     allowRelatedGeneralAnswers &&
+    !isShortQuery &&
     Number.isFinite(topDistance) &&
-    topDistance > relatedScopeTh;
+    topDistance > 0.8;
 
   if (definitelyOutOfScope) {
     trace?.("pipeline_exit", {

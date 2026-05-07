@@ -631,7 +631,7 @@ function persistSessionActiveLanguage(
   const n = normalizeBcp47Tag(lang);
   session.currentLanguageCode = n;
   if (session.callSessionDbId) {
-    void updateExotelCallSessionLanguage(session.callSessionDbId, n).catch(() => {});
+    void updateExotelCallSessionLanguage(session.callSessionDbId, n).catch(() => { });
   }
   voiceTrace(log, "voicebot.language.active_updated", {
     customerId: session.customerId,
@@ -955,7 +955,7 @@ async function bootstrapVoicebotChatSession(
   if (agentsResult.rows.length > 0) {
     const row = agentsResult.rows[0];
     session.agentId = row.id as string;
-    
+
     session.greetingText = row.greeting_text;
     session.errorText = row.error_text;
     session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
@@ -1049,7 +1049,7 @@ async function appendVoiceTurnToChat(
   if (!session.chatSessionId) return;
 
   if (userText && userText !== session.lastUserQuery) {
-    appendUserChatLine(session, userText).catch(() => {});
+    appendUserChatLine(session, userText).catch(() => { });
   }
   await appendAssistantChatLine(session, assistantText, opts?.assistantSource || "voice", opts?.openaiCostUsd);
 
@@ -1345,10 +1345,10 @@ async function speakToExotel(
       }): Promise<
         | { ok: false; status: number; body: unknown }
         | {
-            ok: true;
-            pcmOut: Buffer;
-            contentType: string | undefined;
-          }
+          ok: true;
+          pcmOut: Buffer;
+          contentType: string | undefined;
+        }
       > {
         if (elTts.status !== 200) {
           return { ok: false, status: elTts.status, body: elTts.body };
@@ -1964,7 +1964,7 @@ function createStreamingVoiceTts(
   return {
     async pushDelta(text: string): Promise<void> {
       buffer += text;
-      for (;;) {
+      for (; ;) {
         const cut = cutAt(buffer);
         if (cut < 0) break;
         const piece = buffer.slice(0, cut + 1).trim();
@@ -2288,26 +2288,26 @@ async function processUtterance(
   const sttModelForPath = (csUtterance?.stt_model ?? "saaras:v3").trim();
   const sttImplLine: "websocket" | "batch" =
     sttProvider === "sarvam" &&
-    session.sttStreamingForVoice === true &&
-    sarvamSttWebsocketModelSupported(sttModelForPath)
+      session.sttStreamingForVoice === true &&
+      sarvamSttWebsocketModelSupported(sttModelForPath)
       ? "websocket"
       : "batch";
 
-    voiceTrace(log, "pipeline.stt.request", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      call_sid: session.callSid,
-      exotel_call_session_id: session.callSessionDbId,
-      wav_pcm_bytes: combinedPcm.length,
-      sample_rate: session.mediaFormat.sample_rate,
-      stt_provider: sttProvider,
-      stt_streaming_enabled: session.sttStreamingForVoice === true,
-      stt_implementation: sttImplLine,
-      multilingual,
-      customer_query_count_before: session.customerQueryCount ?? 0,
-      elevenlabs_stt_full_auto: env.voicebot.elevenlabsSttFullAuto,
-      sarvam_stt_full_auto: env.voicebot.sarvamSttFullAuto,
-    });
+  voiceTrace(log, "pipeline.stt.request", {
+    customerId: session.customerId,
+    stream_sid: session.streamSid,
+    call_sid: session.callSid,
+    exotel_call_session_id: session.callSessionDbId,
+    wav_pcm_bytes: combinedPcm.length,
+    sample_rate: session.mediaFormat.sample_rate,
+    stt_provider: sttProvider,
+    stt_streaming_enabled: session.sttStreamingForVoice === true,
+    stt_implementation: sttImplLine,
+    multilingual,
+    customer_query_count_before: session.customerQueryCount ?? 0,
+    elevenlabs_stt_full_auto: env.voicebot.elevenlabsSttFullAuto,
+    sarvam_stt_full_auto: env.voicebot.sarvamSttFullAuto,
+  });
 
   try {
     // === Step 1: STT ===
@@ -2339,10 +2339,10 @@ async function processUtterance(
         ? sarvamMultilingualOpenDetect
           ? normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
           : normalizeBcp47Tag(
-              session.currentLanguageCode ||
-                session.defaultLanguageCode ||
-                "en-IN"
-            )
+            session.currentLanguageCode ||
+            session.defaultLanguageCode ||
+            "en-IN"
+          )
         : session.defaultLanguageCode?.trim() || "en-IN";
 
     sttLanguageHint = clampLanguageToAllowed(
@@ -2393,13 +2393,13 @@ async function processUtterance(
         const elMultilingualOpenDetect = priorUserQueryCount < 2;
         elLang = elMultilingualOpenDetect
           ? bcp47ToElevenLabsLanguage(hintBcp47, {
-              multilingual: true,
-              forceEnglish: false,
-            }) ?? "en"
+            multilingual: true,
+            forceEnglish: false,
+          }) ?? "en"
           : bcp47ToElevenLabsLanguage(hintBcp47, {
-              multilingual: true,
-              forceEnglish: false,
-            }) ?? "en";
+            multilingual: true,
+            forceEnglish: false,
+          }) ?? "en";
       }
       voiceTrace(log, "pipeline.stt.elevenlabs_language_hint", {
         customerId: session.customerId,
@@ -2581,7 +2581,7 @@ async function processUtterance(
           void updateExotelCallSessionLanguage(
             session.callSessionDbId,
             session.effectiveSttLanguageThisTurn
-          ).catch(() => {});
+          ).catch(() => { });
         }
 
         const targetLabel = LANG_LABEL[pending.targetLanguage] ?? pending.targetLanguage;
@@ -2735,7 +2735,7 @@ async function processUtterance(
     await applyAgentVoicePersonaToSession(session);
     if (session.callSessionDbId) {
       void updateExotelCallSessionLanguage(session.callSessionDbId, effectiveLanguage).catch(
-        () => {}
+        () => { }
       );
     }
     logVoiceStage(log, "stt.done", {
@@ -2778,7 +2778,7 @@ async function processUtterance(
       stream_sid: session.streamSid,
       err: String(err),
     }, "voicebot utterance failed");
-    await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log).catch(() => {});
+    await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log).catch(() => { });
   }
 }
 
@@ -3049,10 +3049,12 @@ async function runVoicebotAskPipeline(
     };
     const dist = Number(top.distance);
     const relatedScopeTh = relatedScopeDistanceThresholdVoice(session);
+    const isShortQuery = question.trim().length < 20;
     if (
       allowRelatedGeneralAnswersVoice(session) &&
+      !isShortQuery &&
       Number.isFinite(dist) &&
-      dist > relatedScopeTh
+      dist > 0.8
     ) {
       const out = outOfScopeMessageVoice(session);
       voiceTrace(log, "pipeline.rag.out_of_scope_distance_gate", {
@@ -3642,7 +3644,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 );
                 notifyCallStartFromSession(session);
                 scheduleMaxCallDurationTimer(session, socket, log);
-                
+
                 if (session.mode === "outbound_campaign") {
                   log.info({ stream_sid: session.streamSid }, "voicebot: campaign mode — waiting for first customer speech before playing script");
                   session.greetingPending = false; // Not really "pending" in the traditional sense
@@ -3798,7 +3800,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               if (isSpeech && session.waitingForFirstSpeech && session.campaignId) {
                 session.waitingForFirstSpeech = false;
                 log.info({ campaignId: session.campaignId }, "voicebot: customer speech detected — playing campaign script");
-                
+
                 const campaignAudio = await loadCampaignAudio(session.campaignId);
                 if (campaignAudio) {
                   const wavParsed = parseWavToPcmS16leMono(campaignAudio);
@@ -3812,7 +3814,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     sendAudioToExotel(socket, session, pcm, log);
                     session.ttsInProgress = false;
                     schedulePlaybackMarkFallback(session, pcm.length, sr, log);
-                    
+
                     // Link to chat session as initial bot message
                     await pool.query(
                       "SELECT script_text FROM outbound_campaigns WHERE id = $1",
@@ -3972,7 +3974,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
         if (session) {
           notifyCallEndOnce(session, `ws_closed:${code}`);
           if (session.callSessionDbId) {
-            endCallSession(session.callSessionDbId, `ws_closed:${code}`).catch(() => {});
+            endCallSession(session.callSessionDbId, `ws_closed:${code}`).catch(() => { });
           }
           removeSession(session.streamSid);
         }
