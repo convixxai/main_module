@@ -93,6 +93,7 @@ import {
 } from "../services/voicebot-trace";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { createRagTrace } from "../services/rag-trace";
+import { relaxAgentPrompt } from "../services/rag-prompt-utils";
 import { correctUtteranceWithOpenAI } from "../services/llm";
 import {
   fireTenantWebhook,
@@ -2971,6 +2972,7 @@ async function runVoicebotAskPipeline(
       agentPrompt = session.voiceRagAgentCache.systemPrompt;
       agentFallbackInstruction = session.voiceRagAgentCache.fallbackInstruction;
     }
+    agentPrompt = relaxAgentPrompt(agentPrompt, allowRelatedGeneralAnswersVoice(session));
 
     const csRag = tenantCs(session);
     const noKbFallbackInstruction =
@@ -3166,6 +3168,7 @@ async function runVoicebotAskPipeline(
     } else {
       strictnessHint = "- STRICTNESS: BALANCED. Use general knowledge for related topics, but be cautious and mention when you are estimating.";
     }
+
 
     const ragRules = allowRelatedGeneralAnswersVoice(session)
       ? `--- RAG rules ---

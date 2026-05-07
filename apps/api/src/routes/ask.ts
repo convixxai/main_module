@@ -106,6 +106,8 @@ function relatedAnswerStrictnessAsk(cs: CustomerSettings | null): RelatedAnswerS
   return cs?.related_answer_strictness || "balanced";
 }
 
+import { relaxAgentPrompt } from "../services/rag-prompt-utils";
+
 function trimAskHistoryForRag(
   cs: CustomerSettings | null,
   history: ChatMessage[]
@@ -589,7 +591,11 @@ async function runAskPipeline(params: {
     embedding_search_preview: textForEmbedding.slice(0, 240),
   });
 
-  const systemPrompt = agent?.systemPrompt || customerPrompt;
+  const allowRelatedGeneralAnswers = allowRelatedGeneralAnswersAsk(
+    custSettings ?? null
+  );
+  const systemPromptRaw = agent?.systemPrompt || customerPrompt;
+  const systemPrompt = relaxAgentPrompt(systemPromptRaw, allowRelatedGeneralAnswers);
   const agentId = agent?.id || null;
   const agentName = agent?.name || null;
 
@@ -609,9 +615,6 @@ async function runAskPipeline(params: {
 
   const kbLimit = ragTopKAsk(custSettings ?? null);
   const directTh = ragDirectThresholdAsk(custSettings ?? null);
-  const allowRelatedGeneralAnswers = allowRelatedGeneralAnswersAsk(
-    custSettings ?? null
-  );
   const relatedScopeTh = relatedScopeDistanceThresholdAsk(custSettings ?? null);
   const outOfScopeMessage = outOfScopeMessageAsk(custSettings ?? null);
 
