@@ -229,6 +229,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
 
           const { voicebot_wss_url: streamUrl, voicebot_status_callback_url: statusCallback } = voicebotUrlsForCustomer(customerId, request);
           
+          app.log.info({ streamUrl, statusCallback, customerId }, "Triggering outbound campaign call via Exotel");
+          
           const exotelResult = await exotelConnectCall({
             accountSid: settings.exotel_account_sid!,
             apiKey: settings.exotel_api_key!,
@@ -347,6 +349,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         const callerId = settings.default_outbound_caller_id || settings.inbound_phone_number;
 
         const { voicebot_wss_url: streamUrl, voicebot_status_callback_url: statusCallback } = voicebotUrlsForCustomer(customerId, request);
+        
+        app.log.info({ streamUrl, statusCallback, customerId }, "Triggering direct outbound call via Exotel");
         
         const exotelResult = await exotelConnectCall({
           accountSid: settings.exotel_account_sid!,

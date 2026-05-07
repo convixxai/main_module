@@ -3410,7 +3410,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
   // ---- WebSocket endpoint — per-tenant ----
   // Exotel connects here for each call (one WS connection per call).
   app.get<{ Params: { customerId: string } }>(
-    "/exotel/voicebot/:customerId(^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$)",
+    "/exotel/voicebot/:customerId([0-9a-fA-F-]+)",
     { websocket: true },
     async (socket: WebSocket, request) => {
       const { customerId } = request.params;
