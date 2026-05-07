@@ -3830,9 +3830,9 @@
     },
     "/outbound/call": {
       "post": {
-        "tags": ["Exotel Voicebot"],
-        "summary": "Normal outbound call",
-        "description": "Initiates a single outbound PSTN call using the tenant's default agent greeting and settings (no campaign script). Requires `x-api-key`.",
+        "tags": ["Outbound Campaigns"],
+        "summary": "Direct single call",
+        "description": "Initiates a single outbound PSTN call directly to a phone number using the tenant's default agent settings (no campaign script). Bot will speak immediately upon answer.",
         "security": [{ "ApiKey": [] }],
         "requestBody": {
           "required": true,
