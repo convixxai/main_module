@@ -205,7 +205,6 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       // In a real production app, this would be a background queue.
       for (const lead of leads) {
         try {
-          const streamUrl = voicebotUrlsForCustomer(customerId, request).voicebot_wss_url;
           
           const pendingSessionId = await createCallSession({
             customerId,
@@ -228,17 +227,21 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
           const customField = `campaign_id=${id}|ccs=${pendingSessionId}`;
           const callerId = settings.default_outbound_caller_id || settings.inbound_phone_number;
 
+          const { voicebot_wss_url: streamUrl, voicebot_status_callback_url: statusCallback } = voicebotUrlsForCustomer(customerId, request);
+          
           const exotelResult = await exotelConnectCall({
             accountSid: settings.exotel_account_sid!,
             apiKey: settings.exotel_api_key!,
             apiToken: settings.exotel_api_token!,
             restApiBaseUrl: restApiBaseUrlFromSubdomain(settings.exotel_subdomain) || undefined,
             from: lead.phone_number,
-            to: settings.default_outbound_caller_id || settings.inbound_phone_number || "", // This logic might need adjustment depending on how user wants Connect Two Numbers
+            to: settings.default_outbound_caller_id || settings.inbound_phone_number || "",
             callerId: callerId!,
             streamUrl,
             streamBegin: "atLeg2connect",
             customField,
+            statusCallback,
+            statusCallbackEvents: ["answered", "terminal"],
           });
 
           const callSid = exotelResult.call?.Sid;
@@ -323,8 +326,6 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       }
 
       try {
-        const streamUrl = voicebotUrlsForCustomer(customerId, request).voicebot_wss_url;
-        
         const pendingSessionId = await createCallSession({
           customerId,
           callSid: null,
@@ -344,6 +345,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         const customField = `ccs=${pendingSessionId}`;
         const callerId = settings.default_outbound_caller_id || settings.inbound_phone_number;
 
+        const { voicebot_wss_url: streamUrl, voicebot_status_callback_url: statusCallback } = voicebotUrlsForCustomer(customerId, request);
+        
         const exotelResult = await exotelConnectCall({
           accountSid: settings.exotel_account_sid!,
           apiKey: settings.exotel_api_key!,
@@ -355,6 +358,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
           streamUrl,
           streamBegin: "atLeg2connect",
           customField,
+          statusCallback,
+          statusCallbackEvents: ["answered", "terminal"],
         });
 
         const callSid = exotelResult.call?.Sid;

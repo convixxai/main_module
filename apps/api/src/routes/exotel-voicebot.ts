@@ -34,6 +34,7 @@ import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
 import {
   extractOutboundSessionIdFromCustomParameters,
   waitForOutboundCalleeAnswered,
+  statusPayloadIndicatesCalleeLegAnswered,
 } from "../services/exotel-outbound-flow";
 import {
   createSession,
@@ -3372,6 +3373,38 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
       active_sessions: getActiveSessionCount(),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  /**
+   * Exotel StatusCallback handler for outbound calls.
+   * Updates `exotel_call_sessions.metadata.callee_answered` when a human picks up.
+   */
+  app.post("/exotel/voicebot/status-callback", async (request, reply) => {
+    const payload = request.body as Record<string, any>;
+    const log = request.log;
+
+    const callSid = payload.CallSid || payload.call_sid;
+    const eventType = payload.EventType || payload.event_type;
+
+    log.info({ callSid, eventType }, "Exotel StatusCallback received");
+
+    if (callSid && eventType?.toLowerCase() === "answered") {
+      // Check if this indicates the second leg (callee) answered
+      // Note: We use a utility from exotel-outbound-flow for deep leg check if available
+      const isCalleeAnswered = statusPayloadIndicatesCalleeLegAnswered(payload);
+      
+      if (isCalleeAnswered) {
+        log.info({ callSid }, "Exotel StatusCallback: Callee answered, updating session metadata");
+        await pool.query(
+          `UPDATE exotel_call_sessions 
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"callee_answered": true}'::jsonb
+           WHERE exotel_call_sid = $1`,
+          [callSid]
+        );
+      }
+    }
+
+    return reply.send({ status: "ok" });
   });
 
   // ---- WebSocket endpoint — per-tenant ----
