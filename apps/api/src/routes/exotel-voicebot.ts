@@ -3661,6 +3661,28 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 }
               }
 
+              // --- INVERTED CALL FALLBACK ---
+              // If From and To are identical, it's likely an inbound webhook triggered by Leg 1 of an inverted Connect Two Numbers call.
+              // In this case, Exotel drops the CustomField and changes the CallSid.
+              // We can match it to the most recently created outbound session for this customer.
+              if (!outboundLinkedId && details.from && details.to && details.from === details.to) {
+                const recent = await pool.query(
+                  `SELECT id, metadata FROM exotel_call_sessions
+                   WHERE customer_id = $1::uuid AND direction = 'outbound'
+                     AND created_at > NOW() - INTERVAL '30 seconds'
+                   ORDER BY created_at DESC LIMIT 1`,
+                  [customerId]
+                );
+                if (recent.rows.length > 0) {
+                  outboundLinkedId = recent.rows[0].id as string;
+                  outboundMetadata = recent.rows[0].metadata as Record<string, unknown> | null;
+                  log.info(
+                    { outboundLinkedId, customerId, from: details.from, campaignId: outboundMetadata?.campaign_id },
+                    "voicebot: matched inverted outbound session by recent timestamp"
+                  );
+                }
+              }
+
               session = createSession({
                 streamSid: details.stream_sid,
                 callSid: details.call_sid,
