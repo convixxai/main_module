@@ -60,6 +60,8 @@ export interface VoicebotSession {
   markCounter: number;
   /** Set of mark names sent but not yet acknowledged. */
   pendingMarks: Set<string>;
+  /** If set, ignore incoming audio until this timestamp to prevent tail echo (used in outbound calls). */
+  echoCancellationEndTime?: number;
   /** True after outbound media is sent until Exotel acknowledges all `mark` events (playback finished). */
   isSpeaking: boolean;
   /** True while Sarvam TTS is in flight (before PCM is sent); inbound should not drive STT/VAD yet. */

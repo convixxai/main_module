@@ -3955,9 +3955,13 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               const pcm = decodeBase64Pcm(mediaMsg.media.payload);
 
               const energy = pcmRmsEnergy(pcm);
-              // While agent audio is generating or Exotel has not yet ack'd playback via `mark`,
-              // discard inbound unless immediate barge-in clears playback state.
-              if (session.ttsInProgress || session.pendingMarks.size > 0) {
+              // While agent audio is generating, Exotel has not yet ack'd playback via `mark`,
+              // or within the outbound echo grace period, discard inbound unless immediate barge-in clears playback state.
+              if (
+                session.ttsInProgress ||
+                session.pendingMarks.size > 0 ||
+                (session.echoCancellationEndTime && Date.now() < session.echoCancellationEndTime)
+              ) {
                 if (!tryImmediateBargeInReset(session, energy, log)) {
                   break;
                 }
@@ -4054,6 +4058,13 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   session.inboundPcm = [];
                   session.inboundBytes = 0;
                   if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
+                  
+                  // For outbound calls, add a 1.5s grace period after playback finishes
+                  // to ignore the telephony tail echo of the bot's own voice.
+                  if (session.mode === "outbound" || session.mode === "outbound_campaign") {
+                    session.echoCancellationEndTime = Date.now() + 1500;
+                  }
+
                   log?.info({
                     stream_sid: session.streamSid,
                     mark: markName,
