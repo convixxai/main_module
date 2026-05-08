@@ -1181,12 +1181,14 @@ function sendAudioToExotel(
   options?: { omitMark?: boolean }
 ): void {
   const omitMark = options?.omitMark === true;
-  const chunkBuffer = new PcmChunkBuffer();
-  const chunks = chunkBuffer.push(pcmBuffer);
+  const chunks = session.outboundBuffer.push(pcmBuffer);
   const flushed: Buffer[] = [];
-  let piece: Buffer | null;
-  while ((piece = chunkBuffer.flush()) !== null) {
-    flushed.push(piece);
+  
+  if (!omitMark) {
+    let piece: Buffer | null;
+    while ((piece = session.outboundBuffer.flush()) !== null) {
+      flushed.push(piece);
+    }
   }
 
   const allChunks = flushed.length > 0 ? [...chunks, ...flushed] : chunks;
@@ -1251,7 +1253,7 @@ function sendAudioToExotel(
   });
 
   // Send a mark after the last chunk so we know when playback completes
-  if (allChunks.length > 0 && !omitMark) {
+  if (!omitMark) {
     sendExotelPlaybackMark(ws, session, log);
   }
 }
@@ -1563,7 +1565,7 @@ async function speakToExotel(
               : Buffer.from(pcmAcc);
 
           schedulePlaybackMarkFallback(session, totalBytes, exotelRate, log);
-          sendExotelPlaybackMark(ws, session, log);
+          sendAudioToExotel(ws, session, Buffer.alloc(0), log, { omitMark: false });
           logVoiceStage(log, "tts.sent_to_exotel", {
             customerId: session.customerId,
             stream_sid: session.streamSid,
@@ -1779,7 +1781,7 @@ async function speakToExotel(
           log?.warn({ stream_sid: session.streamSid }, "voicebot incremental TTS yielded 0 bytes");
           return false;
         }
-        sendExotelPlaybackMark(ws, session, log);
+        sendAudioToExotel(ws, session, Buffer.alloc(0), log, { omitMark: false });
         schedulePlaybackMarkFallback(session, totalPcmBytes, exotelRate, log);
         logVoiceStage(log, "tts.sent_to_exotel", {
           customerId: session.customerId,
