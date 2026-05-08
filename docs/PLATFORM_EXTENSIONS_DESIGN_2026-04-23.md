@@ -362,7 +362,7 @@ CREATE TABLE avatars (
   --               "tts_speaker":"asha","tts_pace":0.95},
   --     "en-IN": {"tts_provider":"elevenlabs",
   --               "tts_model":"eleven_multilingual_v2",
-  --               "tts_speaker":"21m00Tcm4TlvDq8ikWAM"}
+  --               "tts_speaker":"2cdvnKJ5TZi631y5PN1s"}
   --   }
   language_voice_map        JSONB NOT NULL DEFAULT '{}'::jsonb,
 

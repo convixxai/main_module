@@ -10,7 +10,7 @@ const ELEVEN_BASE = "https://api.elevenlabs.io";
  * library voices, set `ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID` or an `elevenlabs_avatars`
  * row on a paid plan.
  */
-export const ELEVENLABS_PREMADE_API_SAFE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+export const ELEVENLABS_PREMADE_API_SAFE_VOICE_ID = "2cdvnKJ5TZi631y5PN1s";
 
 /** @alias {@link ELEVENLABS_PREMADE_API_SAFE_VOICE_ID} — default when no other voice is configured */
 export const ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID =
@@ -446,7 +446,7 @@ export async function* elevenLabsTextToSpeechStreamIncremental(
   }
   const reader = (res.body as ReadableStream<Uint8Array>).getReader();
   try {
-    for (;;) {
+    for (; ;) {
       const { done, value } = await reader.read();
       if (done) break;
       if (value && value.length > 0) yield Buffer.from(value);
