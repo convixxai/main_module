@@ -2103,6 +2103,15 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
         const langCode = campaignRes.rows[0].language_code || "en-IN";
         log?.info({ campaignId: session.campaignId, chars: scriptText.length }, "voicebot: synthesizing realtime TTS for campaign script");
         
+        // Lock the session into the campaign's language for the rest of the call
+        session.currentLanguageCode = langCode;
+        if (session.callSessionDbId) {
+          pool.query(
+            "UPDATE exotel_call_sessions SET current_language_code = $1 WHERE id = $2::uuid",
+            [langCode, session.callSessionDbId]
+          ).catch((e) => log?.error({ err: e }, "failed to update call session language"));
+        }
+        
         await speakToExotel(ws, session, scriptText, langCode, log);
 
         // Link to chat session as initial bot message
