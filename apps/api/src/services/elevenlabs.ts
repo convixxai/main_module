@@ -190,24 +190,35 @@ export type ElevenLabsTtsParams = {
   /** e.g. wav_8000, pcm_16000 — see ElevenLabs docs */
   outputFormat: string;
   voiceSettings?: ElevenLabsVoiceSettingsPayload | null;
+  /** ISO-639-1/3 (e.g. `mr`, `hi`); improves pronunciation for Indian languages on turbo/multilingual models. */
+  languageCode?: string | null;
 };
 
-/** Defaults when synthesizing with `eleven_v3`. */
+/** Defaults when synthesizing with `eleven_v3` (expressive, phone-oriented). */
 export const ELEVENLABS_V3_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
-  stability: 0.55,
+  stability: 0.45,
   similarity_boost: 0.85,
-  style: 0.15,
+  style: 0.28,
   use_speaker_boost: true,
-  speed: 1.0,
+  speed: 0.95,
 };
 
-/** Defaults for turbo/flash and other non‑v3 models (telephony-oriented). */
+/**
+ * Defaults for `eleven_turbo_v2_5`, `eleven_flash_v2_5`, and other non‑v3 models.
+ * Tuned for natural conversational telephony (lower stability, higher style, speaker boost on).
+ */
 export const ELEVENLABS_TURBO_FLASH_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
-  stability: 0.65,
-  similarity_boost: 0.8,
-  style: 0.05,
-  use_speaker_boost: false,
-  speed: 1.05,
+  stability: 0.45,
+  similarity_boost: 0.85,
+  style: 0.3,
+  use_speaker_boost: true,
+  speed: 0.95,
+};
+
+/** ElevenLabs TTS fields that improve multilingual pronunciation and spoken numbers/dates. */
+export const ELEVENLABS_TTS_HUMANIZATION_DEFAULTS = {
+  apply_text_normalization: "auto" as const,
+  apply_language_text_normalization: true,
 };
 
 function defaultVoiceSettingsForModel(
@@ -292,19 +303,63 @@ export function prepareTextForElevenLabsTts(text: string, modelId: string): stri
   return normalizeElevenV3AudioTagsInText(capped);
 }
 
-/** Append to RAG system prompts when tenant TTS is ElevenLabs but `tts_model` is not `eleven_v3`. */
-export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs TTS delivery (phone call) ---
-Your response will be read aloud by text-to-speech on a live phone call.
+/**
+ * Core ElevenLabs-only system prompt block: how the LLM should write text so TTS sounds like a
+ * real human on a phone call. Appended for every tenant with `tts_provider = 'elevenlabs'`.
+ */
+export const ELEVENLABS_HUMAN_PHONE_DELIVERY_RULE = `--- ElevenLabs TTS: sound like a real human on a live phone call (mandatory) ---
+Your entire reply will be read aloud by text-to-speech on a LIVE phone call. Write exactly what a warm, competent human agent would SAY out loud—not what they would type in chat, email, or a FAQ page.
 
-Rules:
-- Keep answers to 1-3 SHORT sentences. Phone listeners can't absorb long answers.
-- Use commas and periods where a human would naturally pause or breathe.
-- Write like you're talking, not writing. Use contractions (don't, we're, that's).
-- Start responses warmly but briefly ("Sure!", "Of course.", "Great question.").
-- DO NOT use bullet points, numbered lists, markdown, or any formatting.
-- DO NOT use square brackets, parentheses, or special characters like [happy] or [sighs].
-- Prefer simple, everyday words over formal vocabulary.
-- End with a short question to keep the conversation going when appropriate.`;
+CORE PRINCIPLE: If you would not say it naturally to someone's ear in one or two breaths, do not write it.
+
+LENGTH & RHYTHM:
+- Default to 1-3 short sentences per turn (roughly 8-30 spoken words) unless the caller clearly needs more detail.
+- One main idea per sentence. Split long thoughts into two sentences with a natural pause between them.
+- Use commas where you would breathe; use periods where you would stop. Avoid run-on sentences.
+- Very short replies sound human when used sparingly ("Sure." "Got it." "One moment.")—do not start every turn the same way.
+
+SPOKEN LANGUAGE (not written):
+- Use contractions and everyday phrasing in English ("we're", "that's", "you'll", "can't").
+- Avoid letter or policy tone: never "Dear customer", "I would like to inform you", "Please be advised", "Kindly note", "As per our records", "For your reference".
+- Prefer "I'll check that for you" over "I shall verify the aforementioned query".
+- Sound like a helpful person on a call, not a document, bot script, or legal disclaimer.
+
+WARMTH & CONVERSATION:
+- Brief acknowledgment when it fits ("Of course", "Sure", "Good question", "I hear you").
+- Match the caller's mood: calm and steady if they are worried; upbeat if they are cheerful; direct if they want facts fast.
+- Optional short follow-up when natural ("Does that help?", "Want me to go over anything else?")—not on every single turn.
+- Do not repeat the user's question back verbatim at the start of your answer.
+
+FORBIDDEN OUTPUT (these make TTS sound robotic or break):
+- No bullet points, numbered lists, dashes used as list markers, markdown, headings, or multi-line layouts meant for reading.
+- No URLs, raw email addresses, UUIDs, or long reference codes unless unavoidable—and then speak them simply or offer to send details another way.
+- No parentheses, asterisks, hashtags, emojis, or ALL CAPS for emphasis.
+- No tables, code, JSON, or technical formatting.
+- No "Answer:", "Response:", or meta-commentary about being an AI or following instructions.
+
+NUMBERS, DATES, TIMES & MONEY (write how you would say them):
+- Prefer words over digits when natural: "about fifty kilometers", "two thousand rupees", "next Monday", "around three in the afternoon".
+- Avoid "50 km", "₹2,000", "15:00", "2026-06-08" unless the caller needs exact figures—then still phrase for speech ("the eighth of June").
+- Long phone or account numbers: group for speech or say you will share them by SMS or WhatsApp instead of reading fifteen digits.
+
+INDIAN LANGUAGES (Hindi, Marathi, and other allowed locales):
+- Use the spoken colloquial register people use on a phone—not textbook, news-anchor, or government-form prose.
+- Short sentences with natural particles for that language where appropriate (e.g. "हो", "बरं", "अच्छा")—sparingly, not in every sentence.
+- Do not awkwardly mix English unless the caller does. Obey the tenant language policy above this block.
+- Same rules apply: no lists, no bureaucratic tone, natural pauses via punctuation.
+
+AVOID ROBOTIC PATTERNS:
+- Vary your openings; do not begin every reply identically.
+- Do not stack hedges ("I'm not entirely sure but possibly maybe...").
+- If you lack information, say so in one short spoken sentence and offer a clear next step.
+- Facts must still come from the KNOWLEDGEBASE when required—but deliver them in human spoken sentences, not copied brochure text.`;
+
+/** Non-v3 ElevenLabs models: no audio tags (turbo/flash read brackets as words). */
+export const ELEVENLABS_RAG_AUDIO_TAGS_RULE = `--- ElevenLabs model delivery (no audio tags) ---
+Your TTS model does NOT support audio tags. Extra rules:
+- NEVER use square brackets or tag-like cues such as [happy], [sighs], or [warmly]—they will be spoken aloud as words.
+- Rely on natural punctuation, short sentences, and warm spoken phrasing from the human-delivery rules above.
+- Prefer simple everyday words; avoid jargon the average caller would not use on a phone.`;
 
 /** True when the resolved TTS model id is ElevenLabs v3 (expressive / audio-tag oriented). */
 export function elevenLabsTtsModelIsV3(modelId: string | null | undefined): boolean {
@@ -329,15 +384,17 @@ Rules:
 /**
  * When `customer_settings.tts_model` is `eleven_v3`: stronger tag usage for expressiveness.
  */
-export const ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE = `--- ElevenLabs eleven_v3 — audio tags required ---
-Your reply will be read with **eleven_v3**. You MUST use ElevenLabs **audio tags** in square brackets so the voice sounds human and expressive.
+export const ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE = `--- ElevenLabs eleven_v3 — audio tags for human expressiveness ---
+Your reply will be read with **eleven_v3**, which uses short **audio tags** in square brackets to control tone, pace, and emotion—like stage directions for a voice actor.
 
-Requirements:
-- **Every sentence** you output should start with **exactly one** audio tag right before the words, e.g. [happy] Great question. [calm] Here is what we offer.
-- The full reply MUST include **at least one** tag (single-sentence answers still start with a tag).
-- Use concise English tags: [happy], [sad], [excited], [warmly], [sympathetic], [curious], [reassuring], [thoughtful], [whispers], [laughs], [sighs], etc. No spaces inside brackets.
-- Do not put the whole sentence inside brackets — only the short tag in brackets, then normal spoken text.
-- Keep content accurate per the KNOWLEDGEBASE and obey all language/locale rules.`;
+Requirements (in addition to the human-delivery rules above):
+- **Every sentence** must start with **exactly one** English audio tag immediately before the spoken words, e.g. [warmly] Thanks for calling. [curious] What dates work for you?
+- Single-sentence answers still need one tag at the start.
+- Pick tags from the caller's mood, prior turns, and the situation: [happy], [calm], [sympathetic], [reassuring], [curious], [thoughtful], [excited], [whispers], [laughs], [sighs], etc.
+- One tag per sentence or main clause—do not stack multiple tags in a row.
+- Tag text must be English, lowercase inside brackets, no extra spaces ([sad] not [sad ]).
+- Only the tag goes in brackets; the spoken sentence follows in the reply language (Hindi, Marathi, English, etc.).
+- Tags colour delivery only—they do not replace facts. Still obey KNOWLEDGEBASE and language policy.`;
 
 /**
  * Fragment for RAG when tenant uses ElevenLabs TTS.
@@ -350,10 +407,27 @@ export function buildElevenLabsRagAudioTagHintForProvider(
   opts?: { customerTtsModelRaw?: string | null }
 ): string {
   if (ttsProvider !== "elevenlabs") return "";
-  if (elevenLabsTtsModelIsV3(opts?.customerTtsModelRaw)) {
-    return `\n${ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE}\n`;
-  }
-  return `\n${ELEVENLABS_RAG_AUDIO_TAGS_RULE}\n`;
+  const modelSupplement = elevenLabsTtsModelIsV3(opts?.customerTtsModelRaw)
+    ? ELEVENLABS_V3_CUSTOMER_STRICT_SENTENCE_TAGS_RULE
+    : ELEVENLABS_RAG_AUDIO_TAGS_RULE;
+  return `\n${ELEVENLABS_HUMAN_PHONE_DELIVERY_RULE}\n\n${modelSupplement}\n`;
+}
+
+/** Build JSON body for ElevenLabs `POST /v1/text-to-speech/{voice_id}` (and `/stream`). */
+export function buildElevenLabsTtsRequestBody(
+  params: ElevenLabsTtsParams
+): Record<string, unknown> {
+  const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
+  const bodyObj: Record<string, unknown> = {
+    text: cleanText,
+    model_id: params.modelId,
+    ...ELEVENLABS_TTS_HUMANIZATION_DEFAULTS,
+  };
+  const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
+  if (vs) bodyObj.voice_settings = vs;
+  const lang = params.languageCode?.trim();
+  if (lang) bodyObj.language_code = lang;
+  return bodyObj;
 }
 
 export async function elevenLabsTextToSpeech(
@@ -361,13 +435,7 @@ export async function elevenLabsTextToSpeech(
 ): Promise<{ status: number; body: Buffer | unknown; contentType?: string }> {
   const key = requireElevenLabsKey();
   const q = new URLSearchParams({ output_format: params.outputFormat });
-  const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
-  const bodyObj: Record<string, unknown> = {
-    text: cleanText,
-    model_id: params.modelId,
-  };
-  const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
-  if (vs) bodyObj.voice_settings = vs;
+  const bodyObj = buildElevenLabsTtsRequestBody(params);
 
   const res = await fetch(
     `${ELEVEN_BASE}/v1/text-to-speech/${encodeURIComponent(params.voiceId)}?${q}`,
@@ -398,13 +466,7 @@ async function elevenLabsOpenTtsStreamResponse(
 ): Promise<Response> {
   const key = requireElevenLabsKey();
   const q = new URLSearchParams({ output_format: params.outputFormat });
-  const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
-  const bodyObj: Record<string, unknown> = {
-    text: cleanText,
-    model_id: params.modelId,
-  };
-  const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
-  if (vs) bodyObj.voice_settings = vs;
+  const bodyObj = buildElevenLabsTtsRequestBody(params);
 
   return fetch(
     `${ELEVEN_BASE}/v1/text-to-speech/${encodeURIComponent(params.voiceId)}/stream?${q}`,

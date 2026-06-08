@@ -1392,11 +1392,15 @@ async function speakToExotel(
       });
 
       const vs = session.elevenlabsVoiceSettings ?? null;
+      const elTtsLang = bcp47ToElevenLabsLanguage(languageCode, {
+        multilingual: session.voicebotMultilingualEffective === true,
+      });
       const ttsBody = {
         voiceId,
         text: text.slice(0, 4000),
         modelId,
         outputFormat,
+        languageCode: elTtsLang,
       };
 
       const fadeSamples = exotelRate <= 8000 ? 40 : 56;

@@ -1433,6 +1433,9 @@ export async function askRoutes(app: FastifyInstance) {
               modelId,
               useElevenLabsStream
             );
+            const elTtsLang = bcp47ToElevenLabsLanguage(targetLang.data, {
+              multilingual: cust?.voicebot_multilingual === true,
+            });
             let el = await (useElevenLabsStream
               ? elevenLabsTextToSpeechStream
               : elevenLabsTextToSpeech)({
@@ -1440,6 +1443,7 @@ export async function askRoutes(app: FastifyInstance) {
               text: ttsText,
               modelId,
               outputFormat: outFmt,
+              languageCode: elTtsLang,
             });
             if (
               el.status !== 200 &&
@@ -1453,6 +1457,7 @@ export async function askRoutes(app: FastifyInstance) {
                 text: ttsText,
                 modelId,
                 outputFormat: outFmt,
+                languageCode: elTtsLang,
               });
             }
             if (el.status === 200 && Buffer.isBuffer(el.body)) {
