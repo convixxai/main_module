@@ -14,3 +14,23 @@ export function relaxAgentPrompt(prompt: string, allowRelated: boolean): string 
     .replace(/don't have answer in knowledgebase/gi, "don't have a specific answer in the knowledgebase")
     .replace(/only if you don't have answer/gi, "if you don't have a specific answer");
 }
+
+/**
+ * Prepends simulator (or other) extra instructions at the top of the RAG system prompt.
+ * When blank, returns `basePrompt` unchanged.
+ */
+export function prependAdditionalSystemPromptOverride(
+  basePrompt: string,
+  additional: string | null | undefined
+): string {
+  const extra = additional?.trim();
+  if (!extra) return basePrompt;
+  return `--- HIGHEST PRIORITY OVERRIDE (mandatory) ---
+The instructions below override any conflicting guidance in the agent prompt, customer prompt, RAG rules, or knowledgebase delivery hints. When in conflict, follow this block.
+
+${extra}
+
+--- END HIGHEST PRIORITY OVERRIDE ---
+
+${basePrompt}`;
+}

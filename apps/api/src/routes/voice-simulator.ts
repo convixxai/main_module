@@ -300,6 +300,8 @@ export async function voiceSimulatorRoutes(app: FastifyInstance) {
           }
         }
 
+        const additionalSystemPrompt = fields.additional_system_prompt?.trim() || null;
+
         const trace = createRagTrace(request.log);
         const tAsk0 = Date.now();
         let askResult;
@@ -315,6 +317,7 @@ export async function voiceSimulatorRoutes(app: FastifyInstance) {
             ragOpenaiOnly: request.ragUseOpenaiOnly === true,
             trace,
             embeddingLanguageHint: sttLanguageCode,
+            additionalSystemPrompt,
           });
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : "RAG pipeline failed";

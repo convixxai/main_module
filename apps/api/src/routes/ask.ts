@@ -106,7 +106,7 @@ function relatedAnswerStrictnessAsk(cs: CustomerSettings | null): RelatedAnswerS
   return cs?.related_answer_strictness || "balanced";
 }
 
-import { relaxAgentPrompt } from "../services/rag-prompt-utils";
+import { relaxAgentPrompt, prependAdditionalSystemPromptOverride } from "../services/rag-prompt-utils";
 
 function trimAskHistoryForRag(
   cs: CustomerSettings | null,
@@ -517,6 +517,8 @@ export async function runAskPipeline(params: {
   trace?: RagTraceFn;
   /** STT or client-supplied BCP-47 tag; used only to align KB embedding with English entries when multilingual. */
   embeddingLanguageHint?: string | null;
+  /** When set (e.g. voice simulator), prepended above agent/customer prompt and overrides on conflict. */
+  additionalSystemPrompt?: string | null;
 }): Promise<AskPipelineResult> {
   const {
     customerId,
@@ -529,6 +531,7 @@ export async function runAskPipeline(params: {
     ragOpenaiOnly,
     trace,
     embeddingLanguageHint,
+    additionalSystemPrompt,
   } = params;
   const start = Date.now();
 
@@ -595,7 +598,10 @@ export async function runAskPipeline(params: {
     custSettings ?? null
   );
   const systemPromptRaw = agent?.systemPrompt || customerPrompt;
-  const systemPrompt = relaxAgentPrompt(systemPromptRaw, allowRelatedGeneralAnswers);
+  const systemPrompt = prependAdditionalSystemPromptOverride(
+    relaxAgentPrompt(systemPromptRaw, allowRelatedGeneralAnswers),
+    additionalSystemPrompt
+  );
   const agentId = agent?.id || null;
   const agentName = agent?.name || null;
 

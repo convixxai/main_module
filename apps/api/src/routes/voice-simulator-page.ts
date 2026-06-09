@@ -210,6 +210,13 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     </section>
 
     <section>
+      <h2>Additional system prompt</h2>
+      <label for="additionalSystemPrompt">Override (highest priority — leave blank to use agent/customer prompt only)</label>
+      <textarea id="additionalSystemPrompt" rows="4" placeholder="Optional. When filled, this overrides conflicting agent, customer, and RAG instructions."></textarea>
+      <p class="hint">Applied only for this simulator session turn. Empty = no override.</p>
+    </section>
+
+    <section>
       <h2>ElevenLabs TTS settings</h2>
       <label>Voice ID</label>
       <input type="text" id="voiceId" />
@@ -382,6 +389,8 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   $("apiKey").value = localStorage.getItem("simKey") || "";
   var sid = localStorage.getItem("simSessionId");
   if (sid) $("sessionId").value = sid;
+  var savedOverride = localStorage.getItem("simAdditionalSystemPrompt");
+  if (savedOverride) $("additionalSystemPrompt").value = savedOverride;
 
   function root() {
     var u = ($("base").value || "").trim().replace(/\\/+$/, "");
@@ -461,8 +470,15 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       speed: $("speed").value,
       use_speaker_boost: $("speakerBoost").checked ? "true" : "false",
       agent_id: $("agentId").value.trim(),
-      session_id: $("sessionId").value.trim()
+      session_id: $("sessionId").value.trim(),
+      additional_system_prompt: $("additionalSystemPrompt").value.trim()
     };
+  }
+
+  function persistAdditionalPrompt() {
+    var v = $("additionalSystemPrompt").value;
+    if (v.trim()) localStorage.setItem("simAdditionalSystemPrompt", v);
+    else localStorage.removeItem("simAdditionalSystemPrompt");
   }
 
   function pcmBase64ToWavBlob(b64, sampleRate) {
@@ -527,6 +543,7 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     if (!CUSTOMER_ID) throw new Error("Add ?customer_id=UUID to the page URL");
     localStorage.setItem("simBase", root());
     localStorage.setItem("simKey", key);
+    persistAdditionalPrompt();
 
     var headers = { "x-api-key": key };
     var init = { method: "POST", headers: headers, body: body };
@@ -648,7 +665,11 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     fd.append("file", wavBlob, "speech.wav");
     fd.append("mode", "speech");
     var f = ttsFields();
-    Object.keys(f).forEach(function (k) { if (f[k]) fd.append(k, f[k]); });
+    Object.keys(f).forEach(function (k) {
+      if (f[k] !== undefined && f[k] !== null && String(f[k]).length > 0) {
+        fd.append(k, f[k]);
+      }
+    });
     try {
       var data = await apiTurn(fd, true);
       playResponse(data);
