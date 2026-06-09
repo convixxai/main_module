@@ -2,6 +2,7 @@ import {
   elevenLabsTextToSpeech,
   normalizeVoiceSettingsForApi,
   pcmSampleRateFromElevenOutputFormat,
+  resolveElevenLabsTtsLanguageCodeForApi,
   type ElevenLabsVoiceSettingsPayload,
 } from "./elevenlabs";
 import { parseWavPcm16Mono, pcmDurationMs, resamplePcm16 } from "./pcm-audio";
@@ -11,7 +12,12 @@ const SIMULATOR_PCM_RATE = 8000;
 export type SimulatorTtsSettings = {
   voiceId: string;
   modelId: string;
+  /** Passed to TTS (already filtered or undefined = omit). */
   languageCode?: string;
+  /** Raw UI / form preference including `auto`. */
+  languageCodeRequested?: string;
+  /** What will be sent to ElevenLabs after model rules. */
+  languageCodeSent?: string;
   voiceSettings: ElevenLabsVoiceSettingsPayload;
 };
 
@@ -32,7 +38,7 @@ export async function synthesizeSimulatorPcm8k(
     modelId: settings.modelId,
     outputFormat: "pcm_8000",
     voiceSettings: settings.voiceSettings,
-    languageCode: settings.languageCode,
+    languageCode: settings.languageCodeRequested ?? settings.languageCode,
   });
 
   if (el.status !== 200 || !Buffer.isBuffer(el.body) || el.body.length === 0) {
@@ -87,7 +93,7 @@ export function parseSimulatorTtsSettings(
   defaults: {
     voice_id: string;
     model_id: string;
-    language_code: string;
+    language_code: string; // e.g. "auto", "hi", "mr"
     voice_settings: Required<ElevenLabsVoiceSettingsPayload>;
   }
 ): SimulatorTtsSettings {
@@ -113,13 +119,16 @@ export function parseSimulatorTtsSettings(
     ),
   };
 
+  const langPref = (fields.language_code?.trim() || defaults.language_code || "auto")
+    .slice(0, 16)
+    .toLowerCase();
+
   return {
     voiceId: (fields.voice_id?.trim() || defaults.voice_id).slice(0, 128),
     modelId,
-    languageCode: (fields.language_code?.trim() || defaults.language_code).slice(
-      0,
-      16
-    ),
+    languageCode: langPref === "auto" ? undefined : langPref,
+    languageCodeRequested: langPref,
+    languageCodeSent: resolveElevenLabsTtsLanguageCodeForApi(modelId, langPref),
     voiceSettings: normalizeVoiceSettingsForApi(rawSettings, modelId) ?? rawSettings,
   };
 }

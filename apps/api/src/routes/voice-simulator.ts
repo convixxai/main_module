@@ -9,6 +9,7 @@ import {
   elevenLabsSimulatorTtsDefaults,
   elevenLabsSpeechToText,
   elevenLabsSttToSarvamShape,
+  elevenLabsTtsLanguageCodeSupportedOnModel,
   resolveElevenLabsSttModelId,
   resolveElevenLabsTtsModelId,
 } from "../services/elevenlabs";
@@ -144,15 +145,20 @@ export async function voiceSimulatorRoutes(app: FastifyInstance) {
       const customerId = request.customerId!;
       const cust = await getCustomerSettings(customerId);
       const modelRaw = cust?.tts_model ?? null;
+      const modelId = resolveElevenLabsTtsModelId(modelRaw);
       const base = elevenLabsSimulatorTtsDefaults(modelRaw);
+      const elLang = bcp47ToElevenLabsLanguage(cust?.default_language_code, {
+        multilingual: cust?.voicebot_multilingual === true,
+        forceEnglish: cust?.voicebot_multilingual !== true,
+      });
+      const langForUi =
+        elLang && elevenLabsTtsLanguageCodeSupportedOnModel(modelId, elLang)
+          ? elLang
+          : "auto";
       return reply.send({
         ...base,
-        model_id: resolveElevenLabsTtsModelId(modelRaw),
-        language_code:
-          bcp47ToElevenLabsLanguage(cust?.default_language_code, {
-            multilingual: cust?.voicebot_multilingual === true,
-            forceEnglish: cust?.voicebot_multilingual !== true,
-          }) ?? base.language_code,
+        model_id: modelId,
+        language_code: langForUi,
         tts_provider: cust?.tts_provider ?? "sarvam",
         stt_provider: cust?.stt_provider ?? "sarvam",
         voicebot_multilingual: cust?.voicebot_multilingual === true,

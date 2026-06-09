@@ -29,9 +29,46 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     }
     h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
     .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 1rem; }
-    .page {
-      max-width: 44rem;
+    .shell {
+      display: grid;
+      gap: 1rem;
+      max-width: 72rem;
       margin: 0 auto;
+      align-items: start;
+    }
+    @media (min-width: 1024px) {
+      .shell { grid-template-columns: 1fr 19rem; }
+    }
+    .compat {
+      position: sticky;
+      top: 1rem;
+    }
+    .compat-box {
+      font-size: 0.76rem;
+      line-height: 1.4;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.65rem;
+      max-height: calc(100vh - 2rem);
+      overflow: auto;
+    }
+    .compat-ok { color: var(--accent2); }
+    .compat-no { color: var(--warn); }
+    .compat-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.35rem;
+      padding: 0.2rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .compat-row:last-child { border-bottom: none; }
+    .compat-verdict {
+      margin: 0.5rem 0;
+      padding: 0.45rem 0.5rem;
+      border-radius: 6px;
+      background: #1a2332;
+      border: 1px solid var(--border);
     }
     .grid-2 {
       display: grid;
@@ -139,9 +176,10 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <div class="page">
+  <div class="shell">
+    <div class="main">
     <h1>Voice simulator</h1>
-    <p class="sub">One page — connection, ElevenLabs TTS tuning, speech or text input, and 8 kHz playback. Pipeline: STT → RAG → TTS.</p>
+    <p class="sub">Connection, ElevenLabs TTS tuning, speech or text input, and 8 kHz playback. Pipeline: STT → RAG → TTS.</p>
 
     <section>
       <h2>Connection</h2>
@@ -186,18 +224,9 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
           </select>
         </div>
         <div>
-          <label>language_code (TTS pronunciation)</label>
-          <select id="languageCode">
-            <option value="mr">mr — Marathi</option>
-            <option value="hi">hi — Hindi</option>
-            <option value="en">en — English</option>
-            <option value="bn">bn — Bengali</option>
-            <option value="ta">ta — Tamil</option>
-            <option value="te">te — Telugu</option>
-            <option value="kn">kn — Kannada</option>
-            <option value="gu">gu — Gujarati</option>
-            <option value="pa">pa — Punjabi</option>
-          </select>
+          <label>language_code (TTS API — see panel →)</label>
+          <select id="languageCode"></select>
+          <p class="hint" id="langCodeHint"></p>
         </div>
       </div>
       <label>target_language_code (RAG / STT hint, BCP-47)</label>
@@ -262,14 +291,91 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       <p class="hint">Playback: mono PCM s16le @ 8 kHz (telephony preview).</p>
       <div class="err" id="outErr" style="display:none"></div>
     </section>
+    </div>
+
+    <aside class="compat">
+      <section>
+        <h2>Model &amp; language</h2>
+        <div class="compat-box" id="compatPanel">Loading…</div>
+      </section>
+    </aside>
   </div>
 
   <script>
 (function () {
   var CONFIG = __SIMULATOR_CONFIG__;
   var CUSTOMER_ID = "__CUSTOMER_ID__";
+  var LANG_SUPPORT = CONFIG.language_support || {};
 
   var $ = function (id) { return document.getElementById(id); };
+
+  function modelAcceptsLangParam(modelId) {
+    return modelId === "eleven_turbo_v2_5" || modelId === "eleven_flash_v2_5";
+  }
+
+  function flashTurboSupportsCode(code) {
+    var list = LANG_SUPPORT.flash_turbo_v25_language_codes || [];
+    return list.indexOf(code) >= 0;
+  }
+
+  function willSendLanguageCode(modelId, code) {
+    if (!code || code === "auto") return false;
+    return modelAcceptsLangParam(modelId) && flashTurboSupportsCode(code);
+  }
+
+  function populateLanguageSelect() {
+    var sel = $("languageCode");
+    sel.innerHTML = "";
+    var auto = document.createElement("option");
+    auto.value = "auto";
+    auto.textContent = "auto — omit (recommended for mr, bn, te, …)";
+    sel.appendChild(auto);
+    var indian = LANG_SUPPORT.indian_locales || [];
+    indian.forEach(function (row) {
+      var o = document.createElement("option");
+      o.value = row.code;
+      var tag = row.language_code_on_flash_turbo_v25 ? "flash/turbo ✓" : "text only";
+      o.textContent = row.code + " — " + row.label + " (" + tag + ")";
+      sel.appendChild(o);
+    });
+  }
+
+  function renderCompatPanel() {
+    var modelId = $("modelId").value;
+    var code = $("languageCode").value;
+    var panel = $("compatPanel");
+    var lines = [];
+    var modelRow = (LANG_SUPPORT.models || []).find(function (m) { return m.id === modelId; });
+    lines.push("<strong>Model:</strong> " + modelId);
+    if (modelRow) {
+      lines.push(modelRow.accepts_language_code_param
+        ? "<span class='compat-ok'>Accepts language_code param</span>"
+        : "<span class='compat-no'>Does NOT accept language_code — inferred from text</span>");
+      if (modelRow.note) lines.push("<span class='hint'>" + modelRow.note + "</span>");
+    }
+    lines.push("<hr class='divider' style='margin:0.5rem 0' />");
+    lines.push("<strong>Your selection:</strong> " + (code === "auto" ? "auto (omit)" : code));
+    var sent = willSendLanguageCode(modelId, code);
+    var verdict = sent
+      ? "<div class='compat-verdict compat-ok'>API will send <code>language_code: \"" + code + "\"</code></div>"
+      : "<div class='compat-verdict compat-no'>API will <strong>omit</strong> language_code" +
+        (code && code !== "auto" ? " — <code>" + code + "</code> not supported for this model" : "") +
+        ". Use native script in text.</div>";
+    lines.push(verdict);
+    lines.push("<strong>Indian locales</strong>");
+    (LANG_SUPPORT.indian_locales || []).forEach(function (row) {
+      var onFlash = row.language_code_on_flash_turbo_v25;
+      var cls = onFlash ? "compat-ok" : "compat-no";
+      var note = onFlash ? "flash/turbo param" : "text only";
+      lines.push("<div class='compat-row'><span>" + row.code + " " + row.label + "</span><span class='" + cls + "'>" + note + "</span></div>");
+    });
+    panel.innerHTML = lines.join("");
+    $("langCodeHint").textContent = sent
+      ? "Will send language_code to ElevenLabs."
+      : (modelAcceptsLangParam(modelId) && code !== "auto"
+        ? code + " is not in flash/turbo v2.5 list — using auto-detect from text."
+        : "language_code omitted — model detects language from your text.");
+  }
 
   $("customerId").value = CUSTOMER_ID;
   $("base").value = localStorage.getItem("simBase") || window.location.origin || "";
@@ -297,6 +403,7 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     $("voiceId").value = d.voice_id || CONFIG.voice_id;
     $("modelId").value = d.model_id || CONFIG.model_id;
     if (d.language_code) $("languageCode").value = d.language_code;
+    else $("languageCode").value = "auto";
     var vs = d.voice_settings || CONFIG.voice_settings;
     initSlider("stability", "stability", vs.stability, "valStability");
     initSlider("similarityBoost", "similarity_boost", vs.similarity_boost, "valSimilarity");
@@ -315,6 +422,7 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
 
   function updateModelOptions() {
     updateSpeedCap();
+    renderCompatPanel();
   }
 
   function updateSpeedCap() {
@@ -334,7 +442,9 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     });
   });
   $("modelId").addEventListener("change", updateModelOptions);
+  $("languageCode").addEventListener("change", renderCompatPanel);
 
+  populateLanguageSelect();
   applyDefaults(CONFIG);
   updateModelOptions();
 
@@ -390,7 +500,10 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       "RAG: " + (t.ask_ms ?? "—") + " ms\\n" +
       "TTS: " + (t.tts_ms ?? "—") + " ms\\n" +
       "Total: " + (t.total_ms ?? "—") + " ms\\n" +
-      "Audio: " + (data.audio && data.audio.duration_ms != null ? data.audio.duration_ms + " ms @ 8 kHz" : "—");
+      "Audio: " + (data.audio && data.audio.duration_ms != null ? data.audio.duration_ms + " ms @ 8 kHz" : "—") +
+      (data.tts_settings && data.tts_settings.language_code_sent != null
+        ? "\\nlanguage_code sent: " + data.tts_settings.language_code_sent
+        : (data.tts_settings ? "\\nlanguage_code sent: (omitted)" : ""));
     if (data.session_id) {
       $("sessionId").value = data.session_id;
       localStorage.setItem("simSessionId", data.session_id);

@@ -197,6 +197,133 @@ export type ElevenLabsTtsParams = {
 /** Default ElevenLabs voice for the browser voice simulator page. */
 export const ELEVENLABS_SIMULATOR_DEFAULT_VOICE_ID = "4QmRQP2RqsuTD7HT9MkW";
 
+/**
+ * ISO 639-1 codes accepted as `language_code` on `eleven_turbo_v2_5` / `eleven_flash_v2_5`
+ * (per ElevenLabs docs). Marathi (`mr`), Bengali (`bn`), Telugu, etc. are **not** listed —
+ * omit `language_code` and rely on script in `text`.
+ */
+export const ELEVENLABS_TTS_FLASH_TURBO_V25_LANGUAGE_CODES = [
+  "en",
+  "ja",
+  "zh",
+  "de",
+  "hi",
+  "fr",
+  "ko",
+  "pt",
+  "it",
+  "es",
+  "id",
+  "nl",
+  "tr",
+  "fil",
+  "pl",
+  "sv",
+  "bg",
+  "ro",
+  "ar",
+  "cs",
+  "el",
+  "fi",
+  "hr",
+  "ms",
+  "sk",
+  "da",
+  "ta",
+  "uk",
+  "ru",
+  "hu",
+  "no",
+  "vi",
+] as const;
+
+const FLASH_TURBO_V25_LANG_SET = new Set<string>(
+  ELEVENLABS_TTS_FLASH_TURBO_V25_LANGUAGE_CODES
+);
+
+/** Indian locales we care about — whether flash/turbo v2.5 accept `language_code`. */
+export const ELEVENLABS_INDIAN_TTS_LANGUAGE_ROWS = [
+  { code: "hi", label: "Hindi", language_code_on_flash_turbo_v25: true },
+  { code: "ta", label: "Tamil", language_code_on_flash_turbo_v25: true },
+  { code: "en", label: "English", language_code_on_flash_turbo_v25: true },
+  { code: "mr", label: "Marathi", language_code_on_flash_turbo_v25: false },
+  { code: "bn", label: "Bengali", language_code_on_flash_turbo_v25: false },
+  { code: "te", label: "Telugu", language_code_on_flash_turbo_v25: false },
+  { code: "kn", label: "Kannada", language_code_on_flash_turbo_v25: false },
+  { code: "ml", label: "Malayalam", language_code_on_flash_turbo_v25: false },
+  { code: "gu", label: "Gujarati", language_code_on_flash_turbo_v25: false },
+  { code: "pa", label: "Punjabi", language_code_on_flash_turbo_v25: false },
+  { code: "or", label: "Odia", language_code_on_flash_turbo_v25: false },
+] as const;
+
+/** Only turbo/flash v2.5 accept the `language_code` request field at all. */
+export function elevenLabsTtsModelAcceptsLanguageCodeParam(
+  modelId: string | null | undefined
+): boolean {
+  const id = (modelId || "").trim().toLowerCase();
+  return id === "eleven_turbo_v2_5" || id === "eleven_flash_v2_5";
+}
+
+export function elevenLabsTtsLanguageCodeSupportedOnModel(
+  modelId: string | null | undefined,
+  languageCode: string | null | undefined
+): boolean {
+  const lang = (languageCode || "").trim().toLowerCase();
+  if (!lang || lang === "auto") return false;
+  if (!elevenLabsTtsModelAcceptsLanguageCodeParam(modelId)) return false;
+  return FLASH_TURBO_V25_LANG_SET.has(lang);
+}
+
+/**
+ * Returns ISO 639-1 for the ElevenLabs TTS body, or `undefined` to omit (auto-detect from text).
+ */
+export function resolveElevenLabsTtsLanguageCodeForApi(
+  modelId: string | null | undefined,
+  languageCode: string | null | undefined
+): string | undefined {
+  const lang = (languageCode || "").trim().toLowerCase();
+  if (!lang || lang === "auto") return undefined;
+  if (!elevenLabsTtsLanguageCodeSupportedOnModel(modelId, lang)) return undefined;
+  return lang;
+}
+
+/** Simulator sidebar + GET `/voice/simulator/config` compatibility matrix. */
+export function elevenLabsTtsLanguageSupportForUi() {
+  const flashCodes = [...ELEVENLABS_TTS_FLASH_TURBO_V25_LANGUAGE_CODES];
+  return {
+    summary:
+      "Send language_code only for eleven_turbo_v2_5 / eleven_flash_v2_5 when the code is in the supported list. Otherwise omit it — the model infers language from your text (required for Marathi, Bengali, etc.).",
+    models: [
+      {
+        id: "eleven_flash_v2_5",
+        label: "Flash v2.5",
+        accepts_language_code_param: true,
+        language_codes: flashCodes,
+      },
+      {
+        id: "eleven_turbo_v2_5",
+        label: "Turbo v2.5",
+        accepts_language_code_param: true,
+        language_codes: flashCodes,
+      },
+      {
+        id: "eleven_multilingual_v2",
+        label: "Multilingual v2",
+        accepts_language_code_param: false,
+        note: "~29 languages via text; do not send language_code (API error).",
+      },
+      {
+        id: "eleven_v3",
+        label: "Eleven v3",
+        accepts_language_code_param: false,
+        note: "70+ languages via text; do not send language_code.",
+      },
+    ],
+    indian_locales: [...ELEVENLABS_INDIAN_TTS_LANGUAGE_ROWS],
+    flash_turbo_v25_language_codes: flashCodes,
+  };
+}
+
 export const ELEVENLABS_VOICE_SETTINGS_SLIDER_BOUNDS = {
   stability: { min: 0, max: 1, step: 0.01 },
   similarity_boost: { min: 0, max: 1, step: 0.01 },
@@ -211,10 +338,12 @@ export function elevenLabsSimulatorTtsDefaults(modelId?: string | null) {
   return {
     voice_id: ELEVENLABS_SIMULATOR_DEFAULT_VOICE_ID,
     model_id: model,
-    language_code: "mr",
+  /** UI preference; API omits when unsupported — use `auto` for Marathi etc. */
+    language_code: "auto",
     voice_settings: voiceSettings,
     output_sample_rate: 8000,
     slider_bounds: ELEVENLABS_VOICE_SETTINGS_SLIDER_BOUNDS,
+    language_support: elevenLabsTtsLanguageSupportForUi(),
   };
 }
 
@@ -442,7 +571,10 @@ export function buildElevenLabsTtsRequestBody(
   };
   const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
   if (vs) bodyObj.voice_settings = vs;
-  const lang = params.languageCode?.trim();
+  const lang = resolveElevenLabsTtsLanguageCodeForApi(
+    params.modelId,
+    params.languageCode
+  );
   if (lang) bodyObj.language_code = lang;
   return bodyObj;
 }
