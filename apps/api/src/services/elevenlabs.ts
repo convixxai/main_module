@@ -183,6 +183,11 @@ export type ElevenLabsVoiceSettingsPayload = {
   speed?: number;
 };
 
+export type ElevenLabsTtsHumanizationOptions = {
+  apply_text_normalization?: "auto" | "on" | "off";
+  apply_language_text_normalization?: boolean;
+};
+
 export type ElevenLabsTtsParams = {
   voiceId: string;
   text: string;
@@ -192,7 +197,36 @@ export type ElevenLabsTtsParams = {
   voiceSettings?: ElevenLabsVoiceSettingsPayload | null;
   /** ISO-639-1/3 (e.g. `mr`, `hi`); improves pronunciation for Indian languages on turbo/multilingual models. */
   languageCode?: string | null;
+  /** When set, overrides {@link ELEVENLABS_TTS_HUMANIZATION_DEFAULTS} (simulator UI). */
+  humanization?: ElevenLabsTtsHumanizationOptions | null;
 };
+
+/** Default ElevenLabs voice for the browser voice simulator page. */
+export const ELEVENLABS_SIMULATOR_DEFAULT_VOICE_ID = "4QmRQP2RqsuTD7HT9MkW";
+
+export const ELEVENLABS_VOICE_SETTINGS_SLIDER_BOUNDS = {
+  stability: { min: 0, max: 1, step: 0.01 },
+  similarity_boost: { min: 0, max: 1, step: 0.01 },
+  style: { min: 0, max: 1, step: 0.01 },
+  speed: { min: 0.7, max: 1.2, step: 0.01, maxV3: 1.0 },
+} as const;
+
+/** Slider / form defaults for GET `/voice/simulator/config` and the simulator UI. */
+export function elevenLabsSimulatorTtsDefaults(modelId?: string | null) {
+  const model = resolveElevenLabsTtsModelId(modelId ?? "eleven_turbo_v2_5");
+  const voiceSettings = defaultVoiceSettingsForModel(model);
+  return {
+    voice_id: ELEVENLABS_SIMULATOR_DEFAULT_VOICE_ID,
+    model_id: model,
+    language_code: "mr",
+    voice_settings: voiceSettings,
+    apply_text_normalization: ELEVENLABS_TTS_HUMANIZATION_DEFAULTS.apply_text_normalization,
+    apply_language_text_normalization:
+      ELEVENLABS_TTS_HUMANIZATION_DEFAULTS.apply_language_text_normalization,
+    output_sample_rate: 8000,
+    slider_bounds: ELEVENLABS_VOICE_SETTINGS_SLIDER_BOUNDS,
+  };
+}
 
 /** Defaults when synthesizing with `eleven_v3` (expressive, phone-oriented). */
 export const ELEVENLABS_V3_VOICE_SETTINGS: Required<ElevenLabsVoiceSettingsPayload> = {
@@ -418,10 +452,14 @@ export function buildElevenLabsTtsRequestBody(
   params: ElevenLabsTtsParams
 ): Record<string, unknown> {
   const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
+  const humanization = {
+    ...ELEVENLABS_TTS_HUMANIZATION_DEFAULTS,
+    ...(params.humanization ?? {}),
+  };
   const bodyObj: Record<string, unknown> = {
     text: cleanText,
     model_id: params.modelId,
-    ...ELEVENLABS_TTS_HUMANIZATION_DEFAULTS,
+    ...humanization,
   };
   const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
   if (vs) bodyObj.voice_settings = vs;

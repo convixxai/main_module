@@ -499,7 +499,7 @@ export type AskPipelineTimings = {
     | "rag_last_resort";
 };
 
-async function runAskPipeline(params: {
+export async function runAskPipeline(params: {
   customerId: string;
   customerPrompt: string;
   question: string;
