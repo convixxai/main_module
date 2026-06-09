@@ -255,6 +255,25 @@ export const ELEVENLABS_TTS_HUMANIZATION_DEFAULTS = {
   apply_language_text_normalization: true,
 };
 
+/**
+ * Humanization fields allowed for the resolved model. `eleven_v3` rejects
+ * `apply_language_text_normalization` (and related normalization params).
+ */
+export function resolveElevenLabsTtsHumanizationForApi(
+  modelId: string | null | undefined,
+  overrides?: ElevenLabsTtsHumanizationOptions | null
+): Record<string, unknown> {
+  const merged = {
+    ...ELEVENLABS_TTS_HUMANIZATION_DEFAULTS,
+    ...(overrides ?? {}),
+  };
+  if (elevenLabsTtsModelIsV3(modelId)) {
+    const { apply_language_text_normalization: _langNorm, ...rest } = merged;
+    return rest;
+  }
+  return merged;
+}
+
 function defaultVoiceSettingsForModel(
   modelId: string | null | undefined
 ): Required<ElevenLabsVoiceSettingsPayload> {
@@ -452,14 +471,10 @@ export function buildElevenLabsTtsRequestBody(
   params: ElevenLabsTtsParams
 ): Record<string, unknown> {
   const cleanText = prepareTextForElevenLabsTts(params.text, params.modelId);
-  const humanization = {
-    ...ELEVENLABS_TTS_HUMANIZATION_DEFAULTS,
-    ...(params.humanization ?? {}),
-  };
   const bodyObj: Record<string, unknown> = {
     text: cleanText,
     model_id: params.modelId,
-    ...humanization,
+    ...resolveElevenLabsTtsHumanizationForApi(params.modelId, params.humanization),
   };
   const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
   if (vs) bodyObj.voice_settings = vs;

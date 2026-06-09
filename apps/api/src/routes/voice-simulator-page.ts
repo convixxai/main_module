@@ -234,6 +234,7 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       <div class="grid-2">
         <label class="chk"><input type="checkbox" id="speakerBoost" checked /> use_speaker_boost</label>
         <label class="chk"><input type="checkbox" id="langTextNorm" checked /> apply_language_text_normalization</label>
+        <span class="hint" id="langTextNormHint"></span>
       </div>
       <label>apply_text_normalization</label>
       <select id="textNorm">
@@ -312,7 +313,7 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     $("speakerBoost").checked = vs.use_speaker_boost !== false;
     $("textNorm").value = d.apply_text_normalization || CONFIG.apply_text_normalization;
     $("langTextNorm").checked = d.apply_language_text_normalization !== false;
-    updateSpeedCap();
+    updateModelOptions();
   }
 
   function bounds() { return CONFIG.slider_bounds || {}; }
@@ -320,6 +321,15 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   function speedMax() {
     var m = $("modelId").value;
     return m === "eleven_v3" ? (bounds().speed.maxV3 || 1) : bounds().speed.max;
+  }
+
+  function updateModelOptions() {
+    updateSpeedCap();
+    var isV3 = $("modelId").value === "eleven_v3";
+    $("langTextNorm").disabled = isV3;
+    $("langTextNormHint").textContent = isV3
+      ? "Not supported on eleven_v3 — omitted from the API request."
+      : "";
   }
 
   function updateSpeedCap() {
@@ -338,9 +348,10 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       $(labelId).textContent = Number($(id).value).toFixed(2);
     });
   });
-  $("modelId").addEventListener("change", updateSpeedCap);
+  $("modelId").addEventListener("change", updateModelOptions);
 
   applyDefaults(CONFIG);
+  updateModelOptions();
 
   function ttsFields() {
     return {
