@@ -183,11 +183,6 @@ export type ElevenLabsVoiceSettingsPayload = {
   speed?: number;
 };
 
-export type ElevenLabsTtsHumanizationOptions = {
-  apply_text_normalization?: "auto" | "on" | "off";
-  apply_language_text_normalization?: boolean;
-};
-
 export type ElevenLabsTtsParams = {
   voiceId: string;
   text: string;
@@ -197,8 +192,6 @@ export type ElevenLabsTtsParams = {
   voiceSettings?: ElevenLabsVoiceSettingsPayload | null;
   /** ISO-639-1/3 (e.g. `mr`, `hi`); improves pronunciation for Indian languages on turbo/multilingual models. */
   languageCode?: string | null;
-  /** When set, overrides {@link ELEVENLABS_TTS_HUMANIZATION_DEFAULTS} (simulator UI). */
-  humanization?: ElevenLabsTtsHumanizationOptions | null;
 };
 
 /** Default ElevenLabs voice for the browser voice simulator page. */
@@ -220,9 +213,6 @@ export function elevenLabsSimulatorTtsDefaults(modelId?: string | null) {
     model_id: model,
     language_code: "mr",
     voice_settings: voiceSettings,
-    apply_text_normalization: ELEVENLABS_TTS_HUMANIZATION_DEFAULTS.apply_text_normalization,
-    apply_language_text_normalization:
-      ELEVENLABS_TTS_HUMANIZATION_DEFAULTS.apply_language_text_normalization,
     output_sample_rate: 8000,
     slider_bounds: ELEVENLABS_VOICE_SETTINGS_SLIDER_BOUNDS,
   };
@@ -248,31 +238,6 @@ export const ELEVENLABS_TURBO_FLASH_VOICE_SETTINGS: Required<ElevenLabsVoiceSett
   use_speaker_boost: true,
   speed: 0.95,
 };
-
-/** ElevenLabs TTS fields that improve multilingual pronunciation and spoken numbers/dates. */
-export const ELEVENLABS_TTS_HUMANIZATION_DEFAULTS = {
-  apply_text_normalization: "auto" as const,
-  apply_language_text_normalization: true,
-};
-
-/**
- * Humanization fields allowed for the resolved model. `eleven_v3` rejects
- * `apply_language_text_normalization` (and related normalization params).
- */
-export function resolveElevenLabsTtsHumanizationForApi(
-  modelId: string | null | undefined,
-  overrides?: ElevenLabsTtsHumanizationOptions | null
-): Record<string, unknown> {
-  const merged = {
-    ...ELEVENLABS_TTS_HUMANIZATION_DEFAULTS,
-    ...(overrides ?? {}),
-  };
-  if (elevenLabsTtsModelIsV3(modelId)) {
-    const { apply_language_text_normalization: _langNorm, ...rest } = merged;
-    return rest;
-  }
-  return merged;
-}
 
 function defaultVoiceSettingsForModel(
   modelId: string | null | undefined
@@ -474,7 +439,6 @@ export function buildElevenLabsTtsRequestBody(
   const bodyObj: Record<string, unknown> = {
     text: cleanText,
     model_id: params.modelId,
-    ...resolveElevenLabsTtsHumanizationForApi(params.modelId, params.humanization),
   };
   const vs = normalizeVoiceSettingsForApi(params.voiceSettings, params.modelId);
   if (vs) bodyObj.voice_settings = vs;

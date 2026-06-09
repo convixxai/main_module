@@ -2,7 +2,6 @@ import {
   elevenLabsTextToSpeech,
   normalizeVoiceSettingsForApi,
   pcmSampleRateFromElevenOutputFormat,
-  type ElevenLabsTtsHumanizationOptions,
   type ElevenLabsVoiceSettingsPayload,
 } from "./elevenlabs";
 import { parseWavPcm16Mono, pcmDurationMs, resamplePcm16 } from "./pcm-audio";
@@ -14,7 +13,6 @@ export type SimulatorTtsSettings = {
   modelId: string;
   languageCode?: string;
   voiceSettings: ElevenLabsVoiceSettingsPayload;
-  humanization: ElevenLabsTtsHumanizationOptions;
 };
 
 export type SimulatorPcmResult = {
@@ -35,7 +33,6 @@ export async function synthesizeSimulatorPcm8k(
     outputFormat: "pcm_8000",
     voiceSettings: settings.voiceSettings,
     languageCode: settings.languageCode,
-    humanization: settings.humanization,
   });
 
   if (el.status !== 200 || !Buffer.isBuffer(el.body) || el.body.length === 0) {
@@ -84,14 +81,6 @@ function parseNum(
   return Math.min(max, Math.max(min, n));
 }
 
-function parseNormalization(
-  raw: string | undefined
-): "auto" | "on" | "off" {
-  const v = (raw ?? "auto").trim().toLowerCase();
-  if (v === "on" || v === "off") return v;
-  return "auto";
-}
-
 /** Parse simulator TTS fields from multipart form or JSON body. */
 export function parseSimulatorTtsSettings(
   fields: Record<string, string | undefined>,
@@ -100,8 +89,6 @@ export function parseSimulatorTtsSettings(
     model_id: string;
     language_code: string;
     voice_settings: Required<ElevenLabsVoiceSettingsPayload>;
-    apply_text_normalization: "auto" | "on" | "off";
-    apply_language_text_normalization: boolean;
   }
 ): SimulatorTtsSettings {
   const modelId = (fields.model_id?.trim() || defaults.model_id).slice(0, 128);
@@ -134,14 +121,5 @@ export function parseSimulatorTtsSettings(
       16
     ),
     voiceSettings: normalizeVoiceSettingsForApi(rawSettings, modelId) ?? rawSettings,
-    humanization: {
-      apply_text_normalization: parseNormalization(
-        fields.apply_text_normalization ?? defaults.apply_text_normalization
-      ),
-      apply_language_text_normalization: parseBool(
-        fields.apply_language_text_normalization,
-        defaults.apply_language_text_normalization
-      ),
-    },
   };
 }
