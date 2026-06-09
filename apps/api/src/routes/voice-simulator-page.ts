@@ -357,7 +357,7 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     lines.push("<strong>Your selection:</strong> " + (code === "auto" ? "auto (omit)" : code));
     var sent = willSendLanguageCode(modelId, code);
     var verdict = sent
-      ? "<div class='compat-verdict compat-ok'>API will send <code>language_code: \"" + code + "\"</code></div>"
+      ? "<div class='compat-verdict compat-ok'>API will send language_code: <code>" + code + "</code></div>"
       : "<div class='compat-verdict compat-no'>API will <strong>omit</strong> language_code" +
         (code && code !== "auto" ? " — <code>" + code + "</code> not supported for this model" : "") +
         ". Use native script in text.</div>";
