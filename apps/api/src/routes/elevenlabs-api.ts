@@ -4,6 +4,10 @@ import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { env } from "../config/env";
 import { elevenLabsListVoices } from "../services/elevenlabs";
 import {
+  voiceMatchesLanguageFilter,
+  voiceSupportsModel,
+} from "../services/elevenlabs-voice-filter";
+import {
   listElevenlabsAvatars,
   getElevenlabsAvatar,
   createElevenlabsAvatar,
@@ -44,74 +48,6 @@ const updateElAvatarSchema = createElAvatarSchema.partial().extend({
 function isPgUniqueViolation(err: unknown): boolean {
   const e = err as { code?: string };
   return e?.code === "23505";
-}
-
-/**
- * Match requested BCP-47 tag against ElevenLabs metadata.
- * Important: many premade voices have `labels.language` = `en` only, but support Hindi etc.
- * via `verified_languages` — filtering must use that array too.
- */
-function voiceMatchesLanguageFilter(
-  voice: Record<string, unknown>,
-  want: string
-): boolean {
-  const w = want.trim().toLowerCase();
-  const primary = w.split("-")[0] || w;
-
-  const labels = voice.labels as Record<string, unknown> | undefined;
-  const labelLang =
-    typeof labels?.language === "string" ? labels.language.toLowerCase() : "";
-  if (
-    labelLang &&
-    (labelLang === primary ||
-      labelLang === w ||
-      w.startsWith(`${labelLang}-`) ||
-      primary === labelLang)
-  ) {
-    return true;
-  }
-
-  const verified = voice.verified_languages;
-  if (Array.isArray(verified)) {
-    for (const entry of verified) {
-      if (!entry || typeof entry !== "object") continue;
-      const e = entry as Record<string, unknown>;
-      const el =
-        typeof e.language === "string" ? e.language.toLowerCase() : "";
-      const loc =
-        typeof e.locale === "string" ? e.locale.toLowerCase().replace(/_/g, "-") : "";
-      if (el === primary || el === w) return true;
-      if (loc === w) return true;
-      if (loc) {
-        const locPrimary = loc.split("-")[0] || "";
-        if (locPrimary === primary) return true;
-      }
-    }
-  }
-
-  const name = typeof voice.name === "string" ? voice.name.toLowerCase() : "";
-  return name.includes(primary);
-}
-
-/** Voice lists this model in `high_quality_base_model_ids` or a `verified_languages` row. */
-function voiceSupportsModel(
-  voice: Record<string, unknown>,
-  modelId: string
-): boolean {
-  const m = modelId.trim();
-  if (!m) return true;
-  const hq = voice.high_quality_base_model_ids;
-  if (Array.isArray(hq) && hq.some((x) => String(x) === m)) return true;
-  const verified = voice.verified_languages;
-  if (Array.isArray(verified)) {
-    return verified.some(
-      (x) =>
-        x &&
-        typeof x === "object" &&
-        String((x as Record<string, unknown>).model_id) === m
-    );
-  }
-  return false;
 }
 
 export async function elevenlabsApiRoutes(app: FastifyInstance): Promise<void> {

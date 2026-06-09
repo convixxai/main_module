@@ -19,6 +19,7 @@ import { exotelStatusCallbackRoutes } from "./routes/exotel-status-callback";
 import { adminLogsRoutes } from "./routes/adminLogs";
 import { outboundCampaignRoutes } from "./routes/outbound-campaigns";
 import { voiceSimulatorRoutes } from "./routes/voice-simulator";
+import { elevenlabsVoiceBrowserRoutes } from "./routes/elevenlabs-voice-browser";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -56,6 +57,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(chatRoutes);
   app.register(voiceRoutes);
   app.register(voiceSimulatorRoutes);
+  app.register(elevenlabsVoiceBrowserRoutes);
   app.register(elevenlabsApiRoutes);
   app.register(exotelVoicebotRoutes);          // Exotel Voicebot WebSocket (multi-tenant)
   app.register(exotelSettingsRoutes);           // Exotel settings admin API
