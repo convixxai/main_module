@@ -7,7 +7,6 @@ import { getCustomerSettings } from "../services/customer-settings";
 import {
   humanizeTextForOpenAiTts,
   parseHumanizerStyleFields,
-  parseHumanizeDepth,
   buildOpenAiTtsDeliveryInstructions,
   DEFAULT_HUMANIZER_SYSTEM_PROMPT,
   DEFAULT_HUMANIZER_STYLE,
@@ -186,9 +185,6 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
           defaults.tts_instructions_auto !== false
         );
         const ttsInstructionsOverride = fields.tts_instructions?.trim() || "";
-        const humanizeDepth = parseHumanizeDepth(
-          fields.humanize_depth?.trim() || defaults.humanize_depth
-        );
         const responseFormat = (fields.response_format?.trim() ||
           defaults.response_format) as OpenAiTtsResponseFormat;
 
@@ -256,7 +252,6 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
               llmModel: llmModel,
               temperature: llmTemperature,
               maxTokens: llmMaxTokens,
-              depth: humanizeDepth,
               trace,
             });
             humanizedText = humanizerResult.humanized_text;
@@ -308,7 +303,6 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
           source_text: sourceText,
           humanized_text: humanizedText,
           skip_humanizer: skipHumanizer,
-          humanize_depth: humanizerResult?.humanize_depth ?? humanizeDepth,
           stt_language_code: sttLanguageCode,
           humanizer: humanizerResult
             ? {
@@ -318,7 +312,6 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
                 total_tokens: llmUsage?.totalTokens ?? 0,
                 cost_usd: humanizerCost,
                 style_settings: humanizerResult.style_settings,
-                oral_plan: humanizerResult.llm_analysis?.answer ?? null,
               }
             : null,
           tts_instructions_sent: ttsInstructionsSent,

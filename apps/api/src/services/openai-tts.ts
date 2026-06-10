@@ -92,15 +92,14 @@ export function openAiTtsModelSupportsInstructions(model: string): boolean {
 export function openAiTtsSimulatorDefaults() {
   return {
     tts_model: "gpt-4o-mini-tts" as OpenAiTtsModel,
-    voice: "coral" as OpenAiTtsVoice,
+    voice: "nova" as OpenAiTtsVoice,
     speed: 1,
     response_format: "mp3" as OpenAiTtsResponseFormat,
     tts_instructions: "",
     tts_instructions_auto: true,
-    humanize_depth: "deep" as const,
     llm_model: "",
-    llm_temperature: 1,
-    llm_max_tokens: 600,
+    llm_temperature: 0.85,
+    llm_max_tokens: 350,
     skip_humanizer: false,
     slider_bounds: {
       speed: { min: 0.25, max: 4, step: 0.05, default: 1 },

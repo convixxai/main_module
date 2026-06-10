@@ -169,7 +169,7 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         <h2>Humanizer system prompt</h2>
         <label>Core instructions (editable — injected with style settings below)</label>
         <textarea id="humanizerPrompt" class="xtall"></textarea>
-        <button type="button" class="secondary" id="btnResetPrompt">Reset to default prompt (v2)</button>
+        <button type="button" class="secondary" id="btnResetPrompt">Reset to default prompt (v3)</button>
         <p class="hint" id="promptVersionHint"></p>
       </section>
 
@@ -271,20 +271,15 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         <h2>LLM humanizer</h2>
         <div class="grid-2">
           <div>
-            <label>Model (try gpt-4o for best rewrites)</label>
-            <input type="text" id="llmModel" placeholder="gpt-4o" />
+            <label>Model (blank = tenant default — gpt-4o-mini is fastest)</label>
+            <input type="text" id="llmModel" placeholder="gpt-4o-mini" />
           </div>
           <div>
-            <label>Humanize depth</label>
-            <select id="humanizeDepth">
-              <option value="deep">deep — analyze then rewrite (recommended)</option>
-              <option value="fast">fast — single pass</option>
-            </select>
+            <label class="chk" style="margin-top:1.4rem">
+              <input type="checkbox" id="skipHumanizer" /> Skip humanizer — TTS source text as-is
+            </label>
           </div>
         </div>
-        <label class="chk">
-          <input type="checkbox" id="skipHumanizer" /> Skip humanizer — TTS source text as-is
-        </label>
         <div class="grid-2">
           <div class="slider-row">
             <div class="slider-head"><span>temperature</span><strong id="valTemp">0.85</strong></div>
@@ -366,7 +361,6 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       <section>
         <h2>Output</h2>
         <div><strong>Source</strong><pre id="outSource">—</pre></div>
-        <div><strong>Oral plan (deep mode)</strong><pre id="outOralPlan">—</pre></div>
         <div><strong>Humanized script</strong><pre id="outHumanized">—</pre></div>
         <div><strong>TTS instructions sent</strong><pre id="outTtsInstr">—</pre></div>
         <div><strong>Last API usage</strong><pre id="outUsage">—</pre></div>
@@ -431,7 +425,7 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       o.textContent = v;
       sel.appendChild(o);
     });
-    sel.value = CONFIG.voice || "coral";
+    sel.value = CONFIG.voice || "nova";
   }
 
   function initSlider(id, boundKey, val, labelId, decimals) {
@@ -452,12 +446,11 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     $("speakingPace").value = st.speaking_pace || "natural_conversational";
     $("warmth").value = st.warmth || "warm_friendly";
     $("formality").value = st.formality || "casual_professional";
-    $("useFillers").value = st.use_fillers || "natural_phone";
-    $("emphasisStyle").value = st.emphasis_style || "highly_expressive";
+    $("useFillers").value = st.use_fillers || "light_natural";
+    $("emphasisStyle").value = st.emphasis_style || "expressive_balanced";
     $("scenario").value = st.scenario || "live_phone_call";
-    $("reactionLevel").value = st.reaction_level || "animated";
+    $("reactionLevel").value = st.reaction_level || "believable_not_dramatic";
     $("pauseStyle").value = st.pause_style || "natural_micro_pauses";
-    $("humanizeDepth").value = CONFIG.humanize_depth || "deep";
     $("ttsInstructionsAuto").checked = CONFIG.tts_instructions_auto !== false;
     $("speakerPersona").value = st.speaker_persona || "";
     $("targetLanguage").value = st.target_language || "preserve_input_language";
@@ -523,7 +516,6 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       llm_temperature: $("llmTemperature").value,
       llm_max_tokens: $("llmMaxTokens").value,
       skip_humanizer: $("skipHumanizer").checked ? "true" : "false",
-      humanize_depth: $("humanizeDepth").value,
       tts_model: $("ttsModel").value,
       voice: $("voice").value,
       speed: $("speed").value,
@@ -542,7 +534,6 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
 
   function playResponse(data) {
     $("outSource").textContent = data.source_text || "—";
-    $("outOralPlan").textContent = (data.humanizer && data.humanizer.oral_plan) || "—";
     $("outHumanized").textContent = data.humanized_text || "—";
     $("outTtsInstr").textContent = data.tts_instructions_sent || "—";
     var u = data.api_usage || {};
@@ -550,7 +541,6 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     var t = data.tts || {};
     var lines = [];
     if (h) {
-      lines.push("Humanize depth: " + (data.humanize_depth || "—"));
       lines.push("Humanizer LLM: " + (h.model || "—"));
       lines.push("  prompt_tokens: " + (h.prompt_tokens ?? 0));
       lines.push("  completion_tokens: " + (h.completion_tokens ?? 0));
