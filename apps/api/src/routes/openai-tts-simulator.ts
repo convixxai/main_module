@@ -7,8 +7,11 @@ import { getCustomerSettings } from "../services/customer-settings";
 import {
   humanizeTextForOpenAiTts,
   parseHumanizerStyleFields,
+  parseHumanizeDepth,
+  buildOpenAiTtsDeliveryInstructions,
   DEFAULT_HUMANIZER_SYSTEM_PROMPT,
   DEFAULT_HUMANIZER_STYLE,
+  HUMANIZER_PROMPT_VERSION,
 } from "../services/openai-tts-humanizer";
 import {
   openaiTextToSpeech,
@@ -73,6 +76,7 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
     const customerId = (q.customer_id ?? "").trim();
     const configJson = JSON.stringify({
       ...openAiTtsSimulatorDefaults(),
+      prompt_version: HUMANIZER_PROMPT_VERSION,
       default_humanizer_system_prompt: DEFAULT_HUMANIZER_SYSTEM_PROMPT,
       default_humanizer_style: DEFAULT_HUMANIZER_STYLE,
     }).replace(/</g, "\\u003c");
@@ -86,6 +90,7 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
   app.get("/voice/openai-tts/simulator/config", async (_request, reply) => {
     return reply.send({
       ...openAiTtsSimulatorDefaults(),
+      prompt_version: HUMANIZER_PROMPT_VERSION,
       default_humanizer_system_prompt: DEFAULT_HUMANIZER_SYSTEM_PROMPT,
       default_humanizer_style: DEFAULT_HUMANIZER_STYLE,
     });
@@ -176,7 +181,14 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
         );
         const ttsVoice = (fields.voice?.trim() || defaults.voice).slice(0, 32);
         const ttsSpeed = parseNum(fields.speed, defaults.speed, 0.25, 4);
-        const ttsInstructions = fields.tts_instructions?.trim() || defaults.tts_instructions;
+        const ttsInstructionsAuto = parseBool(
+          fields.tts_instructions_auto,
+          defaults.tts_instructions_auto !== false
+        );
+        const ttsInstructionsOverride = fields.tts_instructions?.trim() || "";
+        const humanizeDepth = parseHumanizeDepth(
+          fields.humanize_depth?.trim() || defaults.humanize_depth
+        );
         const responseFormat = (fields.response_format?.trim() ||
           defaults.response_format) as OpenAiTtsResponseFormat;
 
@@ -244,6 +256,7 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
               llmModel: llmModel,
               temperature: llmTemperature,
               maxTokens: llmMaxTokens,
+              depth: humanizeDepth,
               trace,
             });
             humanizedText = humanizerResult.humanized_text;
@@ -259,6 +272,13 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
           return reply.status(500).send({ error: "Empty text for TTS" });
         }
 
+        const ttsInstructionsSent = ttsInstructionsAuto
+          ? buildOpenAiTtsDeliveryInstructions(
+              styleSettings,
+              ttsInstructionsOverride || null
+            )
+          : ttsInstructionsOverride || buildOpenAiTtsDeliveryInstructions(styleSettings);
+
         const tTts0 = Date.now();
         let ttsResult;
         try {
@@ -266,7 +286,7 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
             text: humanizedText,
             model: ttsModel,
             voice: ttsVoice,
-            instructions: ttsInstructions,
+            instructions: ttsInstructionsSent,
             speed: ttsSpeed,
             responseFormat,
           });
@@ -288,6 +308,7 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
           source_text: sourceText,
           humanized_text: humanizedText,
           skip_humanizer: skipHumanizer,
+          humanize_depth: humanizerResult?.humanize_depth ?? humanizeDepth,
           stt_language_code: sttLanguageCode,
           humanizer: humanizerResult
             ? {
@@ -297,8 +318,11 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
                 total_tokens: llmUsage?.totalTokens ?? 0,
                 cost_usd: humanizerCost,
                 style_settings: humanizerResult.style_settings,
+                oral_plan: humanizerResult.llm_analysis?.answer ?? null,
               }
             : null,
+          tts_instructions_sent: ttsInstructionsSent,
+          tts_instructions_auto: ttsInstructionsAuto,
           tts: {
             model: ttsResult.usage.model,
             voice: ttsResult.usage.voice,

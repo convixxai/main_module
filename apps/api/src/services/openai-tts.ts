@@ -92,13 +92,14 @@ export function openAiTtsModelSupportsInstructions(model: string): boolean {
 export function openAiTtsSimulatorDefaults() {
   return {
     tts_model: "gpt-4o-mini-tts" as OpenAiTtsModel,
-    voice: "nova" as OpenAiTtsVoice,
+    voice: "coral" as OpenAiTtsVoice,
     speed: 1,
     response_format: "mp3" as OpenAiTtsResponseFormat,
-    tts_instructions:
-      "Speak like a real human on a live phone call. Use natural intonation, subtle breath, and believable emotion. Never sound robotic or like you are reading a script.",
+    tts_instructions: "",
+    tts_instructions_auto: true,
+    humanize_depth: "deep" as const,
     llm_model: "",
-    llm_temperature: 0.85,
+    llm_temperature: 1,
     llm_max_tokens: 600,
     skip_humanizer: false,
     slider_bounds: {

@@ -169,7 +169,8 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         <h2>Humanizer system prompt</h2>
         <label>Core instructions (editable — injected with style settings below)</label>
         <textarea id="humanizerPrompt" class="xtall"></textarea>
-        <button type="button" class="secondary" id="btnResetPrompt">Reset to default prompt</button>
+        <button type="button" class="secondary" id="btnResetPrompt">Reset to default prompt (v2)</button>
+        <p class="hint" id="promptVersionHint"></p>
       </section>
 
       <section>
@@ -270,15 +271,20 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         <h2>LLM humanizer</h2>
         <div class="grid-2">
           <div>
-            <label>Model (blank = tenant / server default)</label>
-            <input type="text" id="llmModel" placeholder="gpt-4o-mini" />
+            <label>Model (try gpt-4o for best rewrites)</label>
+            <input type="text" id="llmModel" placeholder="gpt-4o" />
           </div>
           <div>
-            <label class="chk" style="margin-top:1.4rem">
-              <input type="checkbox" id="skipHumanizer" /> Skip humanizer — TTS source text as-is
-            </label>
+            <label>Humanize depth</label>
+            <select id="humanizeDepth">
+              <option value="deep">deep — analyze then rewrite (recommended)</option>
+              <option value="fast">fast — single pass</option>
+            </select>
           </div>
         </div>
+        <label class="chk">
+          <input type="checkbox" id="skipHumanizer" /> Skip humanizer — TTS source text as-is
+        </label>
         <div class="grid-2">
           <div class="slider-row">
             <div class="slider-head"><span>temperature</span><strong id="valTemp">0.85</strong></div>
@@ -335,9 +341,12 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
           <div class="slider-head"><span>speed (tts-1 / tts-1-hd)</span><strong id="valSpeed">1.00</strong></div>
           <input type="range" id="speed" />
         </div>
-        <label>TTS instructions (gpt-4o-mini-tts only — delivery tone for the audio model)</label>
-        <textarea id="ttsInstructions" class="tall"></textarea>
-        <p class="hint">Separate from the humanizer prompt. Controls how OpenAI speaks the final script.</p>
+        <label class="chk">
+          <input type="checkbox" id="ttsInstructionsAuto" checked /> Auto-build TTS instructions from style settings (recommended)
+        </label>
+        <label>Extra TTS instructions (optional — appended when auto-build is on)</label>
+        <textarea id="ttsInstructions" class="tall" placeholder="Leave empty to use auto-built delivery instructions from your style settings above."></textarea>
+        <p class="hint">gpt-4o-mini-tts follows these instructions closely — style sliders now drive the audio model, not just the LLM.</p>
       </section>
 
       <section>
@@ -357,7 +366,9 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       <section>
         <h2>Output</h2>
         <div><strong>Source</strong><pre id="outSource">—</pre></div>
+        <div><strong>Oral plan (deep mode)</strong><pre id="outOralPlan">—</pre></div>
         <div><strong>Humanized script</strong><pre id="outHumanized">—</pre></div>
+        <div><strong>TTS instructions sent</strong><pre id="outTtsInstr">—</pre></div>
         <div><strong>Last API usage</strong><pre id="outUsage">—</pre></div>
         <div><strong>Timings</strong><pre id="outTimings">—</pre></div>
         <audio id="player" controls></audio>
@@ -420,7 +431,7 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       o.textContent = v;
       sel.appendChild(o);
     });
-    sel.value = CONFIG.voice || "nova";
+    sel.value = CONFIG.voice || "coral";
   }
 
   function initSlider(id, boundKey, val, labelId, decimals) {
@@ -441,11 +452,13 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     $("speakingPace").value = st.speaking_pace || "natural_conversational";
     $("warmth").value = st.warmth || "warm_friendly";
     $("formality").value = st.formality || "casual_professional";
-    $("useFillers").value = st.use_fillers || "light_natural";
-    $("emphasisStyle").value = st.emphasis_style || "expressive_balanced";
+    $("useFillers").value = st.use_fillers || "natural_phone";
+    $("emphasisStyle").value = st.emphasis_style || "highly_expressive";
     $("scenario").value = st.scenario || "live_phone_call";
-    $("reactionLevel").value = st.reaction_level || "believable_not_dramatic";
+    $("reactionLevel").value = st.reaction_level || "animated";
     $("pauseStyle").value = st.pause_style || "natural_micro_pauses";
+    $("humanizeDepth").value = CONFIG.humanize_depth || "deep";
+    $("ttsInstructionsAuto").checked = CONFIG.tts_instructions_auto !== false;
     $("speakerPersona").value = st.speaker_persona || "";
     $("targetLanguage").value = st.target_language || "preserve_input_language";
     $("ttsModel").value = CONFIG.tts_model || "gpt-4o-mini-tts";
@@ -469,17 +482,27 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
 
   $("btnResetPrompt").onclick = function () {
     $("humanizerPrompt").value = CONFIG.default_humanizer_system_prompt || "";
+    localStorage.setItem("oaiTtsPromptVersion", String(CONFIG.prompt_version || 0));
+    $("promptVersionHint").textContent = "Using latest default prompt.";
   };
 
   function persistUi() {
     localStorage.setItem("oaiTtsBase", root());
     localStorage.setItem("oaiTtsKey", ($("apiKey").value || "").trim());
     localStorage.setItem("oaiTtsHumanizerPrompt", $("humanizerPrompt").value);
+    localStorage.setItem("oaiTtsPromptVersion", String(CONFIG.prompt_version || 0));
   }
 
-  var savedPrompt = localStorage.getItem("oaiTtsHumanizerPrompt");
   applyDefaults();
-  if (savedPrompt) $("humanizerPrompt").value = savedPrompt;
+  var savedVer = localStorage.getItem("oaiTtsPromptVersion");
+  var curVer = String(CONFIG.prompt_version || 0);
+  if (savedVer === curVer) {
+    var savedPrompt = localStorage.getItem("oaiTtsHumanizerPrompt");
+    if (savedPrompt) $("humanizerPrompt").value = savedPrompt;
+    $("promptVersionHint").textContent = "";
+  } else {
+    $("promptVersionHint").textContent = "Prompt upgraded to v" + curVer + " — click Reset if you still use an old saved prompt.";
+  }
 
   function formFields() {
     return {
@@ -500,10 +523,12 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       llm_temperature: $("llmTemperature").value,
       llm_max_tokens: $("llmMaxTokens").value,
       skip_humanizer: $("skipHumanizer").checked ? "true" : "false",
+      humanize_depth: $("humanizeDepth").value,
       tts_model: $("ttsModel").value,
       voice: $("voice").value,
       speed: $("speed").value,
       tts_instructions: $("ttsInstructions").value.trim(),
+      tts_instructions_auto: $("ttsInstructionsAuto").checked ? "true" : "false",
       response_format: $("responseFormat").value,
       target_language_code: $("targetLang").value
     };
@@ -517,12 +542,15 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
 
   function playResponse(data) {
     $("outSource").textContent = data.source_text || "—";
+    $("outOralPlan").textContent = (data.humanizer && data.humanizer.oral_plan) || "—";
     $("outHumanized").textContent = data.humanized_text || "—";
+    $("outTtsInstr").textContent = data.tts_instructions_sent || "—";
     var u = data.api_usage || {};
     var h = data.humanizer;
     var t = data.tts || {};
     var lines = [];
     if (h) {
+      lines.push("Humanize depth: " + (data.humanize_depth || "—"));
       lines.push("Humanizer LLM: " + (h.model || "—"));
       lines.push("  prompt_tokens: " + (h.prompt_tokens ?? 0));
       lines.push("  completion_tokens: " + (h.completion_tokens ?? 0));
