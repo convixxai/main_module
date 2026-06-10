@@ -54,7 +54,7 @@ function assertCustomerScope(
   return authCustomerId;
 }
 
-async function runSimulatorStt(params: {
+export async function runSimulatorStt(params: {
   fileBuffer: Buffer;
   filename: string;
   mimeType: string;
