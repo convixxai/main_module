@@ -132,7 +132,10 @@ export function buildSimulatorSaveUi(
       });
       var json = await res.json().catch(function () { return {}; });
       if (!res.ok) throw new Error(json.error || ("HTTP " + res.status));
-      showOk("Saved! Email sent to convixx.ai@gmail.com (CC: sandeshr.patil21@gmail.com).");
+      var okMsg = "Saved! Email sent to convixx.ai@gmail.com (CC: sandeshr.patil21@gmail.com).";
+      if (json.delivery_note) okMsg += " Note: " + json.delivery_note;
+      if (json.transport) okMsg += " [" + json.transport + "]";
+      showOk(okMsg);
       setTimeout(closeModal, 2200);
     } catch (e) {
       showErr(e.message || String(e));

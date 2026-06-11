@@ -3,7 +3,10 @@ import { z } from "zod";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import {
   sendSimulatorCharacterSaveEmail,
+  sendSimulatorTestEmail,
+  getSimulatorEmailStatus,
   simulatorSaveEmailConfigured,
+  formatMailError,
 } from "../services/simulator-save-email";
 
 const saveSchema = z.object({
@@ -42,8 +45,7 @@ async function handleSave(
   if (!simulatorSaveEmailConfigured()) {
     return reply.status(503).send({
       error:
-        "Email is not configured. On Linux: EMAIL_TRANSPORT=sendmail + Postfix, " +
-        "or set SMTP_HOST, SMTP_USER, SMTP_PASS.",
+        "Email is not configured. Set SMTP_HOST=smtp.gmail.com, SMTP_USER, SMTP_PASS (Gmail App Password).",
     });
   }
 
@@ -73,11 +75,12 @@ async function handleSave(
       character_name: parsed.data.character_name.trim(),
       message_id: result.messageId,
       transport: result.transport,
+      delivery_note: result.delivery_note,
       emailed_to: "convixx.ai@gmail.com",
       cc: "sandeshr.patil21@gmail.com",
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Failed to send email";
+    const msg = formatMailError(err);
     request.log.error({ err }, "simulator character save email failed");
     return reply.status(502).send({ error: msg });
   }
@@ -93,5 +96,40 @@ export async function simulatorSaveRoutes(app: FastifyInstance): Promise<void> {
     "/voice/openai-tts/simulator/save-character",
     { preHandler: apiKeyAuth },
     handleSave
+  );
+
+  app.get(
+    "/voice/simulator/email-status",
+    { preHandler: apiKeyAuth },
+    async (_request: AuthenticatedRequest, reply) => {
+      const status = await getSimulatorEmailStatus();
+      return reply.send(status);
+    }
+  );
+
+  app.post(
+    "/voice/simulator/test-email",
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      if (!simulatorSaveEmailConfigured()) {
+        return reply.status(503).send({
+          error:
+            "Email is not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS (Gmail App Password).",
+        });
+      }
+      try {
+        const result = await sendSimulatorTestEmail();
+        return reply.send({
+          ok: true,
+          ...result,
+          emailed_to: "convixx.ai@gmail.com",
+          cc: "sandeshr.patil21@gmail.com",
+        });
+      } catch (err: unknown) {
+        const msg = formatMailError(err);
+        request.log.error({ err }, "simulator test email failed");
+        return reply.status(502).send({ error: msg });
+      }
+    }
   );
 }

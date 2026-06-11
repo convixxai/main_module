@@ -12,6 +12,18 @@ dotenv.config({ path: path.resolve(API_ROOT, ".env") });
  */
 export const DEFAULT_ELEVENLABS_TTS_VOICE_ID = "2cdvnKJ5TZi631y5PN1s";
 
+/** Strip wrapping quotes from .env values (e.g. SMTP_PASS='secret'). */
+export function stripEnvQuotes(raw: string | undefined): string {
+  const t = (raw ?? "").trim();
+  if (
+    (t.startsWith("'") && t.endsWith("'")) ||
+    (t.startsWith('"') && t.endsWith('"'))
+  ) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
 export const env = {
   port: parseInt(process.env.PORT || "8080", 10),
 
@@ -238,66 +250,56 @@ export const env = {
 
   /**
    * Simulator character-save emails.
-   * Production Linux: set `EMAIL_TRANSPORT=sendmail` (like PHP mail()) when Postfix/sendmail is installed.
-   * Or use SMTP_* for Gmail app password / external relay.
+   * **Prefer Gmail SMTP** (SMTP_USER + SMTP_PASS app password) for reliable delivery to Gmail inboxes.
+   * Sendmail/Postfix alone often accepts mail locally but never reaches Gmail (port 25 blocked, no SPF).
    */
   email: (() => {
-    const transportRaw = (process.env.EMAIL_TRANSPORT || "auto")
-      .trim()
-      .toLowerCase();
-    const transport =
-      transportRaw === "smtp" || transportRaw === "sendmail"
-        ? transportRaw
-        : "auto";
-
+    const smtpUser = stripEnvQuotes(process.env.SMTP_USER);
+    const smtpPass = stripEnvQuotes(process.env.SMTP_PASS);
+    const smtpHost = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
     const smtpEnabled = Boolean(
-      process.env.SMTP_HOST?.trim() &&
-        process.env.SMTP_USER?.trim() &&
-        process.env.SMTP_PASS?.trim()
+      smtpHost && smtpUser && smtpPass
     );
 
-    const sendmailExplicit =
-      transport === "sendmail" || process.env.SENDMAIL === "true";
+    const wantSendmail =
+      (process.env.EMAIL_TRANSPORT || "").trim().toLowerCase() === "sendmail" ||
+      process.env.SENDMAIL === "true";
 
     const sendmailOnLinux =
       process.platform !== "win32" &&
-      (sendmailExplicit ||
-        (transport === "auto" && !smtpEnabled));
+      (wantSendmail || !smtpEnabled);
 
     const from =
-      (process.env.EMAIL_FROM || process.env.SMTP_FROM || "").trim() ||
+      stripEnvQuotes(process.env.EMAIL_FROM || process.env.SMTP_FROM) ||
       (smtpEnabled
-        ? `Convixx Simulator <${(process.env.SMTP_USER || "noreply@convixx.ai").trim()}>`
+        ? `Convixx Simulator <${smtpUser}>`
         : "Convixx Simulator <noreply@convixx.ai>");
 
+    /** SMTP wins whenever credentials exist — sendmail alone rarely delivers to Gmail. */
+    const activeTransport: "smtp" | "sendmail" | null = smtpEnabled
+      ? "smtp"
+      : sendmailOnLinux
+        ? "sendmail"
+        : null;
+
     return {
-      transport,
       from,
       smtp: {
         enabled: smtpEnabled,
-        host: (process.env.SMTP_HOST || "smtp.gmail.com").trim(),
+        host: smtpHost,
         port: parseInt(process.env.SMTP_PORT || "587", 10),
         secure: process.env.SMTP_SECURE === "true",
-        user: (process.env.SMTP_USER || "").trim(),
-        pass: (process.env.SMTP_PASS || "").trim(),
+        user: smtpUser,
+        pass: smtpPass,
+        useGmailService:
+          smtpHost.includes("gmail.com") || smtpUser.endsWith("@gmail.com"),
       },
       sendmail: {
-        enabled: sendmailOnLinux,
-        /** Path to sendmail binary (Postfix provides /usr/sbin/sendmail). */
+        enabled: sendmailOnLinux && !smtpEnabled,
         path: (process.env.SENDMAIL_PATH || "/usr/sbin/sendmail").trim(),
       },
-      /** True when SMTP or Linux sendmail transport is available. */
-      configured:
-        smtpEnabled ||
-        (sendmailOnLinux && transport !== "smtp"),
-      /** Which transport will be used (for logs / errors). */
-      activeTransport:
-        transport === "smtp" || (transport === "auto" && smtpEnabled)
-          ? ("smtp" as const)
-          : sendmailOnLinux
-            ? ("sendmail" as const)
-            : null,
+      configured: activeTransport !== null,
+      activeTransport,
     };
   })(),
 };
-
