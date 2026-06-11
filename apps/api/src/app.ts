@@ -21,6 +21,7 @@ import { outboundCampaignRoutes } from "./routes/outbound-campaigns";
 import { voiceSimulatorRoutes } from "./routes/voice-simulator";
 import { elevenlabsVoiceBrowserRoutes } from "./routes/elevenlabs-voice-browser";
 import { openaiTtsSimulatorRoutes } from "./routes/openai-tts-simulator";
+import { simulatorSaveRoutes } from "./routes/simulator-save";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -59,6 +60,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(voiceRoutes);
   app.register(voiceSimulatorRoutes);
   app.register(openaiTtsSimulatorRoutes);
+  app.register(simulatorSaveRoutes);
   app.register(elevenlabsVoiceBrowserRoutes);
   app.register(elevenlabsApiRoutes);
   app.register(exotelVoicebotRoutes);          // Exotel Voicebot WebSocket (multi-tenant)

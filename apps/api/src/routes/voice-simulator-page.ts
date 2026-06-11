@@ -296,6 +296,7 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       <div><strong>Timings</strong><pre id="outTimings">—</pre></div>
       <audio id="player" controls></audio>
       <p class="hint">Playback: mono PCM s16le @ 8 kHz (telephony preview).</p>
+      <button type="button" class="secondary btn-save-char" id="btnSaveCharacter" disabled>Save character profile</button>
       <div class="err" id="outErr" style="display:none"></div>
     </section>
     </div>
@@ -313,6 +314,10 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   var CONFIG = __SIMULATOR_CONFIG__;
   var CUSTOMER_ID = "__CUSTOMER_ID__";
   var LANG_SUPPORT = CONFIG.language_support || {};
+  var lastTurn = null;
+  var lastAudioB64 = null;
+  var lastAudioMime = "audio/wav";
+  var lastAudioFilename = "elevenlabs_output.wav";
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -507,7 +512,25 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     return new Blob([buf], { type: "audio/wav" });
   }
 
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () {
+        var s = String(r.result || "");
+        resolve(s.indexOf(",") >= 0 ? s.split(",")[1] : s);
+      };
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+  }
+
+  function setSaveReady(ready) {
+    var b = $("btnSaveCharacter");
+    if (b) b.disabled = !ready;
+  }
+
   function playResponse(data) {
+    lastTurn = data;
     $("outTranscript").textContent = data.transcript || "—";
     $("outAnswer").textContent = data.answer || "—";
     var t = data.timings || {};
@@ -528,6 +551,12 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       var blob = pcmBase64ToWavBlob(data.audio.base64, data.audio.sample_rate || 8000);
       $("player").src = URL.createObjectURL(blob);
       $("player").play().catch(function () {});
+      lastAudioMime = "audio/wav";
+      lastAudioFilename = "elevenlabs_output.wav";
+      blobToBase64(blob).then(function (b64) {
+        lastAudioB64 = b64;
+        setSaveReady(!!b64);
+      }).catch(function () { setSaveReady(false); });
     }
   }
 
@@ -754,7 +783,39 @@ export const VOICE_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   if (!CUSTOMER_ID) {
     showErr("Missing ?customer_id= in URL. Example: /voice/simulator?customer_id=YOUR-UUID");
   }
+
+  window.__simSaveApiBase = root;
+  window.__simSaveHasAudio = function () { return !!lastAudioB64; };
+  window.__simSaveCollectPayload = function (characterName, simType) {
+    return {
+      character_name: characterName,
+      simulator_type: simType,
+      customer_id: CUSTOMER_ID,
+      settings: {
+        connection: {
+          api_base: root(),
+          customer_id: CUSTOMER_ID,
+          agent_id: $("agentId").value.trim(),
+          session_id: $("sessionId").value.trim(),
+          x_api_key: ($("apiKey").value || "").trim(),
+        },
+        elevenlabs_tts: ttsFields(),
+        additional_system_prompt: $("additionalSystemPrompt").value,
+        language_ui: {
+          language_code: $("languageCode").value,
+          target_language_code: $("targetLang").value,
+        },
+        server_config_snapshot: CONFIG,
+      },
+      last_output: lastTurn,
+      audio_base64: lastAudioB64,
+      audio_content_type: lastAudioMime,
+      audio_filename: lastAudioFilename,
+      _apiKey: ($("apiKey").value || "").trim(),
+    };
+  };
 })();
   </script>
+__SIMULATOR_SAVE_UI__
 </body>
 </html>`;

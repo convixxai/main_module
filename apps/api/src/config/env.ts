@@ -235,5 +235,22 @@ export const env = {
    * If empty, the incoming request `Host` is used when a request exists; otherwise `localhost` in URLs.
    */
   publicApiHost: (process.env.PUBLIC_API_HOST || "").trim(),
+
+  /** SMTP for simulator character-save emails (Gmail app password, etc.). */
+  smtp: {
+    enabled: Boolean(
+      process.env.SMTP_HOST?.trim() &&
+        process.env.SMTP_USER?.trim() &&
+        process.env.SMTP_PASS?.trim()
+    ),
+    host: (process.env.SMTP_HOST || "smtp.gmail.com").trim(),
+    port: parseInt(process.env.SMTP_PORT || "587", 10),
+    secure: process.env.SMTP_SECURE === "true",
+    user: (process.env.SMTP_USER || "").trim(),
+    pass: (process.env.SMTP_PASS || "").trim(),
+    from:
+      (process.env.SMTP_FROM || "").trim() ||
+      `Convixx Simulator <${(process.env.SMTP_USER || "noreply@convixx.ai").trim()}>`,
+  },
 };
 

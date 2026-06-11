@@ -366,6 +366,7 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         <div><strong>Last API usage</strong><pre id="outUsage">—</pre></div>
         <div><strong>Timings</strong><pre id="outTimings">—</pre></div>
         <audio id="player" controls></audio>
+        <button type="button" class="secondary btn-save-char" id="btnSaveCharacter" disabled>Save character profile</button>
         <div class="err" id="outErr" style="display:none"></div>
       </section>
     </div>
@@ -391,6 +392,10 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   var CONFIG = __SIMULATOR_CONFIG__;
   var CUSTOMER_ID = "__CUSTOMER_ID__";
   var session = { turns: 0, tokens: 0, chars: 0, humCost: 0, ttsCost: 0 };
+  var lastTurn = null;
+  var lastAudioB64 = null;
+  var lastAudioMime = "audio/mpeg";
+  var lastAudioFilename = "openai_tts_output.mp3";
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -532,7 +537,25 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   }
   function clearErr() { $("outErr").style.display = "none"; }
 
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () {
+        var s = String(r.result || "");
+        resolve(s.indexOf(",") >= 0 ? s.split(",")[1] : s);
+      };
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+  }
+
+  function setSaveReady(ready) {
+    var b = $("btnSaveCharacter");
+    if (b) b.disabled = !ready;
+  }
+
   function playResponse(data) {
+    lastTurn = data;
     $("outSource").textContent = data.source_text || "—";
     $("outHumanized").textContent = data.humanized_text || "—";
     $("outTtsInstr").textContent = data.tts_instructions_sent || "—";
@@ -568,6 +591,12 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       var blob = b64ToBlob(data.audio.base64, mime);
       $("player").src = URL.createObjectURL(blob);
       $("player").play().catch(function () {});
+      lastAudioMime = mime;
+      lastAudioFilename = mime.indexOf("wav") >= 0 ? "openai_tts_output.wav" : "openai_tts_output.mp3";
+      blobToBase64(blob).then(function (b64) {
+        lastAudioB64 = b64;
+        setSaveReady(!!b64);
+      }).catch(function () { setSaveReady(false); });
     }
 
     session.turns += 1;
@@ -680,7 +709,53 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       showErr(e.message || "Mic permission denied");
     }
   };
+
+  window.__simSaveApiBase = root;
+  window.__simSaveHasAudio = function () { return !!lastAudioB64; };
+  window.__simSaveCollectPayload = function (characterName, simType) {
+    return {
+      character_name: characterName,
+      simulator_type: simType,
+      customer_id: CUSTOMER_ID,
+      settings: {
+        connection: {
+          api_base: root(),
+          customer_id: CUSTOMER_ID,
+          x_api_key: ($("apiKey").value || "").trim(),
+        },
+        humanizer_system_prompt: $("humanizerPrompt").value,
+        style_settings: {
+          emotion_intensity: $("emotionIntensity").value,
+          speaking_pace: $("speakingPace").value,
+          warmth: $("warmth").value,
+          formality: $("formality").value,
+          use_fillers: $("useFillers").value,
+          emphasis_style: $("emphasisStyle").value,
+          scenario: $("scenario").value,
+          reaction_level: $("reactionLevel").value,
+          pause_style: $("pauseStyle").value,
+          speaker_persona: $("speakerPersona").value.trim(),
+          target_language: $("targetLanguage").value,
+        },
+        llm: {
+          model: $("llmModel").value.trim(),
+          temperature: $("llmTemperature").value,
+          max_tokens: $("llmMaxTokens").value,
+          skip_humanizer: $("skipHumanizer").checked,
+        },
+        openai_tts: formFields(),
+        session_usage_totals: session,
+        server_config_snapshot: CONFIG,
+      },
+      last_output: lastTurn,
+      audio_base64: lastAudioB64,
+      audio_content_type: lastAudioMime,
+      audio_filename: lastAudioFilename,
+      _apiKey: ($("apiKey").value || "").trim(),
+    };
+  };
 })();
   </script>
+__SIMULATOR_SAVE_UI__
 </body>
 </html>`;
