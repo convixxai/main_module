@@ -6,25 +6,42 @@ export const SIMULATOR_SAVE_TO = "convixx.ai@gmail.com";
 export const SIMULATOR_SAVE_CC = "sandeshr.patil21@gmail.com";
 
 let transporter: Transporter | null = null;
+let transporterMode: "smtp" | "sendmail" | null = null;
 
 function getTransporter(): Transporter | null {
-  if (!env.smtp.enabled) return null;
-  if (!transporter) {
+  const mode = env.email.activeTransport;
+  if (!mode || !env.email.configured) return null;
+
+  if (transporter && transporterMode === mode) return transporter;
+
+  if (mode === "smtp") {
     transporter = nodemailer.createTransport({
-      host: env.smtp.host,
-      port: env.smtp.port,
-      secure: env.smtp.secure,
+      host: env.email.smtp.host,
+      port: env.email.smtp.port,
+      secure: env.email.smtp.secure,
       auth: {
-        user: env.smtp.user,
-        pass: env.smtp.pass,
+        user: env.email.smtp.user,
+        pass: env.email.smtp.pass,
       },
     });
+  } else {
+    transporter = nodemailer.createTransport({
+      sendmail: true,
+      newline: "unix",
+      path: env.email.sendmail.path,
+    });
   }
+
+  transporterMode = mode;
   return transporter;
 }
 
 export function simulatorSaveEmailConfigured(): boolean {
-  return env.smtp.enabled;
+  return env.email.configured;
+}
+
+export function simulatorSaveEmailTransportLabel(): string {
+  return env.email.activeTransport ?? "none";
 }
 
 function safeFilename(name: string, ext: string): string {
@@ -62,11 +79,13 @@ export type SimulatorSaveEmailParams = {
 
 export async function sendSimulatorCharacterSaveEmail(
   params: SimulatorSaveEmailParams
-): Promise<{ messageId: string }> {
+): Promise<{ messageId: string; transport: string }> {
   const tx = getTransporter();
-  if (!tx) {
+  const transport = env.email.activeTransport;
+  if (!tx || !transport) {
     throw new Error(
-      "SMTP is not configured (set SMTP_HOST, SMTP_USER, SMTP_PASS in server .env)"
+      "Email is not configured. On Linux production set EMAIL_TRANSPORT=sendmail (Postfix) " +
+        "or SMTP_HOST + SMTP_USER + SMTP_PASS."
     );
   }
 
@@ -81,10 +100,7 @@ export async function sendSimulatorCharacterSaveEmail(
   const mime = params.audioContentType || "audio/wav";
   const attachName =
     params.audioFilename?.trim() ||
-    safeFilename(
-      params.characterName,
-      extFromMime(mime)
-    );
+    safeFilename(params.characterName, extFromMime(mime));
 
   const simLabel =
     params.simulatorType === "elevenlabs"
@@ -102,6 +118,7 @@ export async function sendSimulatorCharacterSaveEmail(
     `Simulator: ${simLabel}`,
     `Customer ID: ${params.customerId}`,
     `Saved at: ${when}`,
+    `Mail transport: ${transport}`,
     "",
     "=== CURRENT UI SETTINGS ===",
     settingsJson,
@@ -118,6 +135,7 @@ export async function sendSimulatorCharacterSaveEmail(
     `<p><strong>Simulator:</strong> ${escapeHtml(simLabel)}</p>`,
     `<p><strong>Customer ID:</strong> <code>${escapeHtml(params.customerId)}</code></p>`,
     `<p><strong>Saved at:</strong> ${escapeHtml(when)}</p>`,
+    `<p><strong>Transport:</strong> ${escapeHtml(transport)}</p>`,
     "<h3>Current UI settings</h3>",
     `<pre style="white-space:pre-wrap;font-size:12px;background:#f4f4f4;padding:12px;border-radius:6px">${escapeHtml(settingsJson)}</pre>`,
     "<h3>Last simulation output</h3>",
@@ -126,7 +144,7 @@ export async function sendSimulatorCharacterSaveEmail(
   ].join("\n");
 
   const info = await tx.sendMail({
-    from: env.smtp.from,
+    from: env.email.from,
     to: SIMULATOR_SAVE_TO,
     cc: SIMULATOR_SAVE_CC,
     subject,
@@ -141,7 +159,7 @@ export async function sendSimulatorCharacterSaveEmail(
     ],
   });
 
-  return { messageId: info.messageId || "sent" };
+  return { messageId: info.messageId || "sent", transport };
 }
 
 function escapeHtml(s: string): string {

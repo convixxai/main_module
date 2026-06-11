@@ -42,7 +42,8 @@ async function handleSave(
   if (!simulatorSaveEmailConfigured()) {
     return reply.status(503).send({
       error:
-        "Email is not configured on this server (SMTP_HOST, SMTP_USER, SMTP_PASS)",
+        "Email is not configured. On Linux: EMAIL_TRANSPORT=sendmail + Postfix, " +
+        "or set SMTP_HOST, SMTP_USER, SMTP_PASS.",
     });
   }
 
@@ -71,6 +72,7 @@ async function handleSave(
       ok: true,
       character_name: parsed.data.character_name.trim(),
       message_id: result.messageId,
+      transport: result.transport,
       emailed_to: "convixx.ai@gmail.com",
       cc: "sandeshr.patil21@gmail.com",
     });

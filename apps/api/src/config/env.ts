@@ -236,21 +236,68 @@ export const env = {
    */
   publicApiHost: (process.env.PUBLIC_API_HOST || "").trim(),
 
-  /** SMTP for simulator character-save emails (Gmail app password, etc.). */
-  smtp: {
-    enabled: Boolean(
+  /**
+   * Simulator character-save emails.
+   * Production Linux: set `EMAIL_TRANSPORT=sendmail` (like PHP mail()) when Postfix/sendmail is installed.
+   * Or use SMTP_* for Gmail app password / external relay.
+   */
+  email: (() => {
+    const transportRaw = (process.env.EMAIL_TRANSPORT || "auto")
+      .trim()
+      .toLowerCase();
+    const transport =
+      transportRaw === "smtp" || transportRaw === "sendmail"
+        ? transportRaw
+        : "auto";
+
+    const smtpEnabled = Boolean(
       process.env.SMTP_HOST?.trim() &&
         process.env.SMTP_USER?.trim() &&
         process.env.SMTP_PASS?.trim()
-    ),
-    host: (process.env.SMTP_HOST || "smtp.gmail.com").trim(),
-    port: parseInt(process.env.SMTP_PORT || "587", 10),
-    secure: process.env.SMTP_SECURE === "true",
-    user: (process.env.SMTP_USER || "").trim(),
-    pass: (process.env.SMTP_PASS || "").trim(),
-    from:
-      (process.env.SMTP_FROM || "").trim() ||
-      `Convixx Simulator <${(process.env.SMTP_USER || "noreply@convixx.ai").trim()}>`,
-  },
+    );
+
+    const sendmailExplicit =
+      transport === "sendmail" || process.env.SENDMAIL === "true";
+
+    const sendmailOnLinux =
+      process.platform !== "win32" &&
+      (sendmailExplicit ||
+        (transport === "auto" && !smtpEnabled));
+
+    const from =
+      (process.env.EMAIL_FROM || process.env.SMTP_FROM || "").trim() ||
+      (smtpEnabled
+        ? `Convixx Simulator <${(process.env.SMTP_USER || "noreply@convixx.ai").trim()}>`
+        : "Convixx Simulator <noreply@convixx.ai>");
+
+    return {
+      transport,
+      from,
+      smtp: {
+        enabled: smtpEnabled,
+        host: (process.env.SMTP_HOST || "smtp.gmail.com").trim(),
+        port: parseInt(process.env.SMTP_PORT || "587", 10),
+        secure: process.env.SMTP_SECURE === "true",
+        user: (process.env.SMTP_USER || "").trim(),
+        pass: (process.env.SMTP_PASS || "").trim(),
+      },
+      sendmail: {
+        enabled: sendmailOnLinux,
+        /** Path to sendmail binary (Postfix provides /usr/sbin/sendmail). */
+        path: (process.env.SENDMAIL_PATH || "/usr/sbin/sendmail").trim(),
+      },
+      /** True when SMTP or Linux sendmail transport is available. */
+      configured:
+        smtpEnabled ||
+        (sendmailOnLinux && transport !== "smtp"),
+      /** Which transport will be used (for logs / errors). */
+      activeTransport:
+        transport === "smtp" || (transport === "auto" && smtpEnabled)
+          ? ("smtp" as const)
+          : sendmailOnLinux
+            ? ("sendmail" as const)
+            : null,
+    };
+  })(),
 };
 
