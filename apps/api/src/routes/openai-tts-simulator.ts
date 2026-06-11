@@ -22,7 +22,6 @@ import { createRagTrace } from "../services/rag-trace";
 import type { SarvamSttMode } from "../services/sarvam";
 import { runSimulatorStt } from "./voice-simulator";
 import { OPENAI_TTS_SIMULATOR_PAGE_HTML } from "./openai-tts-simulator-page";
-import { buildSimulatorSaveUi } from "./simulator-save-ui";
 
 const STT_MODES: SarvamSttMode[] = [
   "transcribe",
@@ -83,12 +82,7 @@ export async function openaiTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
     const html = OPENAI_TTS_SIMULATOR_PAGE_HTML.replace(
       "__CUSTOMER_ID__",
       customerId.replace(/[<>&"']/g, "")
-    )
-      .replace("__SIMULATOR_CONFIG__", configJson)
-      .replace(
-        "__SIMULATOR_SAVE_UI__",
-        buildSimulatorSaveUi("openai_tts", "/voice/openai-tts/simulator/save-character")
-      );
+    ).replace("__SIMULATOR_CONFIG__", configJson);
     return reply.type("text/html; charset=utf-8").send(html);
   });
 

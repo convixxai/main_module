@@ -25,7 +25,6 @@ import { createRagTrace } from "../services/rag-trace";
 import { pool } from "../config/db";
 import { runAskPipeline } from "./ask";
 import { VOICE_SIMULATOR_PAGE_HTML } from "./voice-simulator-page";
-import { buildSimulatorSaveUi } from "./simulator-save-ui";
 
 const STT_MODES: SarvamSttMode[] = [
   "transcribe",
@@ -131,12 +130,7 @@ export async function voiceSimulatorRoutes(app: FastifyInstance) {
     const html = VOICE_SIMULATOR_PAGE_HTML.replace(
       "__CUSTOMER_ID__",
       customerId.replace(/[<>&"']/g, "")
-    )
-      .replace("__SIMULATOR_CONFIG__", configJson)
-      .replace(
-        "__SIMULATOR_SAVE_UI__",
-        buildSimulatorSaveUi("elevenlabs", "/voice/simulator/save-character")
-      );
+    ).replace("__SIMULATOR_CONFIG__", configJson);
     return reply.type("text/html; charset=utf-8").send(html);
   });
 

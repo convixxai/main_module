@@ -1,5 +1,12 @@
 /** OpenAI TTS humanizer simulator — GET /voice/openai-tts/simulator?customer_id=... */
 
+import { buildSimulatorSaveUi } from "./simulator-save-ui";
+
+const OPENAI_TTS_SAVE_UI = buildSimulatorSaveUi(
+  "openai_tts",
+  "/voice/openai-tts/simulator/save-character"
+);
+
 export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -143,6 +150,7 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
+  <button type="button" id="btnSaveCharacter" class="sim-save-float sim-save-pending" title="Save all settings + last output audio by email">Save character profile</button>
   <div class="shell">
     <div class="main">
       <h1>OpenAI TTS humanizer</h1>
@@ -366,7 +374,6 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         <div><strong>Last API usage</strong><pre id="outUsage">—</pre></div>
         <div><strong>Timings</strong><pre id="outTimings">—</pre></div>
         <audio id="player" controls></audio>
-        <button type="button" class="secondary btn-save-char" id="btnSaveCharacter" disabled>Save character profile</button>
         <div class="err" id="outErr" style="display:none"></div>
       </section>
     </div>
@@ -551,7 +558,12 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
 
   function setSaveReady(ready) {
     var b = $("btnSaveCharacter");
-    if (b) b.disabled = !ready;
+    if (!b) return;
+    b.classList.toggle("sim-save-ready", !!ready);
+    b.classList.toggle("sim-save-pending", !ready);
+    b.title = ready
+      ? "Save all settings and last output audio by email"
+      : "Run a simulation first — then save settings + audio by email";
   }
 
   function playResponse(data) {
@@ -754,8 +766,9 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       _apiKey: ($("apiKey").value || "").trim(),
     };
   };
+  setSaveReady(false);
 })();
   </script>
-__SIMULATOR_SAVE_UI__
+${OPENAI_TTS_SAVE_UI}
 </body>
 </html>`;

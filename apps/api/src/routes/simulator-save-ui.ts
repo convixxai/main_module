@@ -41,7 +41,15 @@ export function buildSimulatorSaveUi(
   .sim-save-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
   .sim-save-actions button { flex: 1; margin: 0; width: auto; }
   .sim-save-ok { color: #3fb950; font-size: 0.85rem; margin-top: 0.35rem; }
-  .btn-save-char { margin-top: 0.5rem; }
+  .sim-save-float {
+    position: fixed; top: 0.75rem; right: 0.75rem; z-index: 1000;
+    width: auto !important; padding: 0.6rem 1.1rem !important; margin: 0 !important;
+    background: #1a5c40 !important; border: 2px solid #3fb950 !important;
+    color: #fff !important; box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+    font-size: 0.88rem !important;
+  }
+  .sim-save-float.sim-save-pending { border-color: #d4a534 !important; background: #4a4020 !important; }
+  .sim-save-float.sim-save-ready { border-color: #3fb950 !important; background: #1a5c40 !important; }
 </style>
 <script>
 (function () {
@@ -66,14 +74,11 @@ export function buildSimulatorSaveUi(
   }
 
   function openModal() {
-    if (!window.__simSaveHasAudio || !window.__simSaveHasAudio()) {
-      showErr("Run a simulation first so there is output audio to attach.");
-      backdrop.style.display = "flex";
-      backdrop.setAttribute("aria-hidden", "false");
-      return;
-    }
     showErr("");
     showOk("");
+    if (!window.__simSaveHasAudio || !window.__simSaveHasAudio()) {
+      showErr("Run a simulation first so there is output audio to attach.");
+    }
     nameInput.value = "";
     backdrop.style.display = "flex";
     backdrop.setAttribute("aria-hidden", "false");
