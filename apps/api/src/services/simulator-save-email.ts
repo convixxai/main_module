@@ -205,7 +205,7 @@ function extFromMime(mime: string): string {
 
 export type SimulatorSaveEmailParams = {
   characterName: string;
-  simulatorType: "elevenlabs" | "openai_tts";
+  simulatorType: "elevenlabs" | "openai_tts" | "cartesia_tts";
   customerId: string;
   settings: Record<string, unknown>;
   lastOutput: Record<string, unknown> | null;
@@ -243,7 +243,9 @@ export async function sendSimulatorCharacterSaveEmail(
   const simLabel =
     params.simulatorType === "elevenlabs"
       ? "ElevenLabs Voice Simulator"
-      : "OpenAI TTS Humanizer Simulator";
+      : params.simulatorType === "cartesia_tts"
+        ? "Cartesia Sonic TTS Simulator"
+        : "OpenAI TTS Humanizer Simulator";
 
   const subject = `[Convixx] Character save: ${params.characterName} (${simLabel})`;
   const when = new Date().toISOString();

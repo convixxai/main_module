@@ -208,6 +208,18 @@ export const env = {
     v3StripAudioTags: process.env.ELEVENLABS_V3_STRIP_AUDIO_TAGS === "true",
   },
 
+  /** Cartesia Sonic TTS. https://docs.cartesia.ai */
+  cartesia: {
+    apiKey: (process.env.CARTESIA_API_KEY || "").trim(),
+    /**
+     * USD per 1M credits for cost estimates in the simulator UI.
+     * Pro plan ≈ $5 / 100K credits → $50/1M; Scale ≈ $37/1M. Override via env.
+     */
+    usdPerMillionCredits: parseFloat(
+      process.env.CARTESIA_USD_PER_MILLION_CREDITS || "50"
+    ),
+  },
+
   /**
    * Legacy env flag; **Exotel Voicebot ignores this** — use `customer_settings.voicebot_multilingual`
    * per tenant instead. Kept for any future non-voice use.

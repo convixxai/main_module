@@ -1,7 +1,7 @@
 /** Shared Save Character modal + script for simulator pages. */
 
 export function buildSimulatorSaveUi(
-  simulatorType: "elevenlabs" | "openai_tts",
+  simulatorType: "elevenlabs" | "openai_tts" | "cartesia_tts",
   savePath: string
 ): string {
   const typeJson = JSON.stringify(simulatorType);
