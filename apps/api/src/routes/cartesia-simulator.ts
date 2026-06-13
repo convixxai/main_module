@@ -13,7 +13,6 @@ import { createRagTrace } from "../services/rag-trace";
 import type { SarvamSttMode } from "../services/sarvam";
 import {
   cartesiaConfigured,
-  cartesiaListVoices,
   cartesiaSimulatorDefaults,
   cartesiaTextToSpeech,
   CARTESIA_OUTPUT_PRESETS,
@@ -113,37 +112,6 @@ export async function cartesiaSimulatorRoutes(app: FastifyInstance): Promise<voi
     });
   });
 
-  app.get(
-    "/voice/cartesia/simulator/voices",
-    { preHandler: apiKeyAuth },
-    async (request: AuthenticatedRequest, reply) => {
-      if (!cartesiaConfigured()) {
-        return reply.status(503).send({
-          error: "CARTESIA_API_KEY is not configured on this server",
-        });
-      }
-      const q = request.query as {
-        q?: string;
-        language?: string;
-        limit?: string;
-        starting_after?: string;
-      };
-      try {
-        const result = await cartesiaListVoices({
-          q: q.q,
-          language: q.language,
-          limit: q.limit ? parseInt(q.limit, 10) : 50,
-          startingAfter: q.starting_after,
-        });
-        return reply.send(result);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Cartesia voices failed";
-        request.log.error({ err }, "Cartesia simulator voices list failed");
-        return reply.status(502).send({ error: msg });
-      }
-    }
-  );
-
   await app.register(async (scoped) => {
     await scoped.register(multipart, {
       limits: { fileSize: 15 * 1024 * 1024 },
@@ -221,6 +189,11 @@ export async function cartesiaSimulatorRoutes(app: FastifyInstance): Promise<voi
           fields.model_id?.trim() || defaults.model_id
         );
         const voiceId = fields.voice_id?.trim() || defaults.voice_id;
+        if (!voiceId) {
+          return reply.status(400).send({
+            error: "voice_id is required — use /voice/cartesia/browser to find a voice",
+          });
+        }
         const language = fields.language?.trim() || defaults.language;
 
         const genSpeed = parseNum(

@@ -186,20 +186,9 @@ export const CARTESIA_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
             <select id="language"></select>
           </div>
         </div>
-        <label>Featured agent voices (Sonic 3.5)</label>
-        <select id="featuredVoice"></select>
-        <div class="grid-2">
-          <div>
-            <label>Voice ID (or pick featured / search)</label>
-            <input type="text" id="voiceId" placeholder="UUID" />
-          </div>
-          <div>
-            <label>Search voice library</label>
-            <input type="text" id="voiceSearch" placeholder="name…" />
-          </div>
-        </div>
-        <button type="button" class="secondary" id="btnLoadVoices">Load voices from Cartesia</button>
-        <select id="voiceList" size="4" style="margin-top:0.5rem"></select>
+        <label>Voice ID</label>
+        <input type="text" id="voiceId" placeholder="Paste Cartesia voice UUID" />
+        <p class="hint">Find voices in the <a id="voiceBrowserLink" href="/voice/cartesia/browser" target="_blank" rel="noopener">Cartesia Voice Browser</a>, then copy the voice_id here.</p>
         <label class="chk"><input type="checkbox" id="isPvcVoice" /> Pro voice clone (PVC) — ~1.5 credits/char</label>
       </section>
 
@@ -387,13 +376,13 @@ export const CARTESIA_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
   function applyDefaults() {
     fillSelect("modelId", CONFIG.models || [], "id", function (m) { return m.label || m.id; }, CONFIG.model_id);
     fillSelect("language", CONFIG.languages || [], "code", function (l) { return l.label + " (" + l.code + ")"; }, CONFIG.language);
-    fillSelect("featuredVoice", CONFIG.featured_voices || [], "id", function (v) {
-      return v.name + " · " + (v.accent || v.language) + (v.note ? " — " + v.note : "");
-    }, CONFIG.voice_id);
     fillSelect("genEmotion", CONFIG.emotions || [], null, null, CONFIG.generation_config.emotion);
     fillSelect("outputPreset", CONFIG.output_presets || [], "id", function (p) { return p.label; }, CONFIG.output_preset);
     fillSelect("legacySpeed", [{ id: "", label: "— none —" }].concat((CONFIG.legacy_speeds || []).map(function (s) { return { id: s, label: s }; })), "id", function (x) { return x.label; }, "");
     $("voiceId").value = CONFIG.voice_id || "";
+    var browserPath = (CONFIG.docs || {}).voice_browser || "/voice/cartesia/browser";
+    var browserUrl = root() + browserPath + (CUSTOMER_ID ? "?customer_id=" + encodeURIComponent(CUSTOMER_ID) : "");
+    $("voiceBrowserLink").href = browserUrl;
     $("pronunciationDictId").value = CONFIG.pronunciation_dict_id || "";
     $("isPvcVoice").checked = !!CONFIG.is_pvc_voice;
     $("skipHumanizer").checked = CONFIG.skip_humanizer !== false;
@@ -420,18 +409,20 @@ export const CARTESIA_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     $("valVolume").textContent = Number($("genVolume").value).toFixed(2);
   });
 
-  $("featuredVoice").addEventListener("change", function () {
-    $("voiceId").value = $("featuredVoice").value;
-  });
-
   applyDefaults();
+
+  var urlParams = new URLSearchParams(window.location.search);
+  var preVoiceId = urlParams.get("voice_id");
+  if (preVoiceId) $("voiceId").value = preVoiceId;
 
   function formFields() {
     var preset = (CONFIG.output_presets || []).find(function (p) { return p.id === $("outputPreset").value; }) || {};
+    var voiceId = $("voiceId").value.trim();
+    if (!voiceId) throw new Error("Enter a Cartesia voice_id (use Voice Browser to find one)");
     return {
       customer_id: CUSTOMER_ID,
       model_id: $("modelId").value,
-      voice_id: $("voiceId").value.trim() || $("featuredVoice").value,
+      voice_id: voiceId,
       language: $("language").value,
       gen_speed: $("genSpeed").value,
       gen_volume: $("genVolume").value,
@@ -542,19 +533,6 @@ export const CARTESIA_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     localStorage.setItem("cartesiaKey", ($("apiKey").value || "").trim());
   }
 
-  async function apiFetch(path, opts) {
-    var key = ($("apiKey").value || "").trim();
-    if (!key) throw new Error("Set x-api-key");
-    if (!CUSTOMER_ID) throw new Error("Add ?customer_id=UUID to the page URL");
-    persistUi();
-    var headers = Object.assign({ "x-api-key": key }, (opts && opts.headers) || {});
-    var init = Object.assign({ method: "GET", headers: headers }, opts || {});
-    var res = await fetch(root() + path, init);
-    var json = await res.json().catch(function () { return {}; });
-    if (!res.ok) throw new Error(json.error || ("HTTP " + res.status));
-    return json;
-  }
-
   async function apiTurn(body, isMultipart) {
     var key = ($("apiKey").value || "").trim();
     if (!key) throw new Error("Set x-api-key");
@@ -571,38 +549,6 @@ export const CARTESIA_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
     if (!res.ok) throw new Error(json.error || ("HTTP " + res.status));
     return json;
   }
-
-  $("btnLoadVoices").onclick = async function () {
-    clearErr();
-    $("btnLoadVoices").disabled = true;
-    try {
-      var q = $("voiceSearch").value.trim();
-      var lang = $("language").value;
-      var path = "/voice/cartesia/simulator/voices?limit=50";
-      if (q) path += "&q=" + encodeURIComponent(q);
-      if (lang) path += "&language=" + encodeURIComponent(lang);
-      var data = await apiFetch(path);
-      var sel = $("voiceList");
-      sel.innerHTML = "";
-      (data.voices || []).forEach(function (v) {
-        var o = document.createElement("option");
-        o.value = v.id;
-        o.textContent = (v.name || v.id) + (v.language ? " · " + v.language : "");
-        sel.appendChild(o);
-      });
-      if (!data.voices || !data.voices.length) {
-        showErr("No voices returned — try another search or language.");
-      }
-    } catch (e) {
-      showErr(e.message || String(e));
-    } finally {
-      $("btnLoadVoices").disabled = false;
-    }
-  };
-
-  $("voiceList").addEventListener("change", function () {
-    if ($("voiceList").value) $("voiceId").value = $("voiceList").value;
-  });
 
   $("btnSendText").onclick = async function () {
     clearErr();
@@ -659,11 +605,11 @@ export const CARTESIA_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         setSpeechUi(false, "Processing…");
         var blob = new Blob(chunks, { type: mediaRec.mimeType || "audio/webm" });
         var fd = new FormData();
-        var fields = formFields();
-        fields.mode = "speech";
-        Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
-        fd.append("file", blob, "speech.webm");
         try {
+          var fields = formFields();
+          fields.mode = "speech";
+          Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
+          fd.append("file", blob, "speech.webm");
           var data = await apiTurn(fd, true);
           playResponse(data);
           setSpeechUi(false, "Done.");

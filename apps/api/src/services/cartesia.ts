@@ -198,11 +198,21 @@ export const CARTESIA_OUTPUT_PRESETS = [
 export type CartesiaVoiceSummary = {
   id: string;
   name: string;
-  language?: string;
   description?: string;
-  gender?: string;
+  language?: string;
+  country?: string | null;
+  gender?: string | null;
+  is_owner?: boolean;
   is_public?: boolean;
+  created_at?: string;
+  preview_file_url?: string | null;
 };
+
+export const CARTESIA_GENDERS = [
+  "masculine",
+  "feminine",
+  "gender_neutral",
+] as const;
 
 export type CartesiaGenerationConfig = {
   speed?: number;
@@ -329,11 +339,9 @@ export function contentTypeForCartesiaOutput(container: string): string {
 }
 
 export function cartesiaSimulatorDefaults() {
-  const featured = CARTESIA_FEATURED_VOICES[0];
   return {
     model_id: "sonic-3.5",
-    voice_id: featured.id,
-    voice_name: featured.name,
+    voice_id: "",
     language: "en",
     generation_config: {
       speed: 1,
@@ -352,7 +360,6 @@ export function cartesiaSimulatorDefaults() {
     models: CARTESIA_MODELS.map((m) => ({ id: m.id, label: m.label })),
     languages: [...CARTESIA_LANGUAGES],
     emotions: [...CARTESIA_EMOTIONS],
-    featured_voices: [...CARTESIA_FEATURED_VOICES],
     output_presets: CARTESIA_OUTPUT_PRESETS.map((p) => ({
       id: p.id,
       label: p.label,
@@ -372,23 +379,57 @@ export function cartesiaSimulatorDefaults() {
     docs: {
       sonic_35: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
       tts_guide: "https://docs.cartesia.ai/build-with-cartesia/capability-guides/tts",
+      voice_browser: "/voice/cartesia/browser",
     },
+  };
+}
+
+function mapCartesiaVoice(v: Record<string, unknown>): CartesiaVoiceSummary {
+  return {
+    id: String(v.id ?? ""),
+    name: String(v.name ?? v.id ?? "voice"),
+    description: v.description != null ? String(v.description) : undefined,
+    language: v.language != null ? String(v.language) : undefined,
+    country: v.country != null ? String(v.country) : null,
+    gender: v.gender != null ? String(v.gender) : null,
+    is_owner: v.is_owner === true,
+    is_public: v.is_public === true,
+    created_at: v.created_at != null ? String(v.created_at) : undefined,
+    preview_file_url:
+      v.preview_file_url != null ? String(v.preview_file_url) : null,
   };
 }
 
 export async function cartesiaListVoices(params?: {
   q?: string;
   language?: string;
+  gender?: string;
+  is_owner?: boolean;
   limit?: number;
   startingAfter?: string;
-}): Promise<{ voices: CartesiaVoiceSummary[]; has_more: boolean }> {
+  endingBefore?: string;
+  expandPreview?: boolean;
+}): Promise<{
+  voices: CartesiaVoiceSummary[];
+  has_more: boolean;
+  next_page: string | null;
+}> {
   const limit = Math.min(Math.max(params?.limit ?? 50, 1), 100);
   const search = new URLSearchParams();
   search.set("limit", String(limit));
   if (params?.q?.trim()) search.set("q", params.q.trim());
   if (params?.language?.trim()) search.set("language", params.language.trim());
+  if (params?.gender?.trim()) search.set("gender", params.gender.trim());
+  if (params?.is_owner === true) search.set("is_owner", "true");
+  if (params?.is_owner === false) search.set("is_owner", "false");
   if (params?.startingAfter?.trim()) {
     search.set("starting_after", params.startingAfter.trim());
+  }
+  if (params?.endingBefore?.trim()) {
+    search.set("ending_before", params.endingBefore.trim());
+  }
+  if (params?.expandPreview !== false) {
+    search.append("expand[]", "preview_file_url");
   }
 
   const res = await fetch(`${CARTESIA_BASE}/voices?${search.toString()}`, {
@@ -406,18 +447,40 @@ export async function cartesiaListVoices(params?: {
   const json = (await res.json()) as {
     data?: Array<Record<string, unknown>>;
     has_more?: boolean;
+    next_page?: string | null;
   };
 
-  const voices: CartesiaVoiceSummary[] = (json.data ?? []).map((v) => ({
-    id: String(v.id ?? ""),
-    name: String(v.name ?? v.id ?? "voice"),
-    language: v.language != null ? String(v.language) : undefined,
-    description: v.description != null ? String(v.description) : undefined,
-    gender: v.gender != null ? String(v.gender) : undefined,
-    is_public: v.is_public === true,
-  }));
+  return {
+    voices: (json.data ?? []).map(mapCartesiaVoice),
+    has_more: json.has_more === true,
+    next_page: json.next_page != null ? String(json.next_page) : null,
+  };
+}
 
-  return { voices, has_more: json.has_more === true };
+export async function cartesiaFetchPreviewFile(
+  previewUrl: string
+): Promise<{ body: Buffer; contentType: string }> {
+  const url = previewUrl.trim();
+  if (!url) {
+    throw new Error("preview URL is empty");
+  }
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: cartesiaHeaders().Authorization,
+      "Cartesia-Version": CARTESIA_VERSION,
+    },
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(
+      `Cartesia preview download failed (${res.status}): ${errText.slice(0, 300)}`
+    );
+  }
+  return {
+    body: Buffer.from(await res.arrayBuffer()),
+    contentType: res.headers.get("content-type") || "audio/mpeg",
+  };
 }
 
 export async function cartesiaTextToSpeech(
