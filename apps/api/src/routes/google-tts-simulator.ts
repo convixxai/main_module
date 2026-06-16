@@ -374,6 +374,7 @@ export async function googleTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
         const tTts0 = Date.now();
         let ttsResult;
         let newAccessToken: string | null = null;
+        let effectsProfileIgnored = false;
 
         try {
           try {
@@ -420,14 +421,57 @@ export async function googleTtsSimulatorRoutes(app: FastifyInstance): Promise<vo
                   effectsProfileId
                 }
               });
+            } else if (err.message?.toLowerCase().includes("invalid argument") && effectsProfileId && effectsProfileId.length > 0) {
+              request.log.warn("Google TTS synthesis failed with invalid argument. Retrying without device effects profile...");
+              ttsResult = await googleTextToSpeech({
+                accessToken,
+                synthesis: {
+                  text: synthesisText,
+                  ssml: synthesisSsml,
+                  voiceName,
+                  languageCode,
+                  speakingRate,
+                  pitch,
+                  volumeGainDb,
+                  audioEncoding,
+                  sampleRateHertz,
+                  effectsProfileId: [] // clear effects profile
+                }
+              });
+              effectsProfileIgnored = true;
             } else {
               throw err;
             }
           }
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Google Cloud TTS synthesis failed";
-          request.log.error({ err }, "Google simulator synthesis failed");
-          return reply.status(502).send({ error: msg });
+        } catch (err: any) {
+          if (err.message?.toLowerCase().includes("invalid argument") && effectsProfileId && effectsProfileId.length > 0 && !effectsProfileIgnored) {
+            try {
+              request.log.warn("Google TTS synthesis failed with invalid argument. Retrying without device effects profile...");
+              ttsResult = await googleTextToSpeech({
+                accessToken,
+                synthesis: {
+                  text: synthesisText,
+                  ssml: synthesisSsml,
+                  voiceName,
+                  languageCode,
+                  speakingRate,
+                  pitch,
+                  volumeGainDb,
+                  audioEncoding,
+                  sampleRateHertz,
+                  effectsProfileId: [] // clear effects profile
+                }
+              });
+              effectsProfileIgnored = true;
+            } catch (retryErr: any) {
+              const msg = retryErr instanceof Error ? retryErr.message : "Google Cloud TTS synthesis failed";
+              return reply.status(502).send({ error: msg });
+            }
+          } else {
+            const msg = err instanceof Error ? err.message : "Google Cloud TTS synthesis failed";
+            request.log.error({ err }, "Google simulator synthesis failed");
+            return reply.status(502).send({ error: msg });
+          }
         }
         
         const ttsMs = Date.now() - tTts0;
