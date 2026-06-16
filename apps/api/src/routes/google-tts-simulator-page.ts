@@ -750,13 +750,13 @@ export const GOOGLE_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
       lines.push("  characters: " + (u.tts_characters ?? 0));
       lines.push("  cost (est.): " + fmtUsd(u.tts_cost_usd_estimated));
       lines.push("TOTAL (est.): " + fmtUsd(u.total_cost_usd_estimated));
-      $("outUsage").textContent = lines.join("\n");
+      $("outUsage").textContent = lines.join("\\n");
 
       var tm = data.timings || {};
       $("outTimings").textContent =
-        "STT: " + (tm.stt_ms ?? "—") + " ms\n" +
-        "Humanizer: " + (tm.humanizer_ms ?? "—") + " ms\n" +
-        "Google Synthesis: " + (tm.tts_ms ?? "—") + " ms\n" +
+        "STT: " + (tm.stt_ms ?? "—") + " ms\\n" +
+        "Humanizer: " + (tm.humanizer_ms ?? "—") + " ms\\n" +
+        "Google Synthesis: " + (tm.tts_ms ?? "—") + " ms\\n" +
         "Total Turn time: " + (tm.total_ms ?? "—") + " ms";
 
       if (data.audio && data.audio.base64) {
