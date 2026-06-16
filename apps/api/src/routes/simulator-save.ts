@@ -11,7 +11,7 @@ import {
 
 const saveSchema = z.object({
   character_name: z.string().min(1).max(120),
-  simulator_type: z.enum(["elevenlabs", "openai_tts", "cartesia_tts"]),
+  simulator_type: z.enum(["elevenlabs", "openai_tts", "cartesia_tts", "google_tts"]),
   customer_id: z.string().uuid().optional(),
   settings: z.record(z.string(), z.unknown()),
   last_output: z.record(z.string(), z.unknown()).nullable().optional(),
@@ -99,6 +99,11 @@ export async function simulatorSaveRoutes(app: FastifyInstance): Promise<void> {
   );
   app.post(
     "/voice/cartesia/simulator/save-character",
+    { preHandler: apiKeyAuth },
+    handleSave
+  );
+  app.post(
+    "/voice/google-tts/simulator/save-character",
     { preHandler: apiKeyAuth },
     handleSave
   );
