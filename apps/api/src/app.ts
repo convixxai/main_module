@@ -25,6 +25,7 @@ import { cartesiaSimulatorRoutes } from "./routes/cartesia-simulator";
 import { cartesiaVoiceBrowserRoutes } from "./routes/cartesia-voice-browser";
 import { simulatorSaveRoutes } from "./routes/simulator-save";
 import { googleTtsSimulatorRoutes } from "./routes/google-tts-simulator";
+import { sarvamTtsSimulatorRoutes } from "./routes/sarvam-tts-simulator";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -67,6 +68,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(cartesiaVoiceBrowserRoutes);
   app.register(simulatorSaveRoutes);
   app.register(googleTtsSimulatorRoutes);
+  app.register(sarvamTtsSimulatorRoutes);
   app.register(elevenlabsVoiceBrowserRoutes);
   app.register(elevenlabsApiRoutes);
   app.register(exotelVoicebotRoutes);          // Exotel Voicebot WebSocket (multi-tenant)

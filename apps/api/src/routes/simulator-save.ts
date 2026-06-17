@@ -107,6 +107,11 @@ export async function simulatorSaveRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: apiKeyAuth },
     handleSave
   );
+  app.post(
+    "/voice/sarvam-tts/simulator/save-character",
+    { preHandler: apiKeyAuth },
+    handleSave
+  );
 
   app.get(
     "/voice/simulator/email-status",
