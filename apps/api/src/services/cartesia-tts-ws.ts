@@ -30,6 +30,8 @@ type PendingContext = {
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   onChunk?: (chunk: Buffer) => void;
+  /** True when PCM was already pushed through onChunk (avoid double-play on resolve). */
+  deliveredLive?: boolean;
 };
 
 type CartesiaWsInbound =
@@ -176,16 +178,20 @@ export class CartesiaTtsSession {
       notify();
     }, CONTEXT_TIMEOUT_MS);
 
-    this.pending.set(contextId, {
+    const pendingEntry: PendingContext = {
       chunks: [],
+      deliveredLive: false,
       onChunk: (chunk) => {
+        pendingEntry.deliveredLive = true;
         queue.push(chunk);
         notify();
       },
       resolve: (chunks) => {
         clearTimeout(timer);
-        for (const c of chunks) {
-          if (c.length > 0) queue.push(c);
+        if (!pendingEntry.deliveredLive) {
+          for (const c of chunks) {
+            if (c.length > 0) queue.push(c);
+          }
         }
         finished = true;
         notify();
@@ -197,7 +203,9 @@ export class CartesiaTtsSession {
         notify();
       },
       timer,
-    });
+    };
+
+    this.pending.set(contextId, pendingEntry);
 
     try {
       this.sendJson(body);
