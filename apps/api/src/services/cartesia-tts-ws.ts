@@ -32,6 +32,10 @@ type PendingContext = {
   onChunk?: (chunk: Buffer) => void;
   /** True when PCM was already pushed through onChunk (avoid double-play on resolve). */
   deliveredLive?: boolean;
+  /** Multi-input context — stay open until `inputsOpen` is false and server finishes. */
+  continuationMode?: boolean;
+  inputsOpen?: boolean;
+  resetTimer?: () => void;
 };
 
 type CartesiaWsInbound =
@@ -237,6 +241,126 @@ export class CartesiaTtsSession {
     return Buffer.concat(parts);
   }
 
+  /**
+   * Stream a multi-sentence reply on one Cartesia context.
+   * Push transcript fragments without waiting for audio — eliminates gaps between sentences.
+   */
+  async beginReplyStream(
+    base: Omit<CartesiaWsSpeakParams, "transcript" | "continue" | "contextId">
+  ): Promise<{
+    contextId: string;
+    push: (transcript: string, moreComing: boolean) => void;
+    finish: () => void;
+    audio: AsyncGenerator<Buffer, void, unknown>;
+  }> {
+    await this.connect();
+    const contextId = randomUUID();
+    const queue: Buffer[] = [];
+    let wake: (() => void) | null = null;
+    let finished = false;
+    let failed: Error | null = null;
+
+    const notify = (): void => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+
+    let timer = setTimeout(() => {
+      this.pending.delete(contextId);
+      failed = new Error(`Cartesia TTS context timed out (${CONTEXT_TIMEOUT_MS}ms)`);
+      finished = true;
+      notify();
+    }, CONTEXT_TIMEOUT_MS);
+
+    const resetTimer = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        this.pending.delete(contextId);
+        failed = new Error(`Cartesia TTS context timed out (${CONTEXT_TIMEOUT_MS}ms)`);
+        finished = true;
+        notify();
+      }, CONTEXT_TIMEOUT_MS);
+    };
+
+    const pendingEntry: PendingContext = {
+      chunks: [],
+      deliveredLive: false,
+      continuationMode: true,
+      inputsOpen: true,
+      resetTimer,
+      onChunk: (chunk) => {
+        pendingEntry.deliveredLive = true;
+        queue.push(chunk);
+        notify();
+      },
+      resolve: () => {
+        clearTimeout(timer);
+        finished = true;
+        notify();
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        failed = err;
+        finished = true;
+        notify();
+      },
+      timer,
+    };
+
+    this.pending.set(contextId, pendingEntry);
+
+    const push = (transcript: string, moreComing: boolean): void => {
+      resetTimer();
+      pendingEntry.inputsOpen = moreComing;
+      const text = transcript.trim();
+      if (!text && !moreComing) {
+        this.sendJson(
+          this.buildRequestBody({
+            ...base,
+            transcript: "",
+            contextId,
+            continue: false,
+          })
+        );
+        return;
+      }
+      if (!text) return;
+      this.sendJson(
+        this.buildRequestBody({
+          ...base,
+          transcript: text,
+          contextId,
+          continue: moreComing,
+        })
+      );
+    };
+
+    const finish = (): void => {
+      if (pendingEntry.inputsOpen) {
+        push("", false);
+      }
+    };
+
+    const session = this;
+    async function* audio(): AsyncGenerator<Buffer, void, unknown> {
+      while (!finished || queue.length > 0) {
+        if (failed) throw failed;
+        if (queue.length > 0) {
+          yield queue.shift()!;
+          continue;
+        }
+        if (finished) break;
+        await new Promise<void>((r) => {
+          wake = r;
+        });
+      }
+      session.pending.delete(contextId);
+    }
+
+    return { contextId, push, finish, audio: audio() };
+  }
+
   private buildRequestBody(
     params: CartesiaWsSpeakParams & { transcript: string; contextId: string }
   ): Record<string, unknown> {
@@ -371,6 +495,9 @@ export class CartesiaTtsSession {
         }
       }
       if (msg.done === true) {
+        const finalize =
+          !pending.continuationMode || pending.inputsOpen === false;
+        if (!finalize) return;
         this.pending.delete(contextId);
         pending.resolve(pending.chunks);
       }
@@ -378,6 +505,9 @@ export class CartesiaTtsSession {
     }
 
     if (msg.type === "done") {
+      const finalize =
+        !pending.continuationMode || pending.inputsOpen === false;
+      if (!finalize) return;
       this.pending.delete(contextId);
       if (msg.status_code != null && msg.status_code >= 400) {
         pending.reject(

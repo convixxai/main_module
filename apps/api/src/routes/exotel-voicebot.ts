@@ -2244,6 +2244,30 @@ function findNextSpeakCutElevenLabs(s: string): number {
   return -1;
 }
 
+function buildCartesiaReplyStreamBase(
+  session: VoicebotSession,
+  languageCode: string
+) {
+  const cs = tenantCs(session);
+  if (!cartesiaConfigured()) return null;
+  const voiceId =
+    session.ttsSpeaker?.trim() || cs?.tts_default_speaker?.trim() || "";
+  if (!voiceId) return null;
+  const exotelRate = session.mediaFormat.sample_rate;
+  return {
+    modelId: resolveCartesiaModel(session.ttsModel ?? cs?.tts_model ?? null),
+    voiceId,
+    language: bcp47ToCartesiaLanguage(languageCode),
+    outputFormat: cartesiaOutputFormatForExotel(exotelRate),
+    generationConfig: resolveCartesiaGenerationConfigForUtterance(
+      session.cartesiaGenerationConfig
+    ),
+    pronunciationDictId: session.cartesiaPronunciationDictId ?? null,
+    legacySpeed: session.cartesiaLegacySpeed ?? null,
+    maxBufferDelayMs: cs?.cartesia_max_buffer_delay_ms ?? 0,
+  };
+}
+
 function createStreamingVoiceTts(
   ws: WebSocket,
   session: VoicebotSession,
@@ -2251,18 +2275,54 @@ function createStreamingVoiceTts(
   log?: FastifyRequest["log"]
 ) {
   const ttsProvider = tenantCs(session)?.tts_provider ?? "sarvam";
+  const isCartesia = ttsProvider === "cartesia";
   const useSentenceOnlyCuts =
-    ttsProvider === "elevenlabs" || ttsProvider === "cartesia";
+    ttsProvider === "elevenlabs" || isCartesia;
   const cutAt = useSentenceOnlyCuts ? findNextSpeakCutElevenLabs : findNextSpeakCut;
   let buffer = "";
-  let cartesiaPieceIndex = 0;
 
-  const cartesiaStreamPiece = (isLast: boolean): SpeakToExotelOptions["cartesiaStreamPiece"] => {
-    if (ttsProvider !== "cartesia") return undefined;
-    if (cartesiaPieceIndex === 0 && isLast) return "only";
-    if (cartesiaPieceIndex === 0) return "first";
-    return isLast ? "last" : "middle";
-  };
+  type CartesiaStreamHandle = Awaited<
+    ReturnType<import("../services/cartesia-tts-ws").CartesiaTtsSession["beginReplyStream"]>
+  >;
+  let cartesiaReply: CartesiaStreamHandle | null = null;
+  let cartesiaAudioPump: Promise<void> | null = null;
+  let cartesiaPumpStarted = false;
+
+  async function ensureCartesiaReply(): Promise<CartesiaStreamHandle | null> {
+    if (cartesiaReply) return cartesiaReply;
+    const base = buildCartesiaReplyStreamBase(session, ttsLanguage);
+    if (!base) return null;
+    const cartesiaTts = getOrCreateCartesiaTtsSession(session, log);
+    cartesiaReply = await cartesiaTts.beginReplyStream(base);
+    session.cartesiaReplyStreamContextId = cartesiaReply.contextId;
+    return cartesiaReply;
+  }
+
+  function startCartesiaAudioPump(stream: CartesiaStreamHandle): void {
+    if (cartesiaPumpStarted) return;
+    cartesiaPumpStarted = true;
+    session.ttsInProgress = true;
+    cartesiaAudioPump = (async () => {
+      const exotelRate = session.mediaFormat.sample_rate;
+      let totalPcmBytes = 0;
+      try {
+        for await (const chunk of stream.audio) {
+          if (session.isClosing) break;
+          sendAudioToExotel(ws, session, chunk, log, { omitMark: true });
+          totalPcmBytes += chunk.length;
+        }
+        if (!session.isClosing && totalPcmBytes > 0) {
+          sendAudioToExotel(ws, session, Buffer.alloc(0), log, { omitMark: false });
+          schedulePlaybackMarkFallback(session, totalPcmBytes, exotelRate, log);
+        }
+      } catch (err) {
+        log?.error({ err }, "voicebot Cartesia reply stream failed");
+      } finally {
+        session.ttsInProgress = false;
+        session.cartesiaReplyStreamContextId = null;
+      }
+    })();
+  }
 
   return {
     async pushDelta(text: string): Promise<void> {
@@ -2273,31 +2333,45 @@ function createStreamingVoiceTts(
         const piece = buffer.slice(0, cut + 1).trim();
         buffer = buffer.slice(cut + 1).replace(/^\s+/, "");
         if (piece.length > 0 && !session.isClosing) {
-          const streamPiece = cartesiaStreamPiece(false);
-          await speakToExotel(ws, session, piece, ttsLanguage, log, {
-            cartesiaStreamPiece: streamPiece,
-          });
-          cartesiaPieceIndex++;
+          if (isCartesia) {
+            const stream = await ensureCartesiaReply();
+            if (stream) {
+              startCartesiaAudioPump(stream);
+              stream.push(piece, true);
+            } else {
+              await speakToExotel(ws, session, piece, ttsLanguage, log);
+            }
+          } else {
+            await speakToExotel(ws, session, piece, ttsLanguage, log);
+          }
         }
       }
     },
     async flushRest(): Promise<void> {
       const rest = buffer.trim();
       buffer = "";
+      if (isCartesia) {
+        if (rest.length > 0 && !session.isClosing) {
+          const stream = await ensureCartesiaReply();
+          if (stream) {
+            startCartesiaAudioPump(stream);
+            stream.push(rest, false);
+          } else {
+            await speakToExotel(ws, session, rest, ttsLanguage, log);
+          }
+        } else if (cartesiaReply) {
+          cartesiaReply.finish();
+        }
+        if (cartesiaAudioPump) {
+          await cartesiaAudioPump;
+        }
+        cartesiaReply = null;
+        cartesiaAudioPump = null;
+        cartesiaPumpStarted = false;
+        return;
+      }
       if (rest.length > 0 && !session.isClosing) {
-        const streamPiece = cartesiaStreamPiece(true);
-        await speakToExotel(ws, session, rest, ttsLanguage, log, {
-          cartesiaStreamPiece: streamPiece,
-        });
-        cartesiaPieceIndex++;
-      } else if (
-        ttsProvider === "cartesia" &&
-        cartesiaPieceIndex > 0 &&
-        !session.isClosing
-      ) {
-        sendAudioToExotel(ws, session, Buffer.alloc(0), log, { omitMark: false });
-        session.ttsInProgress = false;
-        session.cartesiaReplyStreamContextId = null;
+        await speakToExotel(ws, session, rest, ttsLanguage, log);
       }
     },
   };
