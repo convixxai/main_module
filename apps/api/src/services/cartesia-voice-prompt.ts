@@ -74,7 +74,7 @@ export function buildCartesiaRagVoicePrompt(options?: {
 
   const emotionInstructions =
     mode === "static"
-      ? `- Use emotion tag [${allowed[0] ?? gen?.emotion ?? "neutral"}] on every sentence (fixed voice persona).`
+      ? `- Speak in a consistent warm tone; emotion is set on the voice avatar (do not add [emotion] tags).`
       : `- Prefix EVERY sentence with one Cartesia emotion tag in square brackets.
 - Tag must be one of: ${allowed.join(", ")}.
 - Pick emotion from context (sympathetic for complaints, enthusiastic for good news, apologetic for errors, calm for factual info).

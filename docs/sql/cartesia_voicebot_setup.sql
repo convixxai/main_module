@@ -22,7 +22,7 @@ SET
   rag_streaming_enabled = TRUE,
   tts_humanizer_enabled = FALSE,
   cartesia_max_buffer_delay_ms = 0,
-  cartesia_emotion_mode = 'llm_per_turn',
+  cartesia_emotion_mode = 'llm_per_sentence',
   cartesia_allowed_emotions = ARRAY[
     'neutral','calm','sympathetic','content','grateful',
     'apologetic','enthusiastic','curious','determined'
@@ -98,11 +98,14 @@ WHERE id = '513f3ca6-d49a-4123-8848-f86811600407'
   AND customer_id = 'ead34d8f-de23-452c-9091-85b2af98ac82';
 
 -- ------------------------------------------------------------
--- QUERY 6 — Static emotion mode (LLM does not pick emotion)
+-- QUERY 6 — Per-sentence emotion tags from LLM (recommended for voicebot)
 -- ------------------------------------------------------------
 UPDATE customer_settings
-SET cartesia_emotion_mode = 'static'
+SET cartesia_emotion_mode = 'llm_per_sentence'
 WHERE customer_id = 'ead34d8f-de23-452c-9091-85b2af98ac82';
+
+-- Optional: static emotion (avatar default only; no LLM tags)
+-- UPDATE customer_settings SET cartesia_emotion_mode = 'static' WHERE customer_id = '...';
 
 -- ------------------------------------------------------------
 -- QUERY 7 — Enable humanizer (adds LLM latency before TTS)

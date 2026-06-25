@@ -1,6 +1,7 @@
 // ============================================================
-// Filler-only utterance acknowledgments (voicebot) — per language
+// Filler-only utterance acknowledgments (voicebot) — English only
 // Short lines when STT is only "hmm / um …" so RAG is skipped.
+// Used only when tenant policy is single-language English (not multilingual).
 // ============================================================
 
 import { randomInt } from "crypto";
@@ -75,6 +76,39 @@ export function isFillerOnlyTranscript(raw: string): boolean {
   );
 }
 
+function normalizeBcp47ForFiller(tag: string): string {
+  return tag.trim().replace(/_/g, "-");
+}
+
+/**
+ * Filler ack is English-only: tenant must not be multilingual and must allow
+ * exactly one language tag whose primary code is `en`.
+ */
+export function isFillerAckAllowedForVoicePolicy(options: {
+  voicebotMultilingual: boolean;
+  allowedLanguageCodes?: readonly string[] | null;
+  defaultLanguageCode?: string | null;
+}): boolean {
+  if (options.voicebotMultilingual) return false;
+
+  const fallback = normalizeBcp47ForFiller(options.defaultLanguageCode || "en-IN");
+  const raw = options.allowedLanguageCodes?.length
+    ? options.allowedLanguageCodes
+    : [fallback];
+  const allowed: string[] = [];
+  const seen = new Set<string>();
+  for (const c of raw) {
+    const n = normalizeBcp47ForFiller(String(c));
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    allowed.push(n);
+  }
+  const list = allowed.length > 0 ? allowed : [fallback];
+  if (list.length !== 1) return false;
+  const primary = list[0]!.split("-")[0]?.toLowerCase() ?? "";
+  return primary === "en";
+}
+
 function normalizeLangKey(tag: string): keyof typeof FILLER_ACK_PHRASES {
   const t = tag.trim().replace(/_/g, "-").toLowerCase();
   if (!t) return "en-IN";
@@ -94,7 +128,7 @@ export type PickFillerAckOptions = {
 };
 
 /**
- * Random acknowledgment for the call's effective language (`effectiveSttLanguageThisTurn`).
+ * Random English filler acknowledgment (English-only voice policy).
  */
 export function pickFillerAckPhrase(
   languageBcp47: string,

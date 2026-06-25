@@ -45,6 +45,7 @@ import {
   type VoicebotSession,
 } from "../services/voicebot-session";
 import {
+  isFillerAckAllowedForVoicePolicy,
   pickFillerAckPhrase,
   isFillerOnlyTranscript,
 } from "../services/voice-filler-acks";
@@ -102,6 +103,11 @@ import {
   resolveHumanizerStyleFromSettings,
   stripCartesiaEmotionTags,
 } from "../services/cartesia-voice-prompt";
+import {
+  conversationalOpenerReply,
+  inferLanguageFromTranscript,
+  isConversationalOpener,
+} from "../services/voice-language-infer";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
   voiceTrace,
@@ -2245,8 +2251,9 @@ function createStreamingVoiceTts(
   log?: FastifyRequest["log"]
 ) {
   const ttsProvider = tenantCs(session)?.tts_provider ?? "sarvam";
-  const useElevenLabsCuts = ttsProvider === "elevenlabs";
-  const cutAt = useElevenLabsCuts ? findNextSpeakCutElevenLabs : findNextSpeakCut;
+  const useSentenceOnlyCuts =
+    ttsProvider === "elevenlabs" || ttsProvider === "cartesia";
+  const cutAt = useSentenceOnlyCuts ? findNextSpeakCutElevenLabs : findNextSpeakCut;
   let buffer = "";
   return {
     async pushDelta(text: string): Promise<void> {
@@ -2287,7 +2294,12 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
   log?: FastifyRequest["log"]
 ): Promise<void> {
   const pipelineBcp = multilingual
-    ? normalizeBcp47Tag(session.currentLanguageCode || session.defaultLanguageCode || "en-IN")
+    ? normalizeBcp47Tag(
+        session.effectiveSttLanguageThisTurn ||
+          session.currentLanguageCode ||
+          session.defaultLanguageCode ||
+          "en-IN"
+      )
     : "en-IN";
   const ttsLanguage = multilingual ? mapToTtsLanguage(pipelineBcp) : "en-IN";
 
@@ -2378,15 +2390,33 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
   // ------------------------------------------------------------------
   // Filler-only utterance handling (hmm, um, uh, …)
+  // English-only tenants: voicebot_multilingual=false and a single en-* allowed language.
   // Controlled by customer_settings.filler_ack_enabled (per-tenant).
-  // The bot does NOT react on the first filler; it waits. Only after
-  // `filler_ack_threshold` consecutive fillers it responds with an ack
-  // phrase and resets the counter. Any real (non-filler) speech also
-  // resets the counter.
   // ------------------------------------------------------------------
+  const fillerAckLanguageOk = isFillerAckAllowedForVoicePolicy({
+    voicebotMultilingual: session.voicebotMultilingualEffective === true,
+    allowedLanguageCodes: session.allowedLanguageCodes,
+    defaultLanguageCode: session.defaultLanguageCode,
+  });
   const fillerFeatureEnabled =
     env.voicebot.fillerAckEnabled &&
-    csTurn?.filler_ack_enabled === true;
+    csTurn?.filler_ack_enabled === true &&
+    fillerAckLanguageOk;
+
+  if (
+    env.voicebot.fillerAckEnabled &&
+    csTurn?.filler_ack_enabled === true &&
+    !fillerAckLanguageOk &&
+    isFillerOnlyTranscript(transcript)
+  ) {
+    voiceTrace(log, "pipeline.stt.filler_skip_multilingual", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      voicebot_multilingual: session.voicebotMultilingualEffective === true,
+      allowed_languages: session.allowedLanguageCodes ?? [],
+      note: "filler_ack is English-only; proceeding to normal RAG path",
+    });
+  }
 
   if (fillerFeatureEnabled && isFillerOnlyTranscript(transcript)) {
     const count = (session.fillerConsecutiveCount ?? 0) + 1;
@@ -2417,7 +2447,7 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
     // Threshold reached — acknowledge and reset
     session.fillerConsecutiveCount = 0;
 
-    const ack = pickFillerAckPhrase(multilingual ? pipelineBcp : "en-IN", {
+    const ack = pickFillerAckPhrase("en-IN", {
       englishOverride: env.voicebot.fillerAckText,
     });
     voiceTrace(log, "pipeline.stt.filler_only", {
@@ -2469,6 +2499,55 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
   // Real speech detected — reset consecutive filler counter
   if (session.fillerConsecutiveCount) {
     session.fillerConsecutiveCount = 0;
+  }
+
+  const csOpen = tenantCs(session);
+  if (isConversationalOpener(transcript)) {
+    const langBcp = normalizeBcp47Tag(
+      session.effectiveSttLanguageThisTurn || pipelineBcp
+    );
+    const useEmotionTags =
+      csOpen?.tts_provider === "cartesia" &&
+      csOpen.cartesia_emotion_mode !== "static";
+    const reply = conversationalOpenerReply(langBcp, {
+      withEmotionTags: useEmotionTags,
+    });
+    voiceTrace(log, "pipeline.conversational_opener", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      transcript_preview: transcript.slice(0, 80),
+      reply_language: langBcp,
+    });
+    const chatReply =
+      csOpen?.tts_provider === "cartesia" ? stripCartesiaEmotionTags(reply) : reply;
+    await appendVoiceTurnToChat(session, transcript, chatReply, {
+      assistantSource: "conversational_opener",
+    });
+    await speakToExotel(
+      ws,
+      session,
+      reply,
+      mapToTtsLanguage(langBcp),
+      log
+    );
+    const tEnd = Date.now();
+    voiceTrace(log, "pipeline.utterance.timing", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      stt_ms: tAfterStt - utteranceStartedAt,
+      ask_pipeline_ms: tEnd - tAfterStt,
+      final_tts_ms: 0,
+      total_ms: tEnd - utteranceStartedAt,
+      spoke_incrementally: false,
+      conversational_opener: true,
+    });
+    logVoiceStage(log, "utterance.completed", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      llm_source: "conversational_opener",
+      elapsed_ms: tEnd - utteranceStartedAt,
+    });
+    return;
   }
 
   voiceTrace(log, "pipeline.rag.start", {
@@ -2870,6 +2949,25 @@ async function processUtterance(
       }
     }
 
+    const scriptLang =
+      multilingual && transcript
+        ? inferLanguageFromTranscript(
+            transcript,
+            allowedNorm,
+            session.defaultLanguageCode || "en-IN"
+          )
+        : null;
+    if (scriptLang) {
+      voiceTrace(log, "pipeline.stt.script_language_override", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        stt_detected_before: detectedRaw,
+        script_inferred: scriptLang,
+        transcript_preview: transcript.slice(0, 120),
+      });
+      detectedRaw = scriptLang;
+    }
+
     if (session.lastUserQuery && transcript) {
       const last = session.lastUserQuery.trim().toLowerCase();
       const current = transcript.trim().toLowerCase();
@@ -3067,8 +3165,12 @@ async function processUtterance(
     session.customerQueryCount = nextQueryIndex;
 
     let effectiveLanguage = multilingual
-      ? normalizeBcp47Tag(session.currentLanguageCode || session.defaultLanguageCode || "en-IN")
+      ? clampedForPolicy
       : normalizeBcp47Tag("en-IN");
+    if (multilingual && scriptLang) {
+      effectiveLanguage = clampedForPolicy;
+      session.currentLanguageCode = effectiveLanguage;
+    }
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
     await applyAgentVoicePersonaToSession(session);
     if (session.callSessionDbId) {
@@ -3532,13 +3634,25 @@ async function runVoicebotAskPipeline(
 - Avoid bullet points and complex formatting; speak naturally.
 - If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`;
 
+    const historyMsgs = history.map((h: { role: string; content: string }) => ({
+      role: h.role as "user" | "assistant",
+      content: h.content,
+    }));
+    const questionTrimmed = question.trim();
+    const lastHist = historyMsgs[historyMsgs.length - 1];
+    const duplicateUserInHistory =
+      lastHist?.role === "user" &&
+      lastHist.content.trim() === questionTrimmed;
+
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {
         role: "system",
         content: `${agentPrompt}\n\n${ragRules}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
       },
-      ...history.map((h: any) => ({ role: h.role, content: h.content })),
-      { role: "user", content: question },
+      ...historyMsgs,
+      ...(duplicateUserInHistory || !questionTrimmed
+        ? []
+        : [{ role: "user" as const, content: question }]),
     ];
 
     voiceTrace(log, "pipeline.rag.llm_request", {
