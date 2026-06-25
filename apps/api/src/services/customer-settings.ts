@@ -420,7 +420,7 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
     out["cartesia_max_buffer_delay_ms"] = 0;
   }
   if (out["cartesia_emotion_mode"] === undefined) {
-    out["cartesia_emotion_mode"] = "llm_per_turn";
+    out["cartesia_emotion_mode"] = "llm_per_sentence";
   }
   if (out["cartesia_allowed_emotions"] === undefined) {
     out["cartesia_allowed_emotions"] = [

@@ -349,7 +349,7 @@ export function resolveCartesiaGenerationConfigForUtterance(
   }
 ): CartesiaGenerationConfig {
   const b = base ?? { speed: 1, volume: 1, emotion: "neutral" as CartesiaEmotion };
-  const mode = options?.emotionMode ?? "llm_per_turn";
+  const mode = options?.emotionMode ?? "llm_per_sentence";
   let emotion = resolveCartesiaEmotion(b.emotion ?? "neutral");
 
   if (mode !== "static" && options?.llmEmotion?.trim()) {
@@ -409,35 +409,28 @@ export function buildCartesiaRagPromptHint(options?: {
   emotionMode?: CartesiaEmotionMode | null;
   allowedEmotions?: readonly string[] | null;
 }): string {
-  const mode = options?.emotionMode ?? "llm_per_turn";
+  const mode = options?.emotionMode ?? "llm_per_sentence";
   const allowed =
     options?.allowedEmotions && options.allowedEmotions.length > 0
       ? options.allowedEmotions.join(", ")
       : "neutral, calm, sympathetic, content, grateful, apologetic, enthusiastic, curious";
 
   let emotionBlock = "";
-  if (mode === "llm_per_turn") {
-    emotionBlock = `
-EMOTION METADATA (required):
-- After your spoken answer, on its own final line, output exactly: EMOTION: <one_word>
-- <one_word> must be one of: ${allowed}
-- Choose from conversation context (sympathetic for complaints, enthusiastic for good news, apologetic for errors).
-- The EMOTION line is metadata only — never speak it aloud.`;
-  } else if (mode === "static") {
+  if (mode === "static") {
     emotionBlock =
-      "\n- Do not output emotion metadata; voice tone is configured separately.";
+      "\n- Use a consistent neutral tone; emotion is configured on the voice avatar.";
+  } else {
+    emotionBlock = `
+EMOTION TAGS (required per sentence):
+- Prefix EVERY sentence with [emotion] where emotion is one of: ${allowed}
+- Example: [sympathetic] I understand. [calm] Let me check that for you.`;
   }
 
   return `
 SPOKEN OUTPUT RULES (text goes to Cartesia Sonic TTS):
 - Write natural, well-punctuated sentences. End every sentence with . ? or !
-- Use complete phrases — not lone numbers, codes, or bullet lines.
-- Use normal capitalization; avoid ALL CAPS except acronyms meant to be spelled (USA).
-- Write numbers, dates, currency in conventional form.
-- For codes/IDs include surrounding words, e.g. "Your confirmation code is A B C 1 2 3."
-- Use commas and periods for pauses — no SSML, markdown, bullet lists, or URLs.
-- Keep replies SHORT for phone calls — one idea per sentence.
-- Do not add stage directions or emotion tags in the spoken text.${emotionBlock}`;
+- Short sentences for phone calls — one idea each.
+- No SSML, markdown, bullet lists, or URLs.${emotionBlock}`;
 }
 
 export function estimateCartesiaTtsCost(

@@ -87,7 +87,6 @@ import {
 } from "../services/elevenlabs";
 import {
   bcp47ToCartesiaLanguage,
-  buildCartesiaRagPromptHint,
   cartesiaConfigured,
   cartesiaOutputFormatForExotel,
   parseCartesiaLlmAnswer,
@@ -98,10 +97,11 @@ import {
   getOrCreateCartesiaTtsSession,
 } from "../services/cartesia-tts-ws";
 import {
-  humanizeTextForOpenAiTts,
-  DEFAULT_HUMANIZER_SYSTEM_PROMPT,
-  DEFAULT_HUMANIZER_STYLE,
-} from "../services/openai-tts-humanizer";
+  buildCartesiaRagVoicePrompt,
+  prepareCartesiaTtsText,
+  resolveHumanizerStyleFromSettings,
+  stripCartesiaEmotionTags,
+} from "../services/cartesia-voice-prompt";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
   voiceTrace,
@@ -152,8 +152,17 @@ function applyCartesiaAnswerText(
   if (parsed.emotion) {
     session.cartesiaTurnEmotion = parsed.emotion;
   }
-  return parsed.text || rawAnswer;
+  const firstTag = rawAnswer.match(/\[([a-z_]+)\]/i);
+  if (firstTag) {
+    session.cartesiaTurnEmotion = firstTag[1].toLowerCase();
+  }
+  return stripCartesiaEmotionTags(parsed.text || rawAnswer);
 }
+
+type SpeakToExotelOptions = {
+  /** Greeting / fixed script — speak verbatim (no Cartesia tag parsing or humanizer). */
+  cartesiaSpeakRaw?: boolean;
+};
 
 function getGreetingCacheKey(
   customerId: string,
@@ -203,6 +212,42 @@ async function preWarmGreetingCache(
     const exotelRate = session.mediaFormat.sample_rate;
 
     if (ttsProvider === "elevenlabs") return; // ElevenLabs caching would need voice_id alignment
+
+    if (ttsProvider === "cartesia" && cartesiaConfigured()) {
+      const voiceId =
+        session.ttsSpeaker?.trim() || cs?.tts_default_speaker?.trim() || "";
+      if (!voiceId) return;
+      const modelId = resolveCartesiaModel(session.ttsModel ?? cs?.tts_model ?? null);
+      const outputFormat = cartesiaOutputFormatForExotel(exotelRate);
+      const cartesiaLang = bcp47ToCartesiaLanguage(languageCode);
+      const generationConfig = resolveCartesiaGenerationConfigForUtterance(
+        session.cartesiaGenerationConfig,
+        {
+          emotionMode: cs?.cartesia_emotion_mode ?? "llm_per_sentence",
+          allowedEmotions: cs?.cartesia_allowed_emotions,
+        }
+      );
+      const cartesiaTts = getOrCreateCartesiaTtsSession(session, log);
+      const pcm = await cartesiaTts.speak({
+        transcript: text.slice(0, 4000),
+        modelId,
+        voiceId,
+        language: cartesiaLang,
+        outputFormat,
+        generationConfig,
+        pronunciationDictId: session.cartesiaPronunciationDictId ?? null,
+        legacySpeed: session.cartesiaLegacySpeed ?? null,
+        maxBufferDelayMs: cs?.cartesia_max_buffer_delay_ms ?? 0,
+      });
+      if (pcm.length > 0) {
+        setCachedGreetingPcm(cacheKey, pcm);
+        log?.info(
+          { customerId: session.customerId, cache_key_len: cacheKey.length, pcm_bytes: pcm.length },
+          "voicebot: Cartesia greeting PCM cached for next call"
+        );
+      }
+      return;
+    }
 
     const ttsPayload: SarvamTtsBody = {
       text: text.slice(0, 2500),
@@ -1347,8 +1392,10 @@ async function speakToExotel(
   session: VoicebotSession,
   text: string,
   languageCode: string = "en-IN",
-  log?: FastifyRequest["log"]
+  log?: FastifyRequest["log"],
+  options?: SpeakToExotelOptions
 ): Promise<boolean> {
+  if (session.isClosing) return false;
   session.ttsInProgress = true;
   try {
     const cs = tenantCs(session);
@@ -1720,51 +1767,23 @@ async function speakToExotel(
       const cartesiaLang = bcp47ToCartesiaLanguage(languageCode);
       const maxBufferDelayMs = cs?.cartesia_max_buffer_delay_ms ?? 0;
 
-      let transcriptText = text.slice(0, 4000);
-      if (cs?.tts_humanizer_enabled && env.openai.apiKey?.trim()) {
-        try {
-          const hum = await humanizeTextForOpenAiTts({
-            sourceText: transcriptText,
-            systemPrompt:
-              cs.tts_humanizer_system_prompt?.trim() ||
-              DEFAULT_HUMANIZER_SYSTEM_PROMPT,
-            styleSettings: {
-              ...DEFAULT_HUMANIZER_STYLE,
-              ...(cs.tts_humanizer_style &&
-              typeof cs.tts_humanizer_style === "object"
-                ? (cs.tts_humanizer_style as typeof DEFAULT_HUMANIZER_STYLE)
-                : {}),
-            },
-            llmModel: resolvedOpenAiModelForVoice(session),
-            temperature: session.llmTemperatureVoice ?? 0.85,
-            maxTokens: cs.tts_humanizer_max_tokens ?? 350,
-            trace: createRagTrace(log),
-          });
-          transcriptText = hum.humanized_text;
-        } catch (err) {
-          log?.warn({ err }, "voicebot Cartesia humanizer failed; using raw text");
-        }
-      } else {
-        transcriptText = parseCartesiaLlmAnswer(transcriptText).text;
+      const prepared = prepareCartesiaTtsText(text.slice(0, 4000), {
+        speakRaw: options?.cartesiaSpeakRaw === true,
+      });
+      if (prepared.emotion) {
+        session.cartesiaTurnEmotion = prepared.emotion;
       }
-
-      if (!transcriptText.trim()) {
+      if (!prepared.text.trim()) {
         session.ttsInProgress = false;
-        return false;
+        return prepared.emotion != null;
       }
-
-      const emotionOnly = transcriptText.trim().match(/^EMOTION:\s*([a-z_]+)\s*$/i);
-      if (emotionOnly) {
-        session.cartesiaTurnEmotion = emotionOnly[1].toLowerCase();
-        session.ttsInProgress = false;
-        return true;
-      }
+      const transcriptText = prepared.text;
 
       const generationConfig = resolveCartesiaGenerationConfigForUtterance(
         session.cartesiaGenerationConfig,
         {
           llmEmotion: session.cartesiaTurnEmotion,
-          emotionMode: cs?.cartesia_emotion_mode ?? "llm_per_turn",
+          emotionMode: cs?.cartesia_emotion_mode ?? "llm_per_sentence",
           allowedEmotions: cs?.cartesia_allowed_emotions,
         }
       );
@@ -1800,6 +1819,7 @@ async function speakToExotel(
         let totalPcmBytes = 0;
         let firstChunkSent = false;
         for await (const chunk of cartesiaTts.speakIncremental(speakParams)) {
+          if (session.isClosing) break;
           if (!firstChunkSent) {
             voiceTrace(log, "pipeline.tts.first_chunk", {
               customerId: session.customerId,
@@ -2208,6 +2228,13 @@ function findNextSpeakCutElevenLabs(s: string): number {
   return -1;
 }
 
+function hasIncompleteCartesiaEmotionTag(buf: string): boolean {
+  const lastOpen = buf.lastIndexOf("[");
+  if (lastOpen < 0) return false;
+  const tail = buf.slice(lastOpen);
+  return !tail.includes("]");
+}
+
 /**
  * Buffers LLM token deltas and calls `speakToExotel` per sentence (or ~100 chars) so audio can start before the full reply finishes.
  */
@@ -2217,19 +2244,22 @@ function createStreamingVoiceTts(
   ttsLanguage: string,
   log?: FastifyRequest["log"]
 ) {
-  const useElevenLabsCuts =
-    (tenantCs(session)?.tts_provider ?? "sarvam") === "elevenlabs";
+  const ttsProvider = tenantCs(session)?.tts_provider ?? "sarvam";
+  const useElevenLabsCuts = ttsProvider === "elevenlabs";
   const cutAt = useElevenLabsCuts ? findNextSpeakCutElevenLabs : findNextSpeakCut;
   let buffer = "";
   return {
     async pushDelta(text: string): Promise<void> {
       buffer += text;
       for (; ;) {
+        if (ttsProvider === "cartesia" && hasIncompleteCartesiaEmotionTag(buffer)) {
+          break;
+        }
         const cut = cutAt(buffer);
         if (cut < 0) break;
         const piece = buffer.slice(0, cut + 1).trim();
         buffer = buffer.slice(cut + 1).replace(/^\s+/, "");
-        if (piece.length > 0) {
+        if (piece.length > 0 && !session.isClosing) {
           await speakToExotel(ws, session, piece, ttsLanguage, log);
         }
       }
@@ -2237,7 +2267,7 @@ function createStreamingVoiceTts(
     async flushRest(): Promise<void> {
       const rest = buffer.trim();
       buffer = "";
-      if (rest.length > 0) {
+      if (rest.length > 0 && !session.isClosing) {
         await speakToExotel(ws, session, rest, ttsLanguage, log);
       }
     },
@@ -3448,9 +3478,13 @@ async function runVoicebotAskPipeline(
     );
     const cartesiaHint =
       csRag?.tts_provider === "cartesia"
-        ? buildCartesiaRagPromptHint({
-            emotionMode: csRag.cartesia_emotion_mode,
+        ? buildCartesiaRagVoicePrompt({
+            emotionMode: csRag.cartesia_emotion_mode ?? "llm_per_sentence",
             allowedEmotions: csRag.cartesia_allowed_emotions,
+            humanizerStyle: resolveHumanizerStyleFromSettings(csRag.tts_humanizer_style),
+            humanizerSystemPromptOverride: csRag.tts_humanizer_system_prompt,
+            generationConfig: session.cartesiaGenerationConfig ?? null,
+            maxBufferDelayMs: csRag.cartesia_max_buffer_delay_ms ?? null,
           })
         : "";
 
@@ -4067,6 +4101,13 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                       : "en-IN";
                   const greetingText = session.greetingText || GREETING_TEXT;
                   const cs = tenantCs(session);
+                  if (cs?.tts_provider === "cartesia" && cartesiaConfigured()) {
+                    void getOrCreateCartesiaTtsSession(session, log)
+                      .connect()
+                      .catch((err) =>
+                        log.warn({ err }, "voicebot: Cartesia WS pre-connect failed")
+                      );
+                  }
                   const cacheKey = getGreetingCacheKey(
                     customerId,
                     greetingText,
@@ -4094,7 +4135,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                       session,
                       greetingText,
                       greetingLang,
-                      log
+                      log,
+                      { cartesiaSpeakRaw: true }
                     );
                   }
                   if (!greetingOk) {
@@ -4301,6 +4343,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               if (vadTimer) clearTimeout(vadTimer);
 
               if (session) {
+                session.isClosing = true;
                 notifyCallEndOnce(session, `stopped:${reason}`);
                 if (session.inboundBytes > 0) {
                   log?.warn(

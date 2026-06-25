@@ -70,7 +70,7 @@ export function isFillerOnlyTranscript(raw: string): boolean {
     .replace(/[\u201c\u201d\u2018\u2019'"`]/g, "")
     .replace(/\s+/g, " ");
   if (t.length === 0) return false;
-  return /^(?:(?:hmm|hmmm|hm|mmm|mm|mhm|um|umm|uhm|uh|ah|oh|er|huh)\s*[.,!?…]*\s*)+$/i.test(
+  return /^(?:(?:hmm|hmmm|hm|mmm|mm(?:-?\s*hmm)?|mhm|um|umm|uhm|uh|ah|oh|er|huh)\s*[.,!?…]*\s*)+$/i.test(
     t
   );
 }
