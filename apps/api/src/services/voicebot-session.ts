@@ -12,7 +12,7 @@ import type { CartesiaTtsSession } from "./cartesia-tts-ws";
 import {
   closeCartesiaTtsSession,
 } from "./cartesia-tts-ws";
-import { PcmChunkBuffer } from "./pcm-audio";
+import { PcmChunkBuffer, STREAMING_OUTBOUND_CHUNK_SIZE } from "./pcm-audio";
 
 /** State of a single live voicebot call. */
 export interface VoicebotSession {
@@ -55,8 +55,10 @@ export interface VoicebotSession {
   cartesiaPronunciationDictId?: string | null;
   cartesiaLegacySpeed?: "slow" | "normal" | "fast" | null;
   cartesiaIsPvcVoice?: boolean;
-  /** LLM-chosen emotion for the current assistant turn (runtime, not DB). */
-  cartesiaTurnEmotion?: string | null;
+  /** Cartesia WS context for the current assistant reply (multi-sentence streaming). */
+  cartesiaReplyStreamContextId?: string | null;
+  /** Sentence pieces queued in the current Cartesia reply stream. */
+  cartesiaReplyStreamPieceCount?: number;
   /** Persistent Cartesia TTS WebSocket for this call. */
   cartesiaTts?: CartesiaTtsSession | null;
   /**
@@ -238,7 +240,7 @@ export function createSession(params: {
     callSessionDbId: null,
     chatSessionId: null,
     agentId: null,
-    outboundBuffer: new PcmChunkBuffer(),
+    outboundBuffer: new PcmChunkBuffer(STREAMING_OUTBOUND_CHUNK_SIZE),
     inboundPcm: [],
     inboundBytes: 0,
     markCounter: 0,

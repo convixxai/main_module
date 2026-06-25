@@ -420,19 +420,10 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
     out["cartesia_max_buffer_delay_ms"] = 0;
   }
   if (out["cartesia_emotion_mode"] === undefined) {
-    out["cartesia_emotion_mode"] = "llm_per_sentence";
+    out["cartesia_emotion_mode"] = "static";
   }
   if (out["cartesia_allowed_emotions"] === undefined) {
-    out["cartesia_allowed_emotions"] = [
-      "neutral",
-      "calm",
-      "sympathetic",
-      "content",
-      "grateful",
-      "apologetic",
-      "enthusiastic",
-      "curious",
-    ];
+    out["cartesia_allowed_emotions"] = ["neutral"];
   }
 
   return out as unknown as CustomerSettings;

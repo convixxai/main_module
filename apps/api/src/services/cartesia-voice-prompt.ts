@@ -1,9 +1,5 @@
 import {
-  CARTESIA_EMOTIONS,
-  type CartesiaEmotion,
-  type CartesiaEmotionMode,
   type CartesiaGenerationConfig,
-  resolveCartesiaEmotion,
 } from "./cartesia";
 import {
   buildHumanizerStyleBlock,
@@ -12,20 +8,7 @@ import {
 } from "./openai-tts-humanizer";
 
 /** Bump when Cartesia RAG voice prompt changes. */
-export const CARTESIA_VOICE_PROMPT_VERSION = 1;
-
-const DEFAULT_ALLOWED_EMOTIONS = [
-  "neutral",
-  "calm",
-  "sympathetic",
-  "content",
-  "grateful",
-  "apologetic",
-  "enthusiastic",
-  "curious",
-  "peaceful",
-  "determined",
-] as const;
+export const CARTESIA_VOICE_PROMPT_VERSION = 2;
 
 export function resolveHumanizerStyleFromSettings(
   raw: unknown
@@ -33,96 +16,75 @@ export function resolveHumanizerStyleFromSettings(
   if (!raw || typeof raw !== "object") {
     return { ...DEFAULT_HUMANIZER_STYLE };
   }
-  return { ...DEFAULT_HUMANIZER_STYLE, ...(raw as HumanizerStyleSettings) };
+  const merged = { ...DEFAULT_HUMANIZER_STYLE, ...(raw as HumanizerStyleSettings) };
+  return {
+    ...merged,
+    speaker_persona:
+      "warm professional female receptionist on a live phone call — feminine wording",
+    use_fillers: "minimal",
+    pause_style: "smooth_flowing",
+  };
+}
+
+function feminineGrammarHint(languageBcp47?: string | null): string {
+  const bcp = (languageBcp47 || "en-IN").toLowerCase();
+  if (bcp.startsWith("hi")) {
+    return `
+HINDI GRAMMAR (female voice — mandatory):
+- Use feminine verb forms: मैं सुन रही हूँ, मैं बता सकती हूँ, मैं मदद कर सकती हूँ.
+- Never use masculine forms: सकता, रहा हूँ, करूँगा.`;
+  }
+  if (bcp.startsWith("mr")) {
+    return `
+MARATHI GRAMMAR (female voice — mandatory):
+- Use feminine forms: मी ऐकते आहे, मी मदत करू शकते.
+- Avoid masculine: शकतो, ऐकतोय (male).`;
+  }
+  return `
+ENGLISH VOICE (female receptionist):
+- Natural, warm, professional female tone — not male or androgynous phrasing.
+- Prefer: "I'm happy to help" / "How can I help you?" — conversational and clear.`;
 }
 
 /**
  * Merged humanizer + Cartesia TTS instructions for the main RAG system prompt.
- * One LLM call produces phone-ready, tagged speech — no separate humanizer API.
+ * Neutral emotion only — no [emotion] tags.
  */
 export function buildCartesiaRagVoicePrompt(options?: {
-  emotionMode?: CartesiaEmotionMode | null;
-  allowedEmotions?: readonly string[] | null;
   humanizerStyle?: HumanizerStyleSettings | null;
   humanizerSystemPromptOverride?: string | null;
   generationConfig?: CartesiaGenerationConfig | null;
-  maxBufferDelayMs?: number | null;
+  replyLanguageBcp47?: string | null;
 }): string {
-  const mode = options?.emotionMode ?? "llm_per_sentence";
-  const allowed =
-    options?.allowedEmotions && options.allowedEmotions.length > 0
-      ? options.allowedEmotions
-      : [...DEFAULT_ALLOWED_EMOTIONS];
-
-  const style = options?.humanizerStyle ?? DEFAULT_HUMANIZER_STYLE;
+  const style = resolveHumanizerStyleFromSettings(options?.humanizerStyle);
   const styleBlock = buildHumanizerStyleBlock(style);
-
   const customLead = options?.humanizerSystemPromptOverride?.trim();
   const gen = options?.generationConfig;
-  const voiceTuning =
-    gen != null
-      ? `VOICE TUNING (Cartesia generation_config — match delivery to these defaults):
-- Base emotion when unsure: ${gen.emotion ?? "neutral"}
-- Speaking speed: ${gen.speed ?? 1} (1.0 = normal; lower = slower, higher = faster)
-- Volume: ${gen.volume ?? 1}`
-      : "";
-
-  const bufferHint =
-    options?.maxBufferDelayMs != null && options.maxBufferDelayMs > 0
-      ? `- Keep sentences reasonably short; TTS buffer delay is ${options.maxBufferDelayMs}ms.`
-      : "- Prefer short sentences so audio can start quickly (low latency).";
-
-  const emotionInstructions =
-    mode === "static"
-      ? `- Speak in a consistent warm tone; emotion is set on the voice avatar (do not add [emotion] tags).`
-      : `- Prefix EVERY sentence with one Cartesia emotion tag in square brackets.
-- Tag must be one of: ${allowed.join(", ")}.
-- Pick emotion from context (sympathetic for complaints, enthusiastic for good news, apologetic for errors, calm for factual info).
-- Format: [emotion] Spoken sentence.
-- Example: [sympathetic] I understand your concern. [calm] Let me check that for you.`;
+  const feminineHint = feminineGrammarHint(options?.replyLanguageBcp47);
 
   return `
---- CARTESIA VOICE OUTPUT (mandatory — your reply is spoken on a live phone call) ---
-${customLead ? `${customLead}\n` : ""}You write words a real human would SAY on a phone call. Output goes directly to Cartesia Sonic TTS — not OpenAI TTS.
+--- CARTESIA VOICE OUTPUT (mandatory — spoken on a live phone call) ---
+${customLead ? `${customLead}\n` : ""}You write words a real female receptionist would SAY on a phone call. Output goes directly to Cartesia Sonic TTS.
 
 Rules:
-- Return ONLY speakable words with emotion tags — no labels, quotes, markdown, JSON, or explanation.
+- Return ONLY speakable words — no labels, quotes, markdown, JSON, emotion tags, or explanation.
+- Do NOT use [emotion] tags or EMOTION: lines — voice tone is always neutral.
 - Keep the same facts and language as the knowledge base allows.
-- Stay concise; short sentences; one idea each; contractions where natural.
-- Warm, natural phone tone — not formal, not robotic, not a FAQ.
-- Use normal punctuation (. ? !) for pacing. Commas for breath.
+- Write **complete flowing sentences** with proper punctuation (. ? !).
+- Use commas only for natural breath within one sentence — do not break one thought into choppy fragments.
+- Prefer one or two full sentences over many tiny pieces.
+- Stay concise; contractions where natural; warm professional phone tone.
 - Write numbers, dates, currency in conventional form (Rs 7,000, 3 PM).
-- For codes/IDs include surrounding words; space characters if needed: "A B C 1 2 3".
-- Never: bullet points, "Please be advised", URLs, ALL CAPS for emphasis, stage directions outside tags.
-${bufferHint}
+- Never: bullet points, URLs, ALL CAPS, stage directions.
+${feminineHint}
 
-${emotionInstructions}
-${voiceTuning ? `\n${voiceTuning}\n` : ""}
+VOICE TUNING: neutral tone; speed ~${gen?.speed ?? 1.05}; speak clearly for telephony.
+
 ${styleBlock}
-
-Full list of valid Cartesia emotions (for reference): ${CARTESIA_EMOTIONS.slice(0, 20).join(", ")}, ...
 --- END CARTESIA VOICE OUTPUT ---`;
 }
 
-/** Parse leading [emotion] tag from a speak chunk (streaming sentence). */
-export function parseCartesiaTaggedUtterance(raw: string): {
-  text: string;
-  emotion: CartesiaEmotion | null;
-} {
-  const trimmed = raw.trim();
-  if (!trimmed) return { text: "", emotion: null };
-
-  const tagged = trimmed.match(/^\[([a-z_]+)\]\s*(.+)$/is);
-  if (tagged) {
-    const emotion = resolveCartesiaEmotion(tagged[1]);
-    const text = tagged[2].trim();
-    if (text) return { text, emotion };
-  }
-
-  return { text: stripCartesiaEmotionTags(trimmed), emotion: null };
-}
-
-/** Remove all [emotion] tags from text (for chat history / logging). */
+/** Strip legacy [emotion] tags from text (for chat history / TTS). */
 export function stripCartesiaEmotionTags(raw: string): string {
   return raw
     .replace(/\[[a-z_]+\]\s*/gi, "")
@@ -134,13 +96,9 @@ export function stripCartesiaEmotionTags(raw: string): string {
 export function prepareCartesiaTtsText(
   raw: string,
   options?: { speakRaw?: boolean }
-): { text: string; emotion: CartesiaEmotion | null } {
+): { text: string; emotion: null } {
   if (options?.speakRaw) {
     return { text: raw.trim(), emotion: null };
   }
-  const emotionOnly = raw.trim().match(/^EMOTION:\s*([a-z_]+)\s*$/i);
-  if (emotionOnly) {
-    return { text: "", emotion: resolveCartesiaEmotion(emotionOnly[1]) };
-  }
-  return parseCartesiaTaggedUtterance(raw);
+  return { text: stripCartesiaEmotionTags(raw), emotion: null };
 }

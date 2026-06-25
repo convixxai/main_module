@@ -19,6 +19,24 @@ export const PCM_MAX_CHUNK_BYTES = Math.floor(100_000 / PCM_CHUNK_MULTIPLE) * PC
 /** Default outbound chunk size: ~6400 bytes (~200ms at 16kHz/16-bit mono) */
 export const DEFAULT_OUTBOUND_CHUNK_SIZE = 6400;
 
+/** Low-latency streaming TTS — Exotel minimum frame (3200 B ≈ 200ms @ 8kHz). */
+export const STREAMING_OUTBOUND_CHUNK_SIZE = PCM_MIN_CHUNK_BYTES;
+
+/** Extra PCM gain for telephony (Cartesia volume API is often quiet on 8 kHz Exotel). */
+export const TELEPHONY_PCM_GAIN = 1.35;
+
+/** Apply linear gain to s16le PCM (clipped). */
+export function applyTelephonyPcmGain(pcm: Buffer, gain: number = TELEPHONY_PCM_GAIN): Buffer {
+  if (gain === 1 || pcm.length < 2) return pcm;
+  const out = Buffer.from(pcm);
+  for (let i = 0; i + 1 < out.length; i += 2) {
+    const sample = out.readInt16LE(i);
+    const amplified = Math.round(sample * gain);
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, amplified)), i);
+  }
+  return out;
+}
+
 /**
  * Rounds `size` down to the nearest multiple of 320, within Exotel bounds.
  */

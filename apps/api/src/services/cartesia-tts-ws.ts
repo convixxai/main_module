@@ -29,6 +29,7 @@ type PendingContext = {
   resolve: (chunks: Buffer[]) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  onChunk?: (chunk: Buffer) => void;
 };
 
 type CartesiaWsInbound =
@@ -157,12 +158,65 @@ export class CartesiaTtsSession {
     const contextId = params.contextId ?? randomUUID();
     const body = this.buildRequestBody({ ...params, transcript, contextId });
 
-    const chunks = await this.runContext(contextId, () => {
-      this.sendJson(body);
+    const queue: Buffer[] = [];
+    let wake: (() => void) | null = null;
+    let finished = false;
+    let failed: Error | null = null;
+
+    const notify = (): void => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+
+    const timer = setTimeout(() => {
+      this.pending.delete(contextId);
+      failed = new Error(`Cartesia TTS context timed out (${CONTEXT_TIMEOUT_MS}ms)`);
+      finished = true;
+      notify();
+    }, CONTEXT_TIMEOUT_MS);
+
+    this.pending.set(contextId, {
+      chunks: [],
+      onChunk: (chunk) => {
+        queue.push(chunk);
+        notify();
+      },
+      resolve: (chunks) => {
+        clearTimeout(timer);
+        for (const c of chunks) {
+          if (c.length > 0) queue.push(c);
+        }
+        finished = true;
+        notify();
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        failed = err;
+        finished = true;
+        notify();
+      },
+      timer,
     });
 
-    for (const chunk of chunks) {
-      if (chunk.length > 0) yield chunk;
+    try {
+      this.sendJson(body);
+    } catch (err) {
+      this.pending.delete(contextId);
+      clearTimeout(timer);
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+
+    while (!finished || queue.length > 0) {
+      if (failed) throw failed;
+      if (queue.length > 0) {
+        yield queue.shift()!;
+        continue;
+      }
+      if (finished) break;
+      await new Promise<void>((r) => {
+        wake = r;
+      });
     }
   }
 
@@ -300,7 +354,9 @@ export class CartesiaTtsSession {
       }
       if (msg.data) {
         try {
-          pending.chunks.push(Buffer.from(msg.data, "base64"));
+          const buf = Buffer.from(msg.data, "base64");
+          pending.chunks.push(buf);
+          pending.onChunk?.(buf);
         } catch (err) {
           this.pending.delete(contextId);
           pending.reject(err instanceof Error ? err : new Error(String(err)));

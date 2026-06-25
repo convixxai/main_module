@@ -21,12 +21,9 @@ SET
   tts_streaming_enabled = TRUE,
   rag_streaming_enabled = TRUE,
   tts_humanizer_enabled = FALSE,
+  cartesia_emotion_mode = 'static',
+  cartesia_allowed_emotions = ARRAY['neutral']::TEXT[],
   cartesia_max_buffer_delay_ms = 0,
-  cartesia_emotion_mode = 'llm_per_sentence',
-  cartesia_allowed_emotions = ARRAY[
-    'neutral','calm','sympathetic','content','grateful',
-    'apologetic','enthusiastic','curious','determined'
-  ]::TEXT[]
 WHERE customer_id = 'ead34d8f-de23-452c-9091-85b2af98ac82';
 
 -- ------------------------------------------------------------
@@ -49,13 +46,13 @@ INSERT INTO cartesia_avatars (
   'Cartesia Sonic 3.5 en-US female; recommended for voice agents',
   'f786b574-daa5-4673-aa0c-cbe3e8534c02',
   'sonic-3.5',
-  '{"speed":1,"volume":1,"emotion":"sympathetic"}'::jsonb,
+  '{"speed":1.05,"volume":1.75,"emotion":"neutral"}'::jsonb,
   '{
-    "en-IN": {"generation_config": {"emotion": "sympathetic", "speed": 1, "volume": 1}},
+    "en-IN": {"generation_config": {"emotion": "neutral", "speed": 1.05, "volume": 1.75}},
     "hi-IN": {
       "voice_id": "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4",
       "model_id": "sonic-3.5",
-      "generation_config": {"emotion": "calm", "speed": 1, "volume": 1}
+      "generation_config": {"emotion": "neutral", "speed": 1.05, "volume": 1.75}
     }
   }'::jsonb,
   TRUE,
@@ -82,7 +79,7 @@ INSERT INTO cartesia_avatars (
   'Secondary persona for Hindi calls',
   'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4',
   'sonic-3.5',
-  '{"speed":1,"volume":1,"emotion":"calm"}'::jsonb,
+  '{"speed":1.05,"volume":1.75,"emotion":"neutral"}'::jsonb,
   FALSE,
   TRUE
 )
@@ -98,14 +95,19 @@ WHERE id = '513f3ca6-d49a-4123-8848-f86811600407'
   AND customer_id = 'ead34d8f-de23-452c-9091-85b2af98ac82';
 
 -- ------------------------------------------------------------
--- QUERY 6 — Per-sentence emotion tags from LLM (recommended for voicebot)
+-- QUERY 6 — Neutral emotion only (recommended)
 -- ------------------------------------------------------------
 UPDATE customer_settings
-SET cartesia_emotion_mode = 'llm_per_sentence'
+SET
+  cartesia_emotion_mode = 'static',
+  cartesia_allowed_emotions = ARRAY['neutral']::TEXT[]
 WHERE customer_id = 'ead34d8f-de23-452c-9091-85b2af98ac82';
 
--- Optional: static emotion (avatar default only; no LLM tags)
--- UPDATE customer_settings SET cartesia_emotion_mode = 'static' WHERE customer_id = '...';
+-- Boost telephony volume on default avatar
+UPDATE cartesia_avatars
+SET generation_config = '{"speed":1.05,"volume":1.75,"emotion":"neutral"}'::jsonb
+WHERE customer_id = 'ead34d8f-de23-452c-9091-85b2af98ac82'
+  AND is_default = TRUE;
 
 -- ------------------------------------------------------------
 -- QUERY 7 — Enable humanizer (adds LLM latency before TTS)

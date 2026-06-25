@@ -319,6 +319,28 @@ export function cartesiaOutputFormatForExotel(
   };
 }
 
+export const CARTESIA_TELEPHONY_VOLUME_MIN = 1.75;
+export const CARTESIA_TELEPHONY_SPEED_DEFAULT = 1.05;
+
+export function normalizeCartesiaGenerationConfigForVoice(
+  raw: CartesiaGenerationConfig | null | undefined
+): CartesiaGenerationConfig {
+  const b = raw ?? { speed: 1, volume: 1, emotion: "neutral" as CartesiaEmotion };
+  const volume =
+    b.volume != null && Number.isFinite(b.volume)
+      ? Math.min(2, Math.max(CARTESIA_TELEPHONY_VOLUME_MIN, Number(b.volume)))
+      : CARTESIA_TELEPHONY_VOLUME_MIN;
+  const speed =
+    b.speed != null && Number.isFinite(b.speed)
+      ? Math.min(1.2, Math.max(0.95, Number(b.speed)))
+      : CARTESIA_TELEPHONY_SPEED_DEFAULT;
+  return {
+    speed,
+    volume,
+    emotion: "neutral",
+  };
+}
+
 export function parseCartesiaGenerationConfig(
   raw: unknown
 ): CartesiaGenerationConfig {
@@ -342,29 +364,13 @@ export function parseCartesiaGenerationConfig(
 
 export function resolveCartesiaGenerationConfigForUtterance(
   base: CartesiaGenerationConfig | null | undefined,
-  options?: {
+  _options?: {
     llmEmotion?: string | null;
     emotionMode?: CartesiaEmotionMode | null;
     allowedEmotions?: readonly string[] | null;
   }
 ): CartesiaGenerationConfig {
-  const b = base ?? { speed: 1, volume: 1, emotion: "neutral" as CartesiaEmotion };
-  const mode = options?.emotionMode ?? "llm_per_sentence";
-  let emotion = resolveCartesiaEmotion(b.emotion ?? "neutral");
-
-  if (mode !== "static" && options?.llmEmotion?.trim()) {
-    const candidate = resolveCartesiaEmotion(options.llmEmotion);
-    const allowed = options.allowedEmotions;
-    if (!allowed || allowed.length === 0 || allowed.includes(candidate)) {
-      emotion = candidate;
-    }
-  }
-
-  return {
-    speed: b.speed ?? 1,
-    volume: b.volume ?? 1,
-    emotion,
-  };
+  return normalizeCartesiaGenerationConfigForVoice(base);
 }
 
 /** Parse LLM answer text/JSON and extract spoken text + optional emotion. */

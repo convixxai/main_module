@@ -73,21 +73,20 @@ export function isConversationalOpener(raw: string): boolean {
   );
 }
 
-/** Fast-path spoken reply (Cartesia emotion tag optional). */
+/** Fast-path spoken reply — neutral tone, feminine wording. */
 export function conversationalOpenerReply(
   languageBcp47: string,
-  options?: { withEmotionTags?: boolean }
+  _options?: { withEmotionTags?: boolean }
 ): string {
-  const tag = options?.withEmotionTags !== false ? "[enthusiastic] " : "";
   const bcp = languageBcp47.trim().toLowerCase();
   if (bcp.startsWith("hi")) {
-    return `${tag}नमस्ते! बताइए, मैं आपकी कैसे मदद कर सकता हूँ?`;
+    return "नमस्ते! बताइए, मैं आपकी कैसे मदद कर सकती हूँ?";
   }
   if (bcp.startsWith("mr")) {
-    return `${tag}नमस्कार! मी तुम्हाला कशी मदत करू शकतो?`;
+    return "नमस्कार! मी तुम्हाला कशी मदत करू शकते?";
   }
   if (bcp.startsWith("gu")) {
-    return `${tag}નમસ્તે! હું તમારી કેવી રીતે મદદ કરી શકું?`;
+    return "નમસ્તે! હું તમારી કેવી રીતે મદદ કરી શકું?";
   }
-  return `${tag}Hi there! How can I help you today?`;
+  return "Hi there! How can I help you today?";
 }

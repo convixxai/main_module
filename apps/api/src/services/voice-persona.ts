@@ -9,6 +9,7 @@ import {
 import {
   parseCartesiaGenerationConfig,
   resolveCartesiaModel,
+  normalizeCartesiaGenerationConfigForVoice,
 } from "./cartesia";
 
 function pickLang(session: VoicebotSession): string {
@@ -126,9 +127,9 @@ export async function applyAgentVoicePersonaToSession(
       const mapGen = mapEntry?.generation_config
         ? parseCartesiaGenerationConfig(mapEntry.generation_config)
         : null;
-      session.cartesiaGenerationConfig = mapGen
-        ? { ...baseGen, ...mapGen }
-        : baseGen;
+      session.cartesiaGenerationConfig = normalizeCartesiaGenerationConfigForVoice(
+        mapGen ? { ...baseGen, ...mapGen } : baseGen
+      );
       session.cartesiaPronunciationDictId =
         row.pronunciation_dict_id != null
           ? String(row.pronunciation_dict_id).trim() || null
@@ -147,11 +148,15 @@ export async function applyAgentVoicePersonaToSession(
       session.ttsModel = resolveCartesiaModel(cs?.tts_model);
     }
     if (!session.cartesiaGenerationConfig) {
-      session.cartesiaGenerationConfig = {
+      session.cartesiaGenerationConfig = normalizeCartesiaGenerationConfigForVoice({
         speed: 1,
         volume: 1,
         emotion: "neutral",
-      };
+      });
+    } else {
+      session.cartesiaGenerationConfig = normalizeCartesiaGenerationConfigForVoice(
+        session.cartesiaGenerationConfig
+      );
     }
     return;
   }
