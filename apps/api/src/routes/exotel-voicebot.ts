@@ -4016,7 +4016,9 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
       let session: VoicebotSession | null = null;
       let vadTimer: ReturnType<typeof setTimeout> | null = null;
       let isProcessing = false;
-      let sawMediaBeforeStart = false;
+      /** Exotel may send `media` before `start`; hold PCM until the session exists. */
+      const preStartInboundPcm: Buffer[] = [];
+      const PRE_START_MEDIA_MAX_CHUNKS = 150;
 
       // ---- Message handler ----
       socket.on("message", async (rawData: Buffer | string) => {
@@ -4075,6 +4077,28 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 );
                 socket.close(4409, "Too many concurrent calls");
                 break;
+              }
+
+              session = createSession({
+                streamSid: details.stream_sid,
+                callSid: details.call_sid,
+                customerId,
+                accountSid: details.account_sid,
+                from: details.from,
+                to: details.to,
+                mediaFormat: {
+                  ...details.media_format,
+                  sample_rate: parseInt(String(details.media_format.sample_rate), 10) || 8000,
+                },
+                customParameters: details.custom_parameters,
+              });
+              if (preStartInboundPcm.length > 0) {
+                session.inboundPcm.push(...preStartInboundPcm);
+                session.inboundBytes += preStartInboundPcm.reduce(
+                  (sum, pcm) => sum + pcm.length,
+                  0
+                );
+                preStartInboundPcm.length = 0;
               }
 
               let outboundLinkedId: string | null = null;
@@ -4174,20 +4198,6 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   );
                 }
               }
-
-              session = createSession({
-                streamSid: details.stream_sid,
-                callSid: details.call_sid,
-                customerId,
-                accountSid: details.account_sid,
-                from: details.from,
-                to: details.to,
-                mediaFormat: {
-                  ...details.media_format,
-                  sample_rate: parseInt(String(details.media_format.sample_rate), 10) || 8000,
-                },
-                customParameters: details.custom_parameters,
-              });
 
               const campaignId = details.custom_parameters?.campaign_id || outboundMetadata?.campaign_id;
               if (campaignId) {
@@ -4403,15 +4413,15 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
             // ---- media (caller audio) ----
             case "media": {
               if (!session) {
-                if (!sawMediaBeforeStart) {
-                  sawMediaBeforeStart = true;
-                  log?.warn(
-                    {
-                      customerId,
-                      stream_sid: (msg as ExotelMediaMessage).stream_sid,
-                    },
-                    "voicebot received media before start; cannot process/greet until start event arrives"
-                  );
+                if (preStartInboundPcm.length < PRE_START_MEDIA_MAX_CHUNKS) {
+                  try {
+                    const mediaMsg = msg as ExotelMediaMessage;
+                    preStartInboundPcm.push(
+                      decodeBase64Pcm(mediaMsg.media.payload)
+                    );
+                  } catch {
+                    /* ignore malformed pre-start media */
+                  }
                 }
                 break;
               }
