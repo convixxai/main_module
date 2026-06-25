@@ -12,9 +12,10 @@ import { pool } from "../config/db";
 
 export type EchoCancelLevel = "off" | "soft" | "aggressive";
 export type BargeInMode = "immediate" | "finish_then_answer" | "finish_turn";
-export type TtsProvider = "sarvam" | "elevenlabs";
+export type TtsProvider = "sarvam" | "elevenlabs" | "cartesia";
 export type SttProvider = "sarvam" | "elevenlabs";
 export type TtsCodec = "wav" | "mp3";
+export type CartesiaEmotionMode = "static" | "llm_per_turn" | "llm_per_sentence";
 export type RelatedAnswerStrictness = "strict" | "balanced" | "permissive";
 
 export interface CustomerSettings {
@@ -41,6 +42,13 @@ export interface CustomerSettings {
   tts_default_sample_rate: number;
   tts_output_codec: TtsCodec;
   tts_streaming_enabled: boolean;
+  tts_humanizer_enabled: boolean;
+  tts_humanizer_system_prompt: string | null;
+  tts_humanizer_style: Record<string, unknown>;
+  tts_humanizer_max_tokens: number;
+  cartesia_max_buffer_delay_ms: number;
+  cartesia_emotion_mode: CartesiaEmotionMode;
+  cartesia_allowed_emotions: string[];
 
   // D. RAG / LLM
   rag_use_openai_only: boolean;
@@ -169,6 +177,7 @@ export const ADMIN_ONLY_FIELDS = new Set<keyof CustomerSettingsPatch>([
   "webhook_secret",
   "webhook_retry_attempts",
   "filler_ack_threshold",
+  "cartesia_max_buffer_delay_ms",
 ]);
 
 /**
@@ -195,6 +204,13 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   "tts_default_sample_rate",
   "tts_output_codec",
   "tts_streaming_enabled",
+  "tts_humanizer_enabled",
+  "tts_humanizer_system_prompt",
+  "tts_humanizer_style",
+  "tts_humanizer_max_tokens",
+  "cartesia_max_buffer_delay_ms",
+  "cartesia_emotion_mode",
+  "cartesia_allowed_emotions",
   // D
   "rag_use_openai_only",
   "rag_top_k",
@@ -281,6 +297,7 @@ const JSONB_FIELDS = new Set<keyof CustomerSettingsPatch>([
   "holiday_calendar",
   "stt_domain_words",
   "industry_context",
+  "tts_humanizer_style",
 ]);
 
 // ---------- Cache ----------
@@ -386,6 +403,37 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
   out["filler_ack_threshold"] = Number.isFinite(tn)
     ? Math.min(10, Math.max(1, Math.round(tn)))
     : 2;
+
+  if (out["tts_humanizer_enabled"] === undefined) {
+    out["tts_humanizer_enabled"] = false;
+  }
+  if (out["tts_humanizer_system_prompt"] === undefined) {
+    out["tts_humanizer_system_prompt"] = null;
+  }
+  if (out["tts_humanizer_style"] === undefined) {
+    out["tts_humanizer_style"] = {};
+  }
+  if (out["tts_humanizer_max_tokens"] === undefined) {
+    out["tts_humanizer_max_tokens"] = 350;
+  }
+  if (out["cartesia_max_buffer_delay_ms"] === undefined) {
+    out["cartesia_max_buffer_delay_ms"] = 0;
+  }
+  if (out["cartesia_emotion_mode"] === undefined) {
+    out["cartesia_emotion_mode"] = "llm_per_turn";
+  }
+  if (out["cartesia_allowed_emotions"] === undefined) {
+    out["cartesia_allowed_emotions"] = [
+      "neutral",
+      "calm",
+      "sympathetic",
+      "content",
+      "grateful",
+      "apologetic",
+      "enthusiastic",
+      "curious",
+    ];
+  }
 
   return out as unknown as CustomerSettings;
 }

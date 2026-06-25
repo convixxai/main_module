@@ -23,6 +23,7 @@ import { elevenlabsVoiceBrowserRoutes } from "./routes/elevenlabs-voice-browser"
 import { openaiTtsSimulatorRoutes } from "./routes/openai-tts-simulator";
 import { cartesiaSimulatorRoutes } from "./routes/cartesia-simulator";
 import { cartesiaVoiceBrowserRoutes } from "./routes/cartesia-voice-browser";
+import { cartesiaApiRoutes } from "./routes/cartesia-api";
 import { simulatorSaveRoutes } from "./routes/simulator-save";
 import { googleTtsSimulatorRoutes } from "./routes/google-tts-simulator";
 import { sarvamTtsSimulatorRoutes } from "./routes/sarvam-tts-simulator";
@@ -66,6 +67,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(openaiTtsSimulatorRoutes);
   app.register(cartesiaSimulatorRoutes);
   app.register(cartesiaVoiceBrowserRoutes);
+  app.register(cartesiaApiRoutes);
   app.register(simulatorSaveRoutes);
   app.register(googleTtsSimulatorRoutes);
   app.register(sarvamTtsSimulatorRoutes);

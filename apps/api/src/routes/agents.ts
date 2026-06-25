@@ -15,6 +15,7 @@ const createAgentSchema = z.object({
   tts_sample_rate: z.number().optional().nullable(),
   avatar_id: z.string().uuid().optional().nullable(),
   elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
+  cartesia_avatar_id: z.string().uuid().optional().nullable(),
 });
 
 const updateAgentSchema = z.object({
@@ -29,6 +30,7 @@ const updateAgentSchema = z.object({
   tts_sample_rate: z.number().optional().nullable(),
   avatar_id: z.string().uuid().optional().nullable(),
   elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
+  cartesia_avatar_id: z.string().uuid().optional().nullable(),
 });
 
 export async function agentRoutes(app: FastifyInstance) {
@@ -54,16 +56,17 @@ export async function agentRoutes(app: FastifyInstance) {
         tts_sample_rate,
         avatar_id,
         elevenlabs_avatar_id,
+        cartesia_avatar_id,
       } = body.data;
 
       const result = await pool.query(
         `INSERT INTO agents (
            customer_id, name, description, system_prompt, greeting_text, error_text,
-           tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id
+           tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING id, customer_id, name, description, system_prompt, greeting_text, error_text,
-                   tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id,
+                   tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id, cartesia_avatar_id,
                    is_active, created_at, updated_at`,
         [
           customerId,
@@ -78,6 +81,7 @@ export async function agentRoutes(app: FastifyInstance) {
           tts_sample_rate,
           avatar_id ?? null,
           elevenlabs_avatar_id ?? null,
+          cartesia_avatar_id ?? null,
         ]
       );
 
@@ -93,7 +97,7 @@ export async function agentRoutes(app: FastifyInstance) {
 
       const result = await pool.query(
         `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
-                avatar_id, elevenlabs_avatar_id, is_active, created_at, updated_at
+                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at
          FROM agents
          WHERE customer_id = $1
          ORDER BY created_at DESC`,
@@ -113,7 +117,7 @@ export async function agentRoutes(app: FastifyInstance) {
 
       const result = await pool.query(
         `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
-                avatar_id, elevenlabs_avatar_id, is_active, created_at, updated_at
+                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at
          FROM agents
          WHERE id = $1 AND customer_id = $2`,
         [id, customerId]
@@ -150,6 +154,7 @@ export async function agentRoutes(app: FastifyInstance) {
         tts_sample_rate,
         avatar_id,
         elevenlabs_avatar_id,
+        cartesia_avatar_id,
       } = body.data;
 
       if (
@@ -163,7 +168,8 @@ export async function agentRoutes(app: FastifyInstance) {
         tts_speaker === undefined &&
         tts_sample_rate === undefined &&
         avatar_id === undefined &&
-        elevenlabs_avatar_id === undefined
+        elevenlabs_avatar_id === undefined &&
+        cartesia_avatar_id === undefined
       ) {
         return reply
           .status(400)
@@ -227,6 +233,10 @@ export async function agentRoutes(app: FastifyInstance) {
         sets.push(`elevenlabs_avatar_id = $${idx++}`);
         values.push(elevenlabs_avatar_id);
       }
+      if (cartesia_avatar_id !== undefined) {
+        sets.push(`cartesia_avatar_id = $${idx++}`);
+        values.push(cartesia_avatar_id);
+      }
 
       sets.push(`updated_at = NOW()`);
       values.push(id);
@@ -236,7 +246,7 @@ export async function agentRoutes(app: FastifyInstance) {
         `UPDATE agents SET ${sets.join(", ")}
          WHERE id = $${idx++} AND customer_id = $${idx}
          RETURNING id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
-                   avatar_id, elevenlabs_avatar_id, is_active, created_at, updated_at`,
+                   avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at`,
         values
       );
 

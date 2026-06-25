@@ -1,7 +1,7 @@
 import { env } from "../config/env";
 
 const CARTESIA_BASE = "https://api.cartesia.ai";
-const CARTESIA_VERSION = "2026-03-01";
+export const CARTESIA_VERSION = "2026-03-01";
 
 /** ~1 credit per input character for standard Sonic TTS (see docs.cartesia.ai/pricing). */
 const DEFAULT_CREDITS_PER_CHAR = 1;
@@ -158,6 +158,8 @@ export const CARTESIA_EMOTIONS = [
 
 export type CartesiaEmotion = (typeof CARTESIA_EMOTIONS)[number];
 
+export type CartesiaEmotionMode = "static" | "llm_per_turn" | "llm_per_sentence";
+
 export const CARTESIA_LEGACY_SPEEDS = ["slow", "normal", "fast"] as const;
 
 export const CARTESIA_OUTPUT_PRESETS = [
@@ -290,6 +292,152 @@ export function resolveCartesiaEmotion(
     return e as CartesiaEmotion;
   }
   return "neutral";
+}
+
+/** Map BCP-47 (e.g. en-IN) → Cartesia ISO 639-1 language code. */
+export function bcp47ToCartesiaLanguage(bcp47: string): string {
+  const primary = (bcp47 || "en").split("-")[0]?.toLowerCase() || "en";
+  const known = CARTESIA_LANGUAGES.map((l) => l.code);
+  if (known.includes(primary as (typeof known)[number])) return primary;
+  return "en";
+}
+
+/** Direct PCM output matching Exotel negotiated sample rate (no resample). */
+export function cartesiaOutputFormatForExotel(
+  exotelSampleRate: number
+): CartesiaOutputFormat {
+  const rate =
+    exotelSampleRate === 8000 ||
+    exotelSampleRate === 16000 ||
+    exotelSampleRate === 24000
+      ? exotelSampleRate
+      : 16000;
+  return {
+    container: "raw",
+    encoding: "pcm_s16le",
+    sample_rate: rate,
+  };
+}
+
+export function parseCartesiaGenerationConfig(
+  raw: unknown
+): CartesiaGenerationConfig {
+  if (!raw || typeof raw !== "object") {
+    return { speed: 1, volume: 1, emotion: "neutral" };
+  }
+  const o = raw as Record<string, unknown>;
+  const speed =
+    o.speed != null && Number.isFinite(Number(o.speed))
+      ? Math.min(1.5, Math.max(0.6, Number(o.speed)))
+      : 1;
+  const volume =
+    o.volume != null && Number.isFinite(Number(o.volume))
+      ? Math.min(2, Math.max(0.5, Number(o.volume)))
+      : 1;
+  const emotion = resolveCartesiaEmotion(
+    o.emotion != null ? String(o.emotion) : "neutral"
+  );
+  return { speed, volume, emotion };
+}
+
+export function resolveCartesiaGenerationConfigForUtterance(
+  base: CartesiaGenerationConfig | null | undefined,
+  options?: {
+    llmEmotion?: string | null;
+    emotionMode?: CartesiaEmotionMode | null;
+    allowedEmotions?: readonly string[] | null;
+  }
+): CartesiaGenerationConfig {
+  const b = base ?? { speed: 1, volume: 1, emotion: "neutral" as CartesiaEmotion };
+  const mode = options?.emotionMode ?? "llm_per_turn";
+  let emotion = resolveCartesiaEmotion(b.emotion ?? "neutral");
+
+  if (mode !== "static" && options?.llmEmotion?.trim()) {
+    const candidate = resolveCartesiaEmotion(options.llmEmotion);
+    const allowed = options.allowedEmotions;
+    if (!allowed || allowed.length === 0 || allowed.includes(candidate)) {
+      emotion = candidate;
+    }
+  }
+
+  return {
+    speed: b.speed ?? 1,
+    volume: b.volume ?? 1,
+    emotion,
+  };
+}
+
+/** Parse LLM answer text/JSON and extract spoken text + optional emotion. */
+export function parseCartesiaLlmAnswer(raw: string): {
+  text: string;
+  emotion: string | null;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) return { text: "", emotion: null };
+
+  if (trimmed.startsWith("{")) {
+    try {
+      const j = JSON.parse(trimmed) as { answer?: unknown; emotion?: unknown };
+      if (typeof j.answer === "string" && j.answer.trim()) {
+        return {
+          text: j.answer.trim(),
+          emotion:
+            typeof j.emotion === "string" && j.emotion.trim()
+              ? j.emotion.trim().toLowerCase()
+              : null,
+        };
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  const emotionLineRe = /\nEMOTION:\s*([a-z_]+)\s*$/i;
+  const m = trimmed.match(emotionLineRe);
+  if (m) {
+    return {
+      text: trimmed.replace(emotionLineRe, "").trim(),
+      emotion: m[1].toLowerCase(),
+    };
+  }
+
+  return { text: trimmed, emotion: null };
+}
+
+/** RAG system-prompt addendum when tenant uses Cartesia TTS. */
+export function buildCartesiaRagPromptHint(options?: {
+  emotionMode?: CartesiaEmotionMode | null;
+  allowedEmotions?: readonly string[] | null;
+}): string {
+  const mode = options?.emotionMode ?? "llm_per_turn";
+  const allowed =
+    options?.allowedEmotions && options.allowedEmotions.length > 0
+      ? options.allowedEmotions.join(", ")
+      : "neutral, calm, sympathetic, content, grateful, apologetic, enthusiastic, curious";
+
+  let emotionBlock = "";
+  if (mode === "llm_per_turn") {
+    emotionBlock = `
+EMOTION METADATA (required):
+- After your spoken answer, on its own final line, output exactly: EMOTION: <one_word>
+- <one_word> must be one of: ${allowed}
+- Choose from conversation context (sympathetic for complaints, enthusiastic for good news, apologetic for errors).
+- The EMOTION line is metadata only — never speak it aloud.`;
+  } else if (mode === "static") {
+    emotionBlock =
+      "\n- Do not output emotion metadata; voice tone is configured separately.";
+  }
+
+  return `
+SPOKEN OUTPUT RULES (text goes to Cartesia Sonic TTS):
+- Write natural, well-punctuated sentences. End every sentence with . ? or !
+- Use complete phrases — not lone numbers, codes, or bullet lines.
+- Use normal capitalization; avoid ALL CAPS except acronyms meant to be spelled (USA).
+- Write numbers, dates, currency in conventional form.
+- For codes/IDs include surrounding words, e.g. "Your confirmation code is A B C 1 2 3."
+- Use commas and periods for pauses — no SSML, markdown, bullet lists, or URLs.
+- Keep replies SHORT for phone calls — one idea per sentence.
+- Do not add stage directions or emotion tags in the spoken text.${emotionBlock}`;
 }
 
 export function estimateCartesiaTtsCost(

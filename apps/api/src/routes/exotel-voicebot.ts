@@ -85,6 +85,23 @@ import {
   ELEVENLABS_PREMADE_API_SAFE_VOICE_ID,
   elevenLabsTtsIsLibraryOrPaymentError,
 } from "../services/elevenlabs";
+import {
+  bcp47ToCartesiaLanguage,
+  buildCartesiaRagPromptHint,
+  cartesiaConfigured,
+  cartesiaOutputFormatForExotel,
+  parseCartesiaLlmAnswer,
+  resolveCartesiaGenerationConfigForUtterance,
+  resolveCartesiaModel,
+} from "../services/cartesia";
+import {
+  getOrCreateCartesiaTtsSession,
+} from "../services/cartesia-tts-ws";
+import {
+  humanizeTextForOpenAiTts,
+  DEFAULT_HUMANIZER_SYSTEM_PROMPT,
+  DEFAULT_HUMANIZER_STYLE,
+} from "../services/openai-tts-humanizer";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
   voiceTrace,
@@ -124,6 +141,19 @@ const GREETING_TEXT = "Hello! How can I help you today?";
  */
 const greetingPcmCache = new Map<string, { pcm: Buffer; ts: number }>();
 const GREETING_CACHE_TTL_MS = 3600_000; // 1 hour
+
+function applyCartesiaAnswerText(
+  session: VoicebotSession,
+  rawAnswer: string
+): string {
+  const cs = tenantCs(session);
+  if (cs?.tts_provider !== "cartesia") return rawAnswer;
+  const parsed = parseCartesiaLlmAnswer(rawAnswer);
+  if (parsed.emotion) {
+    session.cartesiaTurnEmotion = parsed.emotion;
+  }
+  return parsed.text || rawAnswer;
+}
 
 function getGreetingCacheKey(
   customerId: string,
@@ -1659,6 +1689,159 @@ async function speakToExotel(
       return true;
     }
 
+    if (ttsProvider === "cartesia") {
+      if (!cartesiaConfigured()) {
+        session.ttsInProgress = false;
+        log?.error("voicebot TTS: CARTESIA_API_KEY not configured");
+        return false;
+      }
+
+      const voiceId =
+        session.ttsSpeaker?.trim() ||
+        cs?.tts_default_speaker?.trim() ||
+        "";
+      if (!voiceId) {
+        session.ttsInProgress = false;
+        log?.error(
+          "voicebot TTS: Cartesia needs voice_id (cartesia avatar, tts_default_speaker, or agent tts_speaker)"
+        );
+        voiceTrace(log, "pipeline.tts.error", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          reason: "missing_cartesia_voice_id",
+        });
+        return false;
+      }
+
+      const modelId = resolveCartesiaModel(
+        session.ttsModel ?? cs?.tts_model ?? null
+      );
+      const outputFormat = cartesiaOutputFormatForExotel(exotelRate);
+      const cartesiaLang = bcp47ToCartesiaLanguage(languageCode);
+      const maxBufferDelayMs = cs?.cartesia_max_buffer_delay_ms ?? 0;
+
+      let transcriptText = text.slice(0, 4000);
+      if (cs?.tts_humanizer_enabled && env.openai.apiKey?.trim()) {
+        try {
+          const hum = await humanizeTextForOpenAiTts({
+            sourceText: transcriptText,
+            systemPrompt:
+              cs.tts_humanizer_system_prompt?.trim() ||
+              DEFAULT_HUMANIZER_SYSTEM_PROMPT,
+            styleSettings: {
+              ...DEFAULT_HUMANIZER_STYLE,
+              ...(cs.tts_humanizer_style &&
+              typeof cs.tts_humanizer_style === "object"
+                ? (cs.tts_humanizer_style as typeof DEFAULT_HUMANIZER_STYLE)
+                : {}),
+            },
+            llmModel: resolvedOpenAiModelForVoice(session),
+            temperature: session.llmTemperatureVoice ?? 0.85,
+            maxTokens: cs.tts_humanizer_max_tokens ?? 350,
+            trace: createRagTrace(log),
+          });
+          transcriptText = hum.humanized_text;
+        } catch (err) {
+          log?.warn({ err }, "voicebot Cartesia humanizer failed; using raw text");
+        }
+      } else {
+        transcriptText = parseCartesiaLlmAnswer(transcriptText).text;
+      }
+
+      if (!transcriptText.trim()) {
+        session.ttsInProgress = false;
+        return false;
+      }
+
+      const emotionOnly = transcriptText.trim().match(/^EMOTION:\s*([a-z_]+)\s*$/i);
+      if (emotionOnly) {
+        session.cartesiaTurnEmotion = emotionOnly[1].toLowerCase();
+        session.ttsInProgress = false;
+        return true;
+      }
+
+      const generationConfig = resolveCartesiaGenerationConfigForUtterance(
+        session.cartesiaGenerationConfig,
+        {
+          llmEmotion: session.cartesiaTurnEmotion,
+          emotionMode: cs?.cartesia_emotion_mode ?? "llm_per_turn",
+          allowedEmotions: cs?.cartesia_allowed_emotions,
+        }
+      );
+
+      logVoiceStage(log, "tts.start", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        call_sid: session.callSid,
+        exotel_call_session_id: session.callSessionDbId,
+        text_chars: transcriptText.length,
+        languageCode,
+        tts_provider: "cartesia",
+        tts_model: modelId,
+        tts_voice_id: voiceId,
+        output_format: outputFormat,
+        generation_config: generationConfig,
+      });
+
+      const cartesiaTts = getOrCreateCartesiaTtsSession(session, log);
+      const speakParams = {
+        transcript: transcriptText,
+        modelId,
+        voiceId,
+        language: cartesiaLang,
+        outputFormat,
+        generationConfig,
+        pronunciationDictId: session.cartesiaPronunciationDictId ?? null,
+        legacySpeed: session.cartesiaLegacySpeed ?? null,
+        maxBufferDelayMs,
+      };
+
+      try {
+        let totalPcmBytes = 0;
+        let firstChunkSent = false;
+        for await (const chunk of cartesiaTts.speakIncremental(speakParams)) {
+          if (!firstChunkSent) {
+            voiceTrace(log, "pipeline.tts.first_chunk", {
+              customerId: session.customerId,
+              stream_sid: session.streamSid,
+              chunk_bytes: chunk.length,
+              tts_provider: "cartesia",
+            });
+            firstChunkSent = true;
+          }
+          sendAudioToExotel(ws, session, chunk, log, { omitMark: true });
+          totalPcmBytes += chunk.length;
+        }
+
+        session.ttsInProgress = false;
+        if (totalPcmBytes === 0) {
+          log?.warn({ stream_sid: session.streamSid }, "voicebot Cartesia TTS yielded 0 bytes");
+          return false;
+        }
+
+        sendAudioToExotel(ws, session, Buffer.alloc(0), log, { omitMark: false });
+        schedulePlaybackMarkFallback(session, totalPcmBytes, exotelRate, log);
+        logVoiceStage(log, "tts.sent_to_exotel", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          pcm_bytes: totalPcmBytes,
+          exotel_sample_rate: exotelRate,
+          tts_provider: "cartesia",
+        });
+        return true;
+      } catch (err) {
+        log?.error({ err }, "voicebot Cartesia TTS failed");
+        voiceTrace(log, "pipeline.tts.error", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          tts_provider: "cartesia",
+          err: String(err),
+        });
+        session.ttsInProgress = false;
+        return false;
+      }
+    }
+
     const tenantCodec =
       cs?.tts_output_codec === "mp3" || cs?.tts_output_codec === "wav"
         ? cs.tts_output_codec
@@ -2089,6 +2272,8 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
   if (session.isClosing) return;
 
+  session.cartesiaTurnEmotion = null;
+
   // --- CAMPAIGN SCRIPT PLAYBACK ---
   // Wait until we have a confirmed transcript (e.g., the customer actually said "Hello")
   // to prevent background noise from triggering the script prematurely.
@@ -2306,7 +2491,13 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
   );
 
   if (!askResult.spokeIncrementally) {
-    await speakToExotel(ws, session, askResult.answer, ttsLanguage, log);
+    await speakToExotel(
+      ws,
+      session,
+      applyCartesiaAnswerText(session, askResult.answer),
+      ttsLanguage,
+      log
+    );
   }
   const tEnd = Date.now();
   const elapsedMs = tEnd - utteranceStartedAt;
@@ -3037,13 +3228,14 @@ async function runVoicebotAskPipeline(
           await applyAgentVoicePersonaToSession(session, {
             avatarId: c.avatarId,
             elevenlabsAvatarId: c.elevenlabsAvatarId,
+            cartesiaAvatarId: c.cartesiaAvatarId,
           });
         }
         return;
       }
       const agentResult = await pool.query(
         `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
-                avatar_id, elevenlabs_avatar_id
+                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
          FROM agents WHERE id = $1`,
         [session.agentId]
       );
@@ -3058,6 +3250,7 @@ async function runVoicebotAskPipeline(
           ttsSampleRate: row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null,
           avatarId: row.avatar_id as string | null,
           elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
+          cartesiaAvatarId: row.cartesia_avatar_id as string | null,
         };
         session.ttsPace = session.voiceRagAgentCache.ttsPace;
         session.ttsModel = session.voiceRagAgentCache.ttsModel;
@@ -3066,6 +3259,7 @@ async function runVoicebotAskPipeline(
         await applyAgentVoicePersonaToSession(session, {
           avatarId: row.avatar_id as string | null,
           elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
+          cartesiaAvatarId: row.cartesia_avatar_id as string | null,
         });
       } else {
         session.voiceRagAgentCache = null;
@@ -3252,6 +3446,13 @@ async function runVoicebotAskPipeline(
       session.ttsModel ?? csRag?.tts_model ?? null,
       { customerTtsModelRaw: csRag?.tts_model ?? null }
     );
+    const cartesiaHint =
+      csRag?.tts_provider === "cartesia"
+        ? buildCartesiaRagPromptHint({
+            emotionMode: csRag.cartesia_emotion_mode,
+            allowedEmotions: csRag.cartesia_allowed_emotions,
+          })
+        : "";
 
     let industryContextPrompt = "";
     if (session.industryContext && Object.keys(session.industryContext).length > 0) {
@@ -3290,12 +3491,12 @@ async function runVoicebotAskPipeline(
 - If exact fact is missing but the query is related to this business/domain (e.g., travel distance, nearby cities, landmarks), answer with grounded general knowledge, estimation, or simple calculation.
 - For inferred/estimated values, clearly mention they are approximate.
 - Never invent tenant-specific operational details (pricing, policy, inventory) not present in KB. General travel distances/times are permitted if location is known.
-- ${strictnessHint}${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`
+- ${strictnessHint}${languageRule}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`
       : `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}${industryContextPrompt}${strictConstraint}`;
+- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`;
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {
@@ -3354,10 +3555,11 @@ async function runVoicebotAskPipeline(
       await ttsq.flushRest();
       const rawAnswer =
         llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
-      const answer = allowRelatedGeneralAnswersVoice(session) &&
+      const scopedAnswer = allowRelatedGeneralAnswersVoice(session) &&
         rawAnswer.toLowerCase().includes("out_of_scope")
         ? outOfScopeMessageVoice(session)
         : rawAnswer;
+      const answer = applyCartesiaAnswerText(session, scopedAnswer);
 
       logVoiceStage(log, "rag.llm.done", {
         customerId: session.customerId,
@@ -3395,10 +3597,11 @@ async function runVoicebotAskPipeline(
     );
     const rawAnswer =
       llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
-    const answer = allowRelatedGeneralAnswersVoice(session) &&
+    const scopedAnswer = allowRelatedGeneralAnswersVoice(session) &&
       rawAnswer.toLowerCase().includes("out_of_scope")
       ? outOfScopeMessageVoice(session)
       : rawAnswer;
+    const answer = applyCartesiaAnswerText(session, scopedAnswer);
 
     logVoiceStage(log, "rag.llm.done", {
       customerId: session.customerId,

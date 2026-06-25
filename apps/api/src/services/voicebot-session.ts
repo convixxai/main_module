@@ -7,6 +7,11 @@
 import type { ExotelMediaFormat } from "../types/exotel-ws";
 import type { CustomerSettings } from "./customer-settings";
 import type { ElevenLabsVoiceSettingsPayload } from "./elevenlabs";
+import type { CartesiaGenerationConfig } from "./cartesia";
+import type { CartesiaTtsSession } from "./cartesia-tts-ws";
+import {
+  closeCartesiaTtsSession,
+} from "./cartesia-tts-ws";
 import { PcmChunkBuffer } from "./pcm-audio";
 
 /** State of a single live voicebot call. */
@@ -45,6 +50,15 @@ export interface VoicebotSession {
   ttsSampleRate?: number | null;
   /** ElevenLabs `voice_settings` when using an elevenlabs avatar / persona. */
   elevenlabsVoiceSettings?: ElevenLabsVoiceSettingsPayload | null;
+  /** Cartesia `generation_config` from cartesia avatar / tenant defaults. */
+  cartesiaGenerationConfig?: CartesiaGenerationConfig | null;
+  cartesiaPronunciationDictId?: string | null;
+  cartesiaLegacySpeed?: "slow" | "normal" | "fast" | null;
+  cartesiaIsPvcVoice?: boolean;
+  /** LLM-chosen emotion for the current assistant turn (runtime, not DB). */
+  cartesiaTurnEmotion?: string | null;
+  /** Persistent Cartesia TTS WebSocket for this call. */
+  cartesiaTts?: CartesiaTtsSession | null;
   /**
    * Last outbound PCM samples from the prior ElevenLabs utterance (mono s16le tail),
    * used to crossfade into the next `speakToExotel` for smoother joins between streaming chunks.
@@ -146,7 +160,7 @@ export interface VoicebotSession {
   /**
    * Cached agent row from first RAG call — avoids repeated PG round-trip per utterance.
    */
-  voiceRagAgentCache?: {
+    voiceRagAgentCache?: {
     systemPrompt: string;
     fallbackInstruction: string | null;
     ttsPace: number | null;
@@ -155,6 +169,7 @@ export interface VoicebotSession {
     ttsSampleRate: number | null;
     avatarId: string | null;
     elevenlabsAvatarId: string | null;
+    cartesiaAvatarId: string | null;
   } | null;
   /**
    * Full tenant row from `getCustomerSettings` at `start` — drives VAD, RAG caps, webhooks, etc.
@@ -262,6 +277,7 @@ export function removeSession(streamSid: string): void {
       session.outboundBuffer.reset();
       session.inboundPcm = [];
       session.elevenlabsOutboundTailPcm = undefined;
+    closeCartesiaTtsSession(session);
     if (session.playbackFallbackTimer) {
       clearTimeout(session.playbackFallbackTimer);
       session.playbackFallbackTimer = null;

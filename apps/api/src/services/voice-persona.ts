@@ -6,6 +6,10 @@ import {
   type ElevenLabsVoiceSettingsPayload,
   ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID,
 } from "./elevenlabs";
+import {
+  parseCartesiaGenerationConfig,
+  resolveCartesiaModel,
+} from "./cartesia";
 
 function pickLang(session: VoicebotSession): string {
   return (
@@ -60,6 +64,7 @@ export async function applyAgentVoicePersonaToSession(
   prefetched?: {
     avatarId?: string | null;
     elevenlabsAvatarId?: string | null;
+    cartesiaAvatarId?: string | null;
     customerSettings?: CustomerSettings | null;
   }
 ): Promise<void> {
@@ -69,17 +74,92 @@ export async function applyAgentVoicePersonaToSession(
 
   let avatarId = prefetched?.avatarId;
   let elevenlabsAvatarId = prefetched?.elevenlabsAvatarId;
-  if (avatarId === undefined && elevenlabsAvatarId === undefined) {
+  let cartesiaAvatarId = prefetched?.cartesiaAvatarId;
+  if (
+    avatarId === undefined &&
+    elevenlabsAvatarId === undefined &&
+    cartesiaAvatarId === undefined
+  ) {
     const r = await pool.query(
-      `SELECT avatar_id, elevenlabs_avatar_id FROM agents WHERE id = $1 AND customer_id = $2`,
+      `SELECT avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
+       FROM agents WHERE id = $1 AND customer_id = $2`,
       [session.agentId, session.customerId]
     );
     if (r.rows.length === 0) return;
     avatarId = r.rows[0].avatar_id as string | null;
     elevenlabsAvatarId = r.rows[0].elevenlabs_avatar_id as string | null;
+    cartesiaAvatarId = r.rows[0].cartesia_avatar_id as string | null;
   }
 
   const lang = pickLang(session);
+
+  if (ttsProvider === "cartesia") {
+    session.elevenlabsVoiceSettings = null;
+    if (cartesiaAvatarId) {
+      const ar = await pool.query(
+        `SELECT voice_id, model_id, generation_config, pronunciation_dict_id,
+                legacy_speed, is_pvc_voice, language_voice_map
+         FROM cartesia_avatars
+         WHERE id = $1 AND customer_id = $2 AND is_active = TRUE`,
+        [cartesiaAvatarId, session.customerId]
+      );
+      if (ar.rows.length === 0) return;
+      const row = ar.rows[0];
+      const mapEntry = mergeLanguageMapEntry<{
+        voice_id?: string;
+        model_id?: string | null;
+        generation_config?: unknown;
+      }>(row.language_voice_map, lang);
+
+      const voiceFromMap =
+        typeof mapEntry?.voice_id === "string" ? mapEntry.voice_id.trim() : "";
+      const voiceId = voiceFromMap || String(row.voice_id || "").trim();
+      const modelFromMap =
+        mapEntry?.model_id != null ? String(mapEntry.model_id).trim() : "";
+      const modelFromRow = row.model_id != null ? String(row.model_id).trim() : "";
+      const modelId = resolveCartesiaModel(modelFromMap || modelFromRow || cs?.tts_model);
+
+      if (voiceId) session.ttsSpeaker = voiceId;
+      if (modelId) session.ttsModel = modelId;
+
+      const baseGen = parseCartesiaGenerationConfig(row.generation_config);
+      const mapGen = mapEntry?.generation_config
+        ? parseCartesiaGenerationConfig(mapEntry.generation_config)
+        : null;
+      session.cartesiaGenerationConfig = mapGen
+        ? { ...baseGen, ...mapGen }
+        : baseGen;
+      session.cartesiaPronunciationDictId =
+        row.pronunciation_dict_id != null
+          ? String(row.pronunciation_dict_id).trim() || null
+          : null;
+      const ls = row.legacy_speed != null ? String(row.legacy_speed).trim() : "";
+      session.cartesiaLegacySpeed =
+        ls === "slow" || ls === "normal" || ls === "fast" ? ls : null;
+      session.cartesiaIsPvcVoice = row.is_pvc_voice === true;
+      return;
+    }
+
+    if (!session.ttsSpeaker?.trim() && cs?.tts_default_speaker?.trim()) {
+      session.ttsSpeaker = cs.tts_default_speaker.trim();
+    }
+    if (!session.ttsModel?.trim()) {
+      session.ttsModel = resolveCartesiaModel(cs?.tts_model);
+    }
+    if (!session.cartesiaGenerationConfig) {
+      session.cartesiaGenerationConfig = {
+        speed: 1,
+        volume: 1,
+        emotion: "neutral",
+      };
+    }
+    return;
+  }
+
+  session.cartesiaGenerationConfig = null;
+  session.cartesiaPronunciationDictId = null;
+  session.cartesiaLegacySpeed = null;
+  session.cartesiaIsPvcVoice = false;
 
   if (ttsProvider === "elevenlabs" && elevenlabsAvatarId) {
     const ar = await pool.query(

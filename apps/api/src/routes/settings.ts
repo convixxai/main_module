@@ -29,7 +29,7 @@ const settingsPatchSchema = z
     stt_streaming_enabled: z.boolean(),
 
     // C. TTS
-    tts_provider: z.enum(["sarvam", "elevenlabs"]),
+    tts_provider: z.enum(["sarvam", "elevenlabs", "cartesia"]),
     tts_model: z.string().min(1),
     tts_default_speaker: z.string().nullable(),
     tts_default_pace: z.number().min(0.5).max(2.0).nullable(),
@@ -38,6 +38,13 @@ const settingsPatchSchema = z
     tts_default_sample_rate: z.number().int().positive(),
     tts_output_codec: z.enum(["wav", "mp3"]),
     tts_streaming_enabled: z.boolean(),
+    tts_humanizer_enabled: z.boolean(),
+    tts_humanizer_system_prompt: z.string().nullable(),
+    tts_humanizer_style: z.record(z.string(), z.unknown()).optional(),
+    tts_humanizer_max_tokens: z.number().int().positive(),
+    cartesia_max_buffer_delay_ms: z.number().int().min(0).max(10000),
+    cartesia_emotion_mode: z.enum(["static", "llm_per_turn", "llm_per_sentence"]),
+    cartesia_allowed_emotions: z.array(z.string().min(1)),
 
     // D. RAG / LLM
     rag_use_openai_only: z.boolean(),
