@@ -44,6 +44,9 @@ export const env = {
   openai: {
     apiKey: process.env.OPENAI_API_KEY!,
     model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    /** Fast model for voice utterance language classification (Cartesia STT path). */
+    languageDetectModel:
+      (process.env.OPENAI_LANGUAGE_DETECT_MODEL || "gpt-4o-mini").trim(),
     /**
      * Used only for RAG chat completions (`chatOpenAI` in ask pipeline).
      * Slightly above 0 helps with transliteration/typo alignment (e.g. Chhavani vs Chavni).
@@ -187,6 +190,12 @@ export const env = {
      * query param for open detect. Default false — pass language hint from session.
      */
     cartesiaSttFullAuto: process.env.VOICEBOT_CARTESIA_STT_FULL_AUTO === "true",
+    /**
+     * Cartesia STT + multilingual: run a small OpenAI JSON classifier on the transcript to infer
+     * BCP-47 language (not spoken on TTS). Default on; set `VOICEBOT_CARTESIA_OPENAI_LANGUAGE_DETECT=false` to disable.
+     */
+    cartesiaOpenAiLanguageDetect:
+      process.env.VOICEBOT_CARTESIA_OPENAI_LANGUAGE_DETECT !== "false",
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */

@@ -56,6 +56,22 @@ export function inferLanguageFromTranscript(
   return null;
 }
 
+/**
+ * STT noise: punctuation-only or no speakable letters (e.g. Cartesia returning "." on silence).
+ * Treat like empty transcript — do not run RAG/LLM.
+ */
+export function isEffectivelyEmptySttTranscript(raw: string): boolean {
+  const t = raw.trim();
+  if (!t) return true;
+  const withoutPunct = t.replace(/[\s.,!?…:;'"`\-–—()[\]{}]/gu, "");
+  if (!withoutPunct) return true;
+  let letters = 0;
+  for (const ch of withoutPunct) {
+    if (/\p{L}|\p{N}/u.test(ch)) letters++;
+  }
+  return letters === 0;
+}
+
 /** Short greetings / openers that should not trigger full KB + LLM. */
 export function isConversationalOpener(raw: string): boolean {
   const t = raw

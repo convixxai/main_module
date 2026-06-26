@@ -357,9 +357,6 @@ export async function prepareQuestionForKbEmbedding(
   }
 }
 
-/** Same as `DEFAULT_ELEVENLABS_TTS_VOICE_ID` in config — default ElevenLabs voice when `tts_provider` is elevenlabs. */
-export { DEFAULT_ELEVENLABS_TTS_VOICE_ID } from "../config/env";
-
 /** Corrects a transcript using GPT-4o with multimodal audio input (safety net). */
 export async function correctUtteranceWithOpenAI(
   audioBuffer: Buffer,
@@ -403,6 +400,70 @@ export async function correctUtteranceWithOpenAI(
     const outputText = res.choices[0]?.message?.content?.trim();
     return outputText || null;
   } catch (err) {
+    return null;
+  }
+}
+
+export type OpenAiVoiceLanguageDetectResult = {
+  language_code: string;
+  confidence: number;
+};
+
+/**
+ * Classify utterance language from Cartesia (or other) STT text. Returns JSON only — never sent to TTS.
+ * Used when STT metadata lacks reliable language_probability (Cartesia ink-whisper).
+ */
+export async function detectVoiceUtteranceLanguageOpenAI(params: {
+  transcript: string;
+  allowedLanguages: readonly string[];
+  activeLanguageBcp47: string;
+}): Promise<OpenAiVoiceLanguageDetectResult | null> {
+  const text = params.transcript.trim();
+  const allowed = params.allowedLanguages.map((x) => x.trim()).filter(Boolean);
+  if (!text || allowed.length === 0) return null;
+
+  try {
+    const res = await openaiClient.chat.completions.create({
+      model: env.openai.languageDetectModel,
+      temperature: 0,
+      max_tokens: 64,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You classify which language a phone caller used. Return ONLY JSON:
+{"language_code":"<BCP-47>","confidence":<0.0-1.0>}
+
+Allowed language_code values (pick exactly one): ${allowed.join(", ")}
+Active language before this turn: ${params.activeLanguageBcp47}
+
+Rules:
+- Judge the language the user intended to speak, not transcript quality.
+- Devanagari text: distinguish Hindi (hi-IN) vs Marathi (mr-IN) from grammar/vocabulary.
+- Roman/Latin letters may be garbled English from Hindi/Marathi STT — use context and word patterns.
+- confidence = certainty about language choice (not STT accuracy).`,
+        },
+        {
+          role: "user",
+          content: text.slice(0, 500),
+        },
+      ],
+    });
+
+    const raw = res.choices[0]?.message?.content?.trim() || "";
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      language_code?: string;
+      confidence?: number;
+    };
+    const language_code = parsed.language_code?.trim();
+    if (!language_code) return null;
+    const confidence =
+      typeof parsed.confidence === "number" && Number.isFinite(parsed.confidence)
+        ? Math.min(1, Math.max(0, parsed.confidence))
+        : 0.5;
+    return { language_code, confidence };
+  } catch {
     return null;
   }
 }

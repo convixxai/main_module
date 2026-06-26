@@ -116,6 +116,7 @@ import {
   conversationalOpenerReply,
   inferLanguageFromTranscript,
   isConversationalOpener,
+  isEffectivelyEmptySttTranscript,
 } from "../services/voice-language-infer";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
@@ -127,7 +128,10 @@ import {
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { createRagTrace } from "../services/rag-trace";
 import { relaxAgentPrompt } from "../services/rag-prompt-utils";
-import { correctUtteranceWithOpenAI } from "../services/llm";
+import {
+  correctUtteranceWithOpenAI,
+  detectVoiceUtteranceLanguageOpenAI,
+} from "../services/llm";
 import {
   fireTenantWebhook,
   postSlackIncomingWebhook,
@@ -430,19 +434,110 @@ async function ensureCartesiaSttStreamingSession(
   const cs = tenantCs(session);
   if (cs?.stt_provider !== "cartesia" || !session.sttStreamingForVoice) return;
   if (!cartesiaConfigured()) return;
+  const allowed = session.allowedLanguageCodes ?? [];
+  const multilingual = allowed.length !== 1;
+  /** ink-whisper needs per-utterance language on connect; batch STT is used for multilingual. */
+  if (multilingual) return;
   try {
     const stt = getOrCreateCartesiaSttSession(session, log);
+    const language = bcp47ToCartesiaSttLanguage(
+      normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
+    );
     await stt.connect({
       sampleRate: session.mediaFormat.sample_rate,
+      language,
     });
     voiceTrace(log, "pipeline.stt.cartesia_stream_connected", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
       sample_rate: session.mediaFormat.sample_rate,
+      language,
     });
   } catch (err) {
     log?.warn({ err }, "voicebot: Cartesia STT streaming connect failed");
   }
+}
+
+/** Cartesia ink-whisper language param — explicit hi/mr/en unless full-auto env is on. */
+function resolveCartesiaSttLanguageParam(
+  multilingual: boolean,
+  opts: {
+    sttLanguageHint: string;
+    defaultLanguageCode: string;
+    cartesiaSttFullAuto: boolean;
+  }
+): string | undefined {
+  if (!multilingual) {
+    return bcp47ToCartesiaSttLanguage(
+      normalizeBcp47Tag(opts.defaultLanguageCode || "en-IN")
+    );
+  }
+  if (opts.cartesiaSttFullAuto) return undefined;
+  return bcp47ToCartesiaSttLanguage(
+    opts.sttLanguageHint || opts.defaultLanguageCode || "en-IN"
+  );
+}
+
+/** hi / mr retry order when open-detect or English bias returns noise on Indic speech. */
+function cartesiaIndicRetryLanguages(
+  allowedNorm: readonly string[],
+  skip?: string
+): string[] {
+  const out: string[] = [];
+  for (const tag of allowedNorm) {
+    const base = tag.split("-")[0]?.toLowerCase();
+    if (base !== "hi" && base !== "mr") continue;
+    const code = bcp47ToCartesiaSttLanguage(tag);
+    if (code === skip || out.includes(code)) continue;
+    out.push(code);
+  }
+  return out;
+}
+
+async function cartesiaSttWithIndicLanguageFallback(
+  session: VoicebotSession,
+  opts: {
+    pcmBuffer: Buffer;
+    sampleRate: number;
+    language: string | undefined;
+    languageHintBcp47: string;
+    multilingual: boolean;
+    allowedNorm: readonly string[];
+    log?: FastifyRequest["log"];
+  }
+): Promise<{ status: number; body: unknown }> {
+  const tryLanguages: (string | undefined)[] = [opts.language];
+  if (opts.multilingual) {
+    for (const lang of cartesiaIndicRetryLanguages(opts.allowedNorm, opts.language)) {
+      tryLanguages.push(lang);
+    }
+  }
+
+  let lastStt: { status: number; body: unknown } = { status: 499, body: {} };
+  for (const lang of tryLanguages) {
+    lastStt = await cartesiaSpeechToTextWebsocket({
+      pcmBuffer: opts.pcmBuffer,
+      sampleRate: opts.sampleRate,
+      language: lang,
+      languageHintBcp47: opts.languageHintBcp47,
+      shouldAbort: () => session.isClosing,
+    });
+    if (session.isClosing || lastStt.status !== 200) return lastStt;
+    const body = lastStt.body as { transcript?: string };
+    const text = body.transcript ?? "";
+    if (!isEffectivelyEmptySttTranscript(text)) {
+      if (lang !== opts.language) {
+        voiceTrace(opts.log, "pipeline.stt.cartesia_indic_language_retry", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          language_tried: lang ?? "auto",
+          transcript_preview: text.slice(0, 120),
+        });
+      }
+      return lastStt;
+    }
+  }
+  return lastStt;
 }
 
 /** Stream inbound PCM to Cartesia when persistent STT WS is active (Phase 2). */
@@ -453,6 +548,8 @@ function forwardPcmToCartesiaSttStream(
 ): void {
   const cs = tenantCs(session);
   if (cs?.stt_provider !== "cartesia" || !session.sttStreamingForVoice) return;
+  const allowed = session.allowedLanguageCodes ?? [];
+  if (allowed.length !== 1) return;
   const stt = session.cartesiaStt;
   if (!stt?.isOpen || !pcm.length) return;
   try {
@@ -2915,7 +3012,13 @@ async function processUtterance(
             session.defaultLanguageCode ||
             "en-IN"
           )
-        : session.defaultLanguageCode?.trim() || "en-IN";
+        : sttProvider === "cartesia"
+          ? normalizeBcp47Tag(
+            session.currentLanguageCode ||
+            session.defaultLanguageCode ||
+            "en-IN"
+          )
+          : session.defaultLanguageCode?.trim() || "en-IN";
 
     sttLanguageHint = clampLanguageToAllowed(
       sttLanguageHint,
@@ -2941,6 +3044,15 @@ async function processUtterance(
       !env.voicebot.cartesiaSttFullAuto &&
       priorUserQueryCount < 2;
 
+    const cartesiaLang =
+      sttProvider === "cartesia"
+        ? resolveCartesiaSttLanguageParam(multilingual, {
+            sttLanguageHint,
+            defaultLanguageCode: session.defaultLanguageCode || "en-IN",
+            cartesiaSttFullAuto: env.voicebot.cartesiaSttFullAuto,
+          })
+        : undefined;
+
     if (sttProvider === "cartesia") {
       voiceTrace(log, "pipeline.stt.cartesia_language_hint", {
         customerId: session.customerId,
@@ -2949,10 +3061,7 @@ async function processUtterance(
         default_language_code: session.defaultLanguageCode ?? null,
         prior_user_query_count: priorUserQueryCount,
         cartesia_open_detect_multilingual: cartesiaMultilingualOpenDetect,
-        language_code_sent:
-          !multilingual || env.voicebot.cartesiaSttFullAuto || cartesiaMultilingualOpenDetect
-            ? "auto"
-            : bcp47ToCartesiaSttLanguage(sttLanguageHint),
+        language_code_sent: cartesiaLang ?? "auto",
       });
     }
 
@@ -3024,19 +3133,10 @@ async function processUtterance(
         await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
         return;
       }
-      let cartesiaLang: string | undefined;
-      if (!multilingual) {
-        cartesiaLang = bcp47ToCartesiaSttLanguage(
-          normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
-        );
-      } else if (env.voicebot.cartesiaSttFullAuto || cartesiaMultilingualOpenDetect) {
-        cartesiaLang = undefined;
-      } else {
-        cartesiaLang = bcp47ToCartesiaSttLanguage(sttLanguageHint);
-      }
       const useCartesiaStream =
         session.sttStreamingForVoice === true &&
-        session.cartesiaStt?.isOpen === true;
+        session.cartesiaStt?.isOpen === true &&
+        !multilingual;
       try {
         if (useCartesiaStream) {
           const streamed = session.cartesiaSttStreamedThisUtterance === true;
@@ -3048,7 +3148,8 @@ async function processUtterance(
           session.cartesiaSttStreamedThisUtterance = false;
           const streamBody = stt.body as { transcript?: string; error?: string };
           const streamEmpty =
-            stt.status === 200 && !(streamBody.transcript ?? "").trim();
+            stt.status === 200 &&
+            isEffectivelyEmptySttTranscript(streamBody.transcript ?? "");
           if (
             (stt.status !== 200 && !session.isClosing && stt.status !== 499) ||
             streamEmpty
@@ -3061,24 +3162,28 @@ async function processUtterance(
               body: safeJsonForLog(stt.body),
             });
             closeCartesiaSttSession(session);
-            stt = await cartesiaSpeechToTextWebsocket({
+            stt = await cartesiaSttWithIndicLanguageFallback(session, {
               pcmBuffer: combinedPcm,
               sampleRate: session.mediaFormat.sample_rate,
               language: cartesiaLang,
               languageHintBcp47: sttLanguageHint,
-              shouldAbort: () => session.isClosing,
+              multilingual,
+              allowedNorm,
+              log,
             });
             if (!session.isClosing && session.sttStreamingForVoice) {
               void ensureCartesiaSttStreamingSession(session, log);
             }
           }
         } else {
-          stt = await cartesiaSpeechToTextWebsocket({
+          stt = await cartesiaSttWithIndicLanguageFallback(session, {
             pcmBuffer: combinedPcm,
             sampleRate: session.mediaFormat.sample_rate,
             language: cartesiaLang,
             languageHintBcp47: sttLanguageHint,
-            shouldAbort: () => session.isClosing,
+            multilingual,
+            allowedNorm,
+            log,
           });
         }
       } catch (err) {
@@ -3329,13 +3434,14 @@ async function processUtterance(
       return;
     }
 
-    if (!transcript) {
+    if (!transcript || isEffectivelyEmptySttTranscript(transcript)) {
       log?.warn(
         {
           stream_sid: session.streamSid,
           stt_body: safeJsonForLog(stt.body),
+          transcript_preview: transcript?.slice(0, 40) ?? "",
         },
-        "voicebot STT empty transcript — check audio encoding/sample rate vs Exotel media_format"
+        "voicebot STT empty or noise transcript — check audio encoding/sample rate vs Exotel media_format"
       );
       voiceTrace(log, "pipeline.stt.empty_transcript", {
         customerId: session.customerId,
@@ -3343,6 +3449,46 @@ async function processUtterance(
         raw: safeJsonForLog(stt.body),
       });
       return;
+    }
+
+    let openAiLanguageOverride: string | null = null;
+    if (
+      multilingual &&
+      sttProvider === "cartesia" &&
+      env.voicebot.cartesiaOpenAiLanguageDetect &&
+      !scriptLang
+    ) {
+      const activeForDetect = normalizeBcp47Tag(
+        session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+      );
+      const openAiLang = await detectVoiceUtteranceLanguageOpenAI({
+        transcript,
+        allowedLanguages: allowedNorm,
+        activeLanguageBcp47: activeForDetect,
+      });
+      if (openAiLang) {
+        const clampedOpenAi = clampLanguageToAllowed(
+          openAiLang.language_code,
+          allowedNorm,
+          session.defaultLanguageCode || "en-IN"
+        );
+        voiceTrace(log, "pipeline.stt.openai_language_detect", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          openai_language_code: openAiLang.language_code,
+          clamped_language_code: clampedOpenAi,
+          confidence: openAiLang.confidence,
+          stt_detected_before: detectedRaw,
+          transcript_preview: transcript.slice(0, 120),
+        });
+        if (isLanguageInAllowedList(clampedOpenAi, allowedNorm)) {
+          openAiLanguageOverride = clampedOpenAi;
+          detectedRaw = clampedOpenAi;
+          if (openAiLang.confidence > 0.8) {
+            languageProbability = openAiLang.confidence;
+          }
+        }
+      }
     }
 
     if (!multilingual) {
@@ -3419,7 +3565,7 @@ async function processUtterance(
     let effectiveLanguage = multilingual
       ? clampedForPolicy
       : normalizeBcp47Tag("en-IN");
-    if (multilingual && scriptLang) {
+    if (multilingual && (scriptLang || openAiLanguageOverride)) {
       effectiveLanguage = clampedForPolicy;
       session.currentLanguageCode = effectiveLanguage;
     }
