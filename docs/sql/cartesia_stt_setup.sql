@@ -28,18 +28,7 @@ ALTER TABLE customer_settings
 COMMENT ON COLUMN customer_settings.stt_model IS
   'STT model id. Sarvam: saaras:v3, saarika:*. ElevenLabs: scribe_v2. Cartesia: ink-whisper-2025-06-04 only (en, hi, mr).';
 
--- ------------------------------------------------------------
--- QUERY 3 — Enable Cartesia STT for one customer (English-only)
--- ------------------------------------------------------------
 
-UPDATE customer_settings
-SET
-  stt_provider = 'cartesia',
-  stt_model = 'ink-whisper-2025-06-04',
-  stt_streaming_enabled = TRUE,
-  default_language_code = 'en-IN',
-  allowed_language_codes = ARRAY['en-IN']::TEXT[]
-WHERE customer_id = 'YOUR-CUSTOMER-UUID-HERE';
 
 -- ------------------------------------------------------------
 -- QUERY 4 — Enable Cartesia STT (English + Hindi + Marathi)
@@ -53,26 +42,10 @@ SET
   voicebot_multilingual = TRUE,
   allowed_language_codes = ARRAY['en-IN', 'hi-IN', 'mr-IN']::TEXT[],
   default_language_code = 'en-IN'
-WHERE customer_id = 'YOUR-CUSTOMER-UUID-HERE';
+WHERE customer_id = 'ead34d8f-de23-452c-9091-85b2af98ac82';
 
 -- ------------------------------------------------------------
--- QUERY 5 — Cartesia STT + Cartesia TTS on same tenant (common)
--- ------------------------------------------------------------
-
-UPDATE customer_settings
-SET
-  stt_provider = 'cartesia',
-  stt_model = 'ink-whisper-2025-06-04',
-  stt_streaming_enabled = TRUE,
-  tts_provider = 'cartesia',
-  tts_model = 'sonic-3.5',
-  tts_streaming_enabled = TRUE,
-  voicebot_multilingual = TRUE,
-  allowed_language_codes = ARRAY['en-IN', 'hi-IN', 'mr-IN']::TEXT[]
-WHERE customer_id = 'YOUR-CUSTOMER-UUID-HERE';
-
--- ------------------------------------------------------------
--- QUERY 6 — Verify Cartesia STT tenants
+-- QUERY 5 — Verify Cartesia STT tenants
 -- ------------------------------------------------------------
 
 SELECT customer_id, stt_provider, stt_model, stt_streaming_enabled,

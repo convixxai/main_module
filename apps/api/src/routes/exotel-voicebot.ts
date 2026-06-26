@@ -103,6 +103,7 @@ import {
 import {
   cartesiaSpeechToTextWebsocket,
   cartesiaSttFinalizeStreamingSession,
+  closeCartesiaSttSession,
   getOrCreateCartesiaSttSession,
 } from "../services/cartesia-stt-ws";
 import {
@@ -3045,13 +3046,21 @@ async function processUtterance(
             languageHintBcp47: sttLanguageHint,
           });
           session.cartesiaSttStreamedThisUtterance = false;
-          if (stt.status !== 200 && !session.isClosing && stt.status !== 499) {
+          const streamBody = stt.body as { transcript?: string; error?: string };
+          const streamEmpty =
+            stt.status === 200 && !(streamBody.transcript ?? "").trim();
+          if (
+            (stt.status !== 200 && !session.isClosing && stt.status !== 499) ||
+            streamEmpty
+          ) {
             voiceTrace(log, "pipeline.stt.cartesia_stream_fallback", {
               customerId: session.customerId,
               stream_sid: session.streamSid,
               stt_status: stt.status,
+              empty_transcript: streamEmpty,
               body: safeJsonForLog(stt.body),
             });
+            closeCartesiaSttSession(session);
             stt = await cartesiaSpeechToTextWebsocket({
               pcmBuffer: combinedPcm,
               sampleRate: session.mediaFormat.sample_rate,
@@ -3059,6 +3068,9 @@ async function processUtterance(
               languageHintBcp47: sttLanguageHint,
               shouldAbort: () => session.isClosing,
             });
+            if (!session.isClosing && session.sttStreamingForVoice) {
+              void ensureCartesiaSttStreamingSession(session, log);
+            }
           }
         } else {
           stt = await cartesiaSpeechToTextWebsocket({

@@ -309,11 +309,13 @@ export class CartesiaSttSession {
     }
   }
 
-  private scheduleFinalizeSettle(): void {
+  private scheduleFinalizeSettle(ms = 600): void {
     if (this.finalizeSettleTimer) clearTimeout(this.finalizeSettleTimer);
     this.finalizeSettleTimer = setTimeout(() => {
-      this.resolveFinalize(this.finalizeParts.join(""));
-    }, 350);
+      if (this.finalizePromise) {
+        this.resolveFinalize(this.finalizeParts.join(""));
+      }
+    }, ms);
   }
 
   private resolveFinalize(transcript: string): void {
@@ -357,13 +359,27 @@ export class CartesiaSttSession {
       if (msg.is_final === true && typeof msg.text === "string") {
         this.finalizeParts.push(msg.text);
         if (this.finalizePromise) {
-          this.scheduleFinalizeSettle();
+          this.scheduleFinalizeSettle(400);
         }
+      } else if (this.finalizePromise && typeof msg.text === "string" && msg.text.length > 0) {
+        // Some responses may omit is_final — keep last partial as fallback
+        this.log?.warn?.(
+          { text_len: msg.text.length, is_final: msg.is_final },
+          "Cartesia STT: non-final transcript chunk during finalize"
+        );
       }
       return;
     }
 
-    if (msg.type === "flush_done" || msg.type === "done") {
+    if (msg.type === "flush_done") {
+      // flush_done acks finalize; transcript events may still follow — do not resolve empty here
+      if (this.finalizePromise) {
+        this.scheduleFinalizeSettle(this.finalizeParts.length > 0 ? 400 : 1200);
+      }
+      return;
+    }
+
+    if (msg.type === "done") {
       if (this.finalizePromise) {
         this.resolveFinalize(this.finalizeParts.join(""));
       }
