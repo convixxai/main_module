@@ -13,7 +13,7 @@ import { pool } from "../config/db";
 export type EchoCancelLevel = "off" | "soft" | "aggressive";
 export type BargeInMode = "immediate" | "finish_then_answer" | "finish_turn";
 export type TtsProvider = "sarvam" | "elevenlabs" | "cartesia";
-export type SttProvider = "sarvam" | "elevenlabs";
+export type SttProvider = "sarvam" | "elevenlabs" | "cartesia";
 export type TtsCodec = "wav" | "mp3";
 export type CartesiaEmotionMode = "static" | "llm_per_turn" | "llm_per_sentence";
 export type RelatedAnswerStrictness = "strict" | "balanced" | "permissive";

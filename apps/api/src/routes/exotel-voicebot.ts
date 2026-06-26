@@ -90,14 +90,21 @@ import {
 } from "../services/elevenlabs";
 import {
   bcp47ToCartesiaLanguage,
+  bcp47ToCartesiaSttLanguage,
   cartesiaConfigured,
   cartesiaOutputFormatForExotel,
+  cartesiaSttToSarvamShape,
   resolveCartesiaGenerationConfigForUtterance,
   resolveCartesiaModel,
 } from "../services/cartesia";
 import {
   getOrCreateCartesiaTtsSession,
 } from "../services/cartesia-tts-ws";
+import {
+  cartesiaSpeechToTextWebsocket,
+  cartesiaSttFinalizeStreamingSession,
+  getOrCreateCartesiaSttSession,
+} from "../services/cartesia-stt-ws";
 import {
   buildCartesiaRagVoicePrompt,
   prepareCartesiaTtsText,
@@ -412,6 +419,47 @@ async function applyCustomerVoiceSettingsToSession(
   session.industryContext = (cs?.industry_context && typeof cs.industry_context === "object")
     ? cs.industry_context as Record<string, any>
     : {};
+}
+
+/** Connect persistent Cartesia Manual STT WebSocket when tenant uses cartesia + streaming. */
+async function ensureCartesiaSttStreamingSession(
+  session: VoicebotSession,
+  log?: FastifyRequest["log"]
+): Promise<void> {
+  const cs = tenantCs(session);
+  if (cs?.stt_provider !== "cartesia" || !session.sttStreamingForVoice) return;
+  if (!cartesiaConfigured()) return;
+  try {
+    const stt = getOrCreateCartesiaSttSession(session, log);
+    await stt.connect({
+      sampleRate: session.mediaFormat.sample_rate,
+    });
+    voiceTrace(log, "pipeline.stt.cartesia_stream_connected", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      sample_rate: session.mediaFormat.sample_rate,
+    });
+  } catch (err) {
+    log?.warn({ err }, "voicebot: Cartesia STT streaming connect failed");
+  }
+}
+
+/** Stream inbound PCM to Cartesia when persistent STT WS is active (Phase 2). */
+function forwardPcmToCartesiaSttStream(
+  session: VoicebotSession,
+  pcm: Buffer,
+  log?: FastifyRequest["log"]
+): void {
+  const cs = tenantCs(session);
+  if (cs?.stt_provider !== "cartesia" || !session.sttStreamingForVoice) return;
+  const stt = session.cartesiaStt;
+  if (!stt?.isOpen || !pcm.length) return;
+  try {
+    stt.sendPcm(pcm);
+    session.cartesiaSttStreamedThisUtterance = true;
+  } catch (err) {
+    log?.warn({ err }, "voicebot: Cartesia STT stream PCM failed");
+  }
 }
 
 function vadSilenceTimeoutMs(session: VoicebotSession): number {
@@ -2799,11 +2847,15 @@ async function processUtterance(
   const sttProvider = csUtterance?.stt_provider ?? "sarvam";
   const sttModelForPath = (csUtterance?.stt_model ?? "saaras:v3").trim();
   const sttImplLine: "websocket" | "batch" =
-    sttProvider === "sarvam" &&
-      session.sttStreamingForVoice === true &&
-      sarvamSttWebsocketModelSupported(sttModelForPath)
-      ? "websocket"
-      : "batch";
+    sttProvider === "cartesia"
+      ? session.sttStreamingForVoice === true && session.cartesiaStt?.isOpen === true
+        ? "websocket"
+        : "batch"
+      : sttProvider === "sarvam" &&
+          session.sttStreamingForVoice === true &&
+          sarvamSttWebsocketModelSupported(sttModelForPath)
+        ? "websocket"
+        : "batch";
 
   voiceTrace(log, "pipeline.stt.request", {
     customerId: session.customerId,
@@ -2819,11 +2871,18 @@ async function processUtterance(
     customer_query_count_before: session.customerQueryCount ?? 0,
     elevenlabs_stt_full_auto: env.voicebot.elevenlabsSttFullAuto,
     sarvam_stt_full_auto: env.voicebot.sarvamSttFullAuto,
+    cartesia_stt_full_auto: env.voicebot.cartesiaSttFullAuto,
   });
 
   try {
     // === Step 1: STT ===
-    const wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
+    let wavBuffer: Buffer | undefined;
+    const getWavBuffer = (): Buffer => {
+      if (!wavBuffer) {
+        wavBuffer = createWavBuffer(combinedPcm, session.mediaFormat.sample_rate);
+      }
+      return wavBuffer;
+    };
 
     /**
      * Sarvam multilingual: first two **completed** user queries (see `customerQueryCount` before this
@@ -2872,6 +2931,27 @@ async function processUtterance(
         prior_user_query_count: priorUserQueryCount,
         sarvam_open_detect_multilingual: sarvamMultilingualOpenDetect,
         language_code_sent: sttLanguageHint ?? "auto",
+      });
+    }
+
+    const cartesiaMultilingualOpenDetect =
+      multilingual &&
+      sttProvider === "cartesia" &&
+      !env.voicebot.cartesiaSttFullAuto &&
+      priorUserQueryCount < 2;
+
+    if (sttProvider === "cartesia") {
+      voiceTrace(log, "pipeline.stt.cartesia_language_hint", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        current_language_code: session.currentLanguageCode ?? null,
+        default_language_code: session.defaultLanguageCode ?? null,
+        prior_user_query_count: priorUserQueryCount,
+        cartesia_open_detect_multilingual: cartesiaMultilingualOpenDetect,
+        language_code_sent:
+          !multilingual || env.voicebot.cartesiaSttFullAuto || cartesiaMultilingualOpenDetect
+            ? "auto"
+            : bcp47ToCartesiaSttLanguage(sttLanguageHint),
       });
     }
 
@@ -2927,13 +3007,70 @@ async function processUtterance(
       });
       try {
         stt = await elevenLabsSpeechToText({
-          fileBuffer: wavBuffer,
+          fileBuffer: getWavBuffer(),
           filename: "utterance.wav",
           modelId: elModel,
           languageCode: elLang,
         });
       } catch (err) {
         log?.error({ err }, "voicebot ElevenLabs STT failed");
+        await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
+        return;
+      }
+    } else if (sttProvider === "cartesia") {
+      if (!cartesiaConfigured()) {
+        log?.error("voicebot STT: CARTESIA_API_KEY not configured");
+        await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
+        return;
+      }
+      let cartesiaLang: string | undefined;
+      if (!multilingual) {
+        cartesiaLang = bcp47ToCartesiaSttLanguage(
+          normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
+        );
+      } else if (env.voicebot.cartesiaSttFullAuto || cartesiaMultilingualOpenDetect) {
+        cartesiaLang = undefined;
+      } else {
+        cartesiaLang = bcp47ToCartesiaSttLanguage(sttLanguageHint);
+      }
+      const useCartesiaStream =
+        session.sttStreamingForVoice === true &&
+        session.cartesiaStt?.isOpen === true;
+      try {
+        if (useCartesiaStream) {
+          const streamed = session.cartesiaSttStreamedThisUtterance === true;
+          stt = await cartesiaSttFinalizeStreamingSession(session.cartesiaStt!, {
+            pcmFallback: streamed ? undefined : combinedPcm,
+            shouldAbort: () => session.isClosing,
+            languageHintBcp47: sttLanguageHint,
+          });
+          session.cartesiaSttStreamedThisUtterance = false;
+          if (stt.status !== 200 && !session.isClosing && stt.status !== 499) {
+            voiceTrace(log, "pipeline.stt.cartesia_stream_fallback", {
+              customerId: session.customerId,
+              stream_sid: session.streamSid,
+              stt_status: stt.status,
+              body: safeJsonForLog(stt.body),
+            });
+            stt = await cartesiaSpeechToTextWebsocket({
+              pcmBuffer: combinedPcm,
+              sampleRate: session.mediaFormat.sample_rate,
+              language: cartesiaLang,
+              languageHintBcp47: sttLanguageHint,
+              shouldAbort: () => session.isClosing,
+            });
+          }
+        } else {
+          stt = await cartesiaSpeechToTextWebsocket({
+            pcmBuffer: combinedPcm,
+            sampleRate: session.mediaFormat.sample_rate,
+            language: cartesiaLang,
+            languageHintBcp47: sttLanguageHint,
+            shouldAbort: () => session.isClosing,
+          });
+        }
+      } catch (err) {
+        log?.error({ err }, "voicebot Cartesia STT failed");
         await speakToExotel(ws, session, session.errorText || ERROR_AUDIO_TEXT, "en-IN", log);
         return;
       }
@@ -2956,7 +3093,7 @@ async function processUtterance(
             return "unknown";
           })();
           stt = await sarvamSpeechToTextWebsocket({
-            wavBuffer,
+            wavBuffer: getWavBuffer(),
             sampleRate: session.mediaFormat.sample_rate,
             model: sttModel,
             mode: "transcribe",
@@ -2975,7 +3112,7 @@ async function processUtterance(
             });
             if (session.isClosing) return;
             stt = await sarvamSpeechToText({
-              fileBuffer: wavBuffer,
+              fileBuffer: getWavBuffer(),
               filename: "utterance.wav",
               mimeType: "audio/wav",
               model: sttModel,
@@ -2985,7 +3122,7 @@ async function processUtterance(
           }
         } else {
           stt = await sarvamSpeechToText({
-            fileBuffer: wavBuffer,
+            fileBuffer: getWavBuffer(),
             filename: "utterance.wav",
             mimeType: "audio/wav",
             model: sttModel,
@@ -3021,6 +3158,14 @@ async function processUtterance(
     let languageProbability: number | null = null;
     if (sttProvider === "elevenlabs") {
       const shaped = elevenLabsSttToSarvamShape(stt.body);
+      transcript = shaped.transcript;
+      detectedRaw = shaped.language_code;
+    } else if (sttProvider === "cartesia") {
+      const sttBody = stt.body as { transcript?: string; language_code?: string };
+      const shaped = cartesiaSttToSarvamShape(
+        sttBody.transcript ?? "",
+        sttBody.language_code ?? sttLanguageHint
+      );
       transcript = shaped.transcript;
       detectedRaw = shaped.language_code;
     } else {
@@ -3075,7 +3220,7 @@ async function processUtterance(
 
       if (session.consecutiveRepeatCount >= 2 && csUtterance?.rag_use_openai_only === true) {
         const corrected = await correctUtteranceWithOpenAI(
-          wavBuffer,
+          getWavBuffer(),
           transcript,
           session.allowedLanguageCodes || []
         );
@@ -4230,6 +4375,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               // One chat_sessions row for this call; link via exotel_call_sessions.chat_session_id
               try {
                 await applyCustomerVoiceSettingsToSession(session, csStart);
+                await ensureCartesiaSttStreamingSession(session, log);
                 await bootstrapVoicebotChatSession(session, log);
                 await applyAgentVoicePersonaToSession(session, {
                   customerSettings: csStart,
@@ -4450,8 +4596,12 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
 
               if (isSpeech) {
                 // Caller is speaking — buffer this chunk
+                if (session.inboundPcm.length === 0) {
+                  session.cartesiaSttStreamedThisUtterance = false;
+                }
                 session.inboundPcm.push(pcm);
                 session.inboundBytes += pcm.length;
+                forwardPcmToCartesiaSttStream(session, pcm, log);
 
                 // Cancel any silence timer — caller is still talking
                 if (vadTimer) {
@@ -4464,6 +4614,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 // Still buffer it (captures natural pauses within speech).
                 session.inboundPcm.push(pcm);
                 session.inboundBytes += pcm.length;
+                forwardPcmToCartesiaSttStream(session, pcm, log);
 
                 // Start the silence timer if not already running —
                 // if silence continues for tenant VAD timeout, process the utterance.

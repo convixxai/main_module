@@ -182,6 +182,11 @@ export const env = {
      * Set `VOICEBOT_SARVAM_STT_FULL_AUTO=true` to omit the hint / use `unknown` (wider auto-detect).
      */
     sarvamSttFullAuto: process.env.VOICEBOT_SARVAM_STT_FULL_AUTO === "true",
+    /**
+     * Cartesia ink-whisper STT + `voicebot_multilingual`: when `true`, omit `language`
+     * query param for open detect. Default false — pass language hint from session.
+     */
+    cartesiaSttFullAuto: process.env.VOICEBOT_CARTESIA_STT_FULL_AUTO === "true",
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
@@ -208,7 +213,7 @@ export const env = {
     v3StripAudioTags: process.env.ELEVENLABS_V3_STRIP_AUDIO_TAGS === "true",
   },
 
-  /** Cartesia Sonic TTS. https://docs.cartesia.ai */
+  /** Cartesia Sonic TTS + Ink Whisper STT. https://docs.cartesia.ai */
   cartesia: {
     apiKey: (process.env.CARTESIA_API_KEY || "").trim(),
     /**
@@ -217,6 +222,17 @@ export const env = {
      */
     usdPerMillionCredits: parseFloat(
       process.env.CARTESIA_USD_PER_MILLION_CREDITS || "50"
+    ),
+    /** Per-utterance / finalize hard cap for Manual STT WebSocket. */
+    sttWsHardTimeoutMs: Math.max(
+      5000,
+      parseInt(process.env.CARTESIA_STT_WS_HARD_TIMEOUT_MS || "28000", 10) || 28000
+    ),
+    /** ink-whisper `min_volume` query param (0–1). */
+    sttMinVolume: parseFloat(process.env.CARTESIA_STT_MIN_VOLUME || "0.03"),
+    /** ink-whisper `max_silence_duration_secs` query param. */
+    sttMaxSilenceSecs: parseFloat(
+      process.env.CARTESIA_STT_MAX_SILENCE_SECS || "0.5"
     ),
   },
 

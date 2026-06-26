@@ -12,6 +12,8 @@ import type { CartesiaTtsSession } from "./cartesia-tts-ws";
 import {
   closeCartesiaTtsSession,
 } from "./cartesia-tts-ws";
+import type { CartesiaSttSession } from "./cartesia-stt-ws";
+import { closeCartesiaSttSession } from "./cartesia-stt-ws";
 import { PcmChunkBuffer, STREAMING_OUTBOUND_CHUNK_SIZE } from "./pcm-audio";
 
 /** State of a single live voicebot call. */
@@ -61,6 +63,10 @@ export interface VoicebotSession {
   cartesiaReplyStreamPieceCount?: number;
   /** Persistent Cartesia TTS WebSocket for this call. */
   cartesiaTts?: CartesiaTtsSession | null;
+  /** Persistent Cartesia Manual STT WebSocket when `stt_streaming_enabled` + cartesia STT. */
+  cartesiaStt?: CartesiaSttSession | null;
+  /** True once inbound PCM has been forwarded to `cartesiaStt` this utterance. */
+  cartesiaSttStreamedThisUtterance?: boolean;
   /**
    * Last outbound PCM samples from the prior ElevenLabs utterance (mono s16le tail),
    * used to crossfade into the next `speakToExotel` for smoother joins between streaming chunks.
@@ -280,6 +286,7 @@ export function removeSession(streamSid: string): void {
       session.inboundPcm = [];
       session.elevenlabsOutboundTailPcm = undefined;
     closeCartesiaTtsSession(session);
+    closeCartesiaSttSession(session);
     if (session.playbackFallbackTimer) {
       clearTimeout(session.playbackFallbackTimer);
       session.playbackFallbackTimer = null;

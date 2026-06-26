@@ -7,6 +7,7 @@ import {
   updateCustomerSettings,
   invalidateCustomerSettingsCache,
 } from "../services/customer-settings";
+import { CARTESIA_STT_MODEL } from "../services/cartesia";
 
 // ---------- Schemas ----------
 
@@ -24,7 +25,7 @@ const settingsPatchSchema = z
     allowed_language_codes: z.array(bcp47).nonempty(),
 
     // B. STT
-    stt_provider: z.enum(["sarvam", "elevenlabs"]),
+    stt_provider: z.enum(["sarvam", "elevenlabs", "cartesia"]),
     stt_model: z.string().min(1),
     stt_streaming_enabled: z.boolean(),
 
@@ -134,7 +135,19 @@ const settingsPatchSchema = z
     stt_domain_words: z.record(z.string(), z.string()).optional(),
     industry_context: z.record(z.string(), z.any()).optional(),
   })
-  .partial();
+  .partial()
+  .superRefine((data, ctx) => {
+    if (data.stt_provider === "cartesia" && data.stt_model) {
+      const m = data.stt_model.trim();
+      if (m !== CARTESIA_STT_MODEL && !m.startsWith("ink-whisper")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Cartesia STT model must be ${CARTESIA_STT_MODEL}`,
+          path: ["stt_model"],
+        });
+      }
+    }
+  });
 
 const patchRagSchema = z.object({
   rag_use_openai_only: z.boolean(),

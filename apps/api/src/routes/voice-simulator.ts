@@ -18,6 +18,13 @@ import {
   synthesizeSimulatorPcm8k,
 } from "../services/voice-simulator";
 import {
+  bcp47ToCartesiaSttLanguage,
+  cartesiaConfigured,
+  cartesiaSttToSarvamShape,
+} from "../services/cartesia";
+import { cartesiaSpeechToTextWebsocket } from "../services/cartesia-stt-ws";
+import { parseWavPcm16Mono } from "../services/pcm-audio";
+import {
   sarvamSpeechToText,
   type SarvamSttMode,
 } from "../services/sarvam";
@@ -89,6 +96,35 @@ export async function runSimulatorStt(params: {
       return { status: stt.status, transcript: "", language_code: null };
     }
     const shaped = elevenLabsSttToSarvamShape(stt.body);
+    return {
+      status: 200,
+      transcript: shaped.transcript,
+      language_code: shaped.language_code,
+    };
+  }
+
+  if (sttProv === "cartesia") {
+    if (!cartesiaConfigured()) {
+      return { status: 503, transcript: "", language_code: null };
+    }
+    const wavParsed = parseWavPcm16Mono(params.fileBuffer);
+    const pcm = wavParsed?.pcm ?? params.fileBuffer;
+    const sampleRate = wavParsed?.sampleRate ?? 16000;
+    const cartesiaLang = bcp47ToCartesiaSttLanguage(hint);
+    const stt = await cartesiaSpeechToTextWebsocket({
+      pcmBuffer: pcm,
+      sampleRate,
+      language: multilingual ? cartesiaLang : cartesiaLang,
+      languageHintBcp47: hint,
+    });
+    if (stt.status !== 200) {
+      return { status: stt.status, transcript: "", language_code: null };
+    }
+    const body = stt.body as { transcript?: string; language_code?: string };
+    const shaped = cartesiaSttToSarvamShape(
+      body.transcript ?? "",
+      body.language_code ?? hint
+    );
     return {
       status: 200,
       transcript: shaped.transcript,

@@ -24,6 +24,13 @@ import {
   sarvamTextToSpeech,
 } from "../services/sarvam";
 import {
+  bcp47ToCartesiaSttLanguage,
+  cartesiaConfigured,
+  cartesiaSttToSarvamShape,
+} from "../services/cartesia";
+import { cartesiaSpeechToTextWebsocket } from "../services/cartesia-stt-ws";
+import { parseWavPcm16Mono } from "../services/pcm-audio";
+import {
   elevenLabsSpeechToText,
   elevenLabsSttToSarvamShape,
   elevenLabsTextToSpeech,
@@ -1267,6 +1274,7 @@ export async function askRoutes(app: FastifyInstance) {
         const ttsProv = cust?.tts_provider ?? "sarvam";
         const needSarvam = sttProv === "sarvam" || ttsProv === "sarvam";
         const needEleven = sttProv === "elevenlabs" || ttsProv === "elevenlabs";
+        const needCartesia = sttProv === "cartesia" || ttsProv === "cartesia";
         if (needSarvam && !env.sarvam.apiKey.trim()) {
           return reply.status(503).send({
             error:
@@ -1277,6 +1285,12 @@ export async function askRoutes(app: FastifyInstance) {
           return reply.status(503).send({
             error:
               "ElevenLabs is not configured (ELEVENLABS_API_KEY required for this tenant's provider settings).",
+          });
+        }
+        if (needCartesia && !cartesiaConfigured()) {
+          return reply.status(503).send({
+            error:
+              "Cartesia is not configured (CARTESIA_API_KEY required for this tenant's provider settings).",
           });
         }
 
@@ -1299,6 +1313,20 @@ export async function askRoutes(app: FastifyInstance) {
               filename,
               modelId: elModel,
               languageCode: elLang,
+            });
+          } else if (sttProv === "cartesia") {
+            const wavParsed = parseWavPcm16Mono(fileBuffer);
+            const pcm = wavParsed?.pcm ?? fileBuffer;
+            const sampleRate = wavParsed?.sampleRate ?? 16000;
+            const hintBcp =
+              fields.language_code?.trim() ||
+              cust?.default_language_code?.trim() ||
+              "en-IN";
+            stt = await cartesiaSpeechToTextWebsocket({
+              pcmBuffer: pcm,
+              sampleRate,
+              language: bcp47ToCartesiaSttLanguage(hintBcp),
+              languageHintBcp47: hintBcp,
             });
           } else {
             stt = await sarvamSpeechToText({
@@ -1343,7 +1371,14 @@ export async function askRoutes(app: FastifyInstance) {
         const sttParsed =
           sttProv === "elevenlabs"
             ? elevenLabsSttToSarvamShape(stt.body)
-            : parseSttBody(stt.body);
+            : sttProv === "cartesia"
+              ? cartesiaSttToSarvamShape(
+                  (stt.body as { transcript?: string })?.transcript ?? "",
+                  fields.language_code?.trim() ||
+                    cust?.default_language_code?.trim() ||
+                    "en-IN"
+                )
+              : parseSttBody(stt.body);
         const transcript = sttParsed.transcript;
         const sttLanguageCode = sttParsed.language_code;
         const question = transcript.trim();

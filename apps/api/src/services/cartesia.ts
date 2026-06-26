@@ -265,6 +265,47 @@ export function cartesiaConfigured(): boolean {
   return Boolean(env.cartesia.apiKey?.trim());
 }
 
+/** Sole Cartesia STT model — en / hi / mr via Manual `/stt/websocket`. */
+export const CARTESIA_STT_MODEL = "ink-whisper-2025-06-04" as const;
+
+export const CARTESIA_STT_MODELS = [
+  {
+    id: CARTESIA_STT_MODEL,
+    label: "Ink Whisper (en / hi / mr + multilingual, manual finalize)",
+  },
+] as const;
+
+export function resolveCartesiaSttModel(_raw?: string | null): string {
+  return CARTESIA_STT_MODEL;
+}
+
+/** BCP-47 → ISO-639-1 for Cartesia STT `language` query param. */
+export function bcp47ToCartesiaSttLanguage(bcp47: string): string {
+  const base = bcp47.trim().split("-")[0]?.toLowerCase();
+  return base && base.length >= 2 ? base : "en";
+}
+
+/** Normalize Cartesia transcript to Sarvam-shaped body for downstream voicebot code. */
+export function cartesiaSttToSarvamShape(
+  transcript: string,
+  languageHintBcp47?: string
+): { transcript: string; language_code: string } {
+  const t = transcript.trim();
+  const hint = languageHintBcp47?.trim();
+  if (!hint) {
+    return { transcript: t, language_code: "en-IN" };
+  }
+  const norm = hint.replace(/_/g, "-");
+  const parts = norm.split("-").filter(Boolean);
+  const lang = parts[0]?.toLowerCase() ?? "en";
+  if (parts.length > 1) {
+    return { transcript: t, language_code: `${lang}-${parts[1]!.toUpperCase()}` };
+  }
+  if (lang === "hi") return { transcript: t, language_code: "hi-IN" };
+  if (lang === "mr") return { transcript: t, language_code: "mr-IN" };
+  return { transcript: t, language_code: "en-IN" };
+}
+
 function cartesiaHeaders(): Record<string, string> {
   const key = env.cartesia.apiKey?.trim();
   if (!key) {
