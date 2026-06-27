@@ -934,9 +934,13 @@ function applyLanguageSwitchPolicy(
   if (languagesLooselyEqual(clampedDetected, active)) {
     return { action: "continue" };
   }
+  // Early window: first 3 customer queries.
+  // Within this window, silent-switch only with high-confidence Sarvam detection.
+  // After this window, any discrepancy triggers a confirmation prompt.
+  const EARLY_SWITCH_QUERY_LIMIT = 3;
   const conf = sttProvider === "sarvam" ? params.languageProbability : null;
   const silentOk =
-    nextQueryIndex <= 2 && conf != null && conf > 0.8;
+    nextQueryIndex <= EARLY_SWITCH_QUERY_LIMIT && conf != null && conf > 0.8;
   if (silentOk) {
     persistSessionActiveLanguage(session, clampedDetected, params.log);
     voiceTrace(params.log, "voicebot.language.silent_switch_early_window", {
@@ -949,7 +953,7 @@ function applyLanguageSwitchPolicy(
     });
     return { action: "continue" };
   }
-  if (nextQueryIndex <= 2) {
+  if (nextQueryIndex <= EARLY_SWITCH_QUERY_LIMIT) {
     voiceTrace(params.log, "voicebot.language.early_no_switch", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -957,6 +961,7 @@ function applyLanguageSwitchPolicy(
       detected_clamped: clampedDetected,
       language_probability: conf,
       query_index: nextQueryIndex,
+      early_switch_query_limit: EARLY_SWITCH_QUERY_LIMIT,
     });
     return { action: "continue" };
   }
@@ -2756,8 +2761,11 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
   const csOpen = tenantCs(session);
   if (isConversationalOpener(transcript)) {
+    // Use the established session language, not the per-turn detection.
+    // A short filler like "हां" is easily mis-detected as a different language;
+    // we should reply in the language the call is already in.
     const langBcp = normalizeBcp47Tag(
-      session.effectiveSttLanguageThisTurn || pipelineBcp
+      session.currentLanguageCode || session.defaultLanguageCode || pipelineBcp
     );
     const useEmotionTags = false;
     const reply = conversationalOpenerReply(langBcp, {
@@ -3320,6 +3328,16 @@ async function processUtterance(
       languageProbability = typeof lp === "number" && Number.isFinite(lp) ? lp : null;
     }
 
+    // Log raw STT output before any correction — useful for diagnosing STT misrecognitions.
+    voiceTrace(log, "pipeline.stt.raw_transcript", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      stt_provider: sttProvider,
+      raw_transcript: transcript.slice(0, 300),
+      detected_language: detectedRaw,
+      language_probability: languageProbability,
+    });
+
     if (session.sttDomainWords && Object.keys(session.sttDomainWords).length > 0) {
       const before = transcript;
       transcript = applySttDomainWordCorrections(transcript, session.sttDomainWords);
@@ -3593,17 +3611,29 @@ async function processUtterance(
       ? clampedForPolicy
       : normalizeBcp47Tag("en-IN");
     if (multilingual) {
-      if (scriptLang || openAiLanguageOverride) {
+      // Persist session language only on reliable signal; never silently switch
+      // on ambiguous short inputs like single-word fillers.
+      const isShortAmbiguous = transcript.trim().length <= 8;
+      if (scriptLang && !isShortAmbiguous) {
+        effectiveLanguage = clampedForPolicy;
+        persistSessionActiveLanguage(session, effectiveLanguage, log);
+      } else if (openAiLanguageOverride && !isShortAmbiguous) {
         effectiveLanguage = clampedForPolicy;
         persistSessionActiveLanguage(session, effectiveLanguage, log);
       } else if (
         sttProvider === "sarvam" &&
         languageProbability != null &&
         languageProbability > 0.8 &&
-        !languagesLooselyEqual(clampedForPolicy, activeBcp)
+        !languagesLooselyEqual(clampedForPolicy, activeBcp) &&
+        !isShortAmbiguous
       ) {
         effectiveLanguage = clampedForPolicy;
         persistSessionActiveLanguage(session, effectiveLanguage, log);
+      } else {
+        // Short or ambiguous: reply in current session language
+        effectiveLanguage = normalizeBcp47Tag(
+          session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+        );
       }
     }
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
@@ -4070,16 +4100,17 @@ async function runVoicebotAskPipeline(
 
     const ragRules = allowRelatedGeneralAnswersVoice(session)
       ? `--- RAG rules ---
-- The KNOWLEDGEBASE below is authoritative for tenant/business facts.
-- Keep answers SHORT and conversational — suitable for voice/phone.
+- The KNOWLEDGEBASE below is the authoritative source for all tenant/business facts.
+- NAMED FACTS OVERRIDE: Any specific name, place, landmark, person, product, price, or policy stated in the KNOWLEDGEBASE overrides your general training knowledge. Do NOT substitute a different name even if you believe it to be more common (e.g. if KB says "Lohagad Fort", never replace it with "Lonavala Fort" or any other fort).
+- Keep answers SHORT and conversational — suitable for a live phone call. One or two complete sentences.
 - Avoid bullet points and complex formatting; speak naturally.
-- If exact fact is missing but the query is related to this business/domain (e.g., travel distance, nearby cities, landmarks), answer with grounded general knowledge, estimation, or simple calculation.
-- For inferred/estimated values, clearly mention they are approximate.
-- Never invent tenant-specific operational details (pricing, policy, inventory) not present in KB. General travel distances/times are permitted if location is known.
+- If an exact fact is missing from the KB but the query is related to this business/domain (e.g., approximate travel time, general area), you may use estimation — but always say it is approximate.
+- Never invent tenant-specific operational details (pricing, availability, policies) not present in KB.
 - ${strictnessHint}${languageRule}${sttEntityBlock}${multilingualGrammarBlock}${entityNamesHint}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`
       : `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
-- Keep answers SHORT and conversational — suitable for voice/phone.
+- NAMED FACTS OVERRIDE: Names, places, and specifics stated in the KNOWLEDGEBASE are authoritative — never replace them with general knowledge.
+- Keep answers SHORT and conversational — suitable for a live phone call. One or two complete sentences.
 - Avoid bullet points and complex formatting; speak naturally.
 - If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${sttEntityBlock}${multilingualGrammarBlock}${entityNamesHint}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`;
 

@@ -33,17 +33,29 @@ function feminineGrammarHint(languageBcp47?: string | null): string {
     return `
 HINDI GRAMMAR (female voice — mandatory):
 - Use feminine verb forms: मैं सुन रही हूँ, मैं बता सकती हूँ, मैं मदद कर सकती हूँ.
-- Never use masculine forms: सकता, रहा हूँ, करूँगा.`;
+- Never use masculine forms: सकता, रहा हूँ, करूँगा.
+- Each reply must be one or two **complete sentences** ending with a full stop or question mark — never a bare noun phrase or truncated fragment.`;
   }
   if (bcp.startsWith("mr")) {
     return `
 MARATHI GRAMMAR (female voice — mandatory):
-- Use feminine forms: मी ऐकते आहे, मी मदत करू शकते.
-- Avoid masculine: शकतो, ऐकतोय (male).`;
+- Use feminine forms: मी ऐकते आहे, मी मदत करू शकते, मला सांगता येईल.
+- Avoid masculine: शकतो, ऐकतोय (male).
+- Each reply must be one or two **complete Marathi sentences** ending with a full stop (.) or question mark (?). A complete sentence has both subject/topic and verb.
+  BAD (fragment): "छावणी लोणावळा येथे आहे, लोहगड किल्ल्याजवळ."
+  GOOD (complete): "छावणी रिसॉर्ट लोहगड किल्ल्याजवळ, लोणावळ्याच्या परिसरात आहे."`;
+  }
+  // For any other non-English language: generic completeness rule
+  if (!bcp.startsWith("en")) {
+    return `
+VOICE GRAMMAR (mandatory for this language):
+- Each reply must be one or two **complete sentences** with a verb and proper ending punctuation.
+- Use natural, idiomatic phrasing a native speaker would say on a phone call — not a literal translation.`;
   }
   return `
 ENGLISH VOICE (female receptionist):
-- Natural, warm, professional female tone — not male or androgynous phrasing.
+- Natural, warm, professional female tone.
+- Each reply: one or two complete sentences ending with . or ?
 - Prefer: "I'm happy to help" / "How can I help you?" — conversational and clear.`;
 }
 

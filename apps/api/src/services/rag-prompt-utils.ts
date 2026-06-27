@@ -1,9 +1,10 @@
 /** Appended to voice/chat RAG when multilingual is enabled. */
 export const RAG_MULTILINGUAL_GRAMMAR_RULE = `
 --- Multilingual writing quality (mandatory for non-English replies) ---
-- When you answer in any allowed non-English language, use **fluent, grammatically correct** phrasing a native speaker would use on a phone call—not a literal word-for-word translation from English.
-- Pay attention to correct verb agreement, gender/number, natural word order, particles/postpositions, and idioms for that language. Prefer one or two short, correct sentences.
-- If KNOWLEDGEBASE passages are in another language, restate the facts clearly in the user's language without broken grammar or awkward calques.`;
+- When you answer in any allowed non-English language, use **fluent, grammatically correct** phrasing a native speaker would say on a phone call — not a word-for-word translation from English.
+- Every reply must be **one or two complete sentences** with a proper verb and ending punctuation (। or . or ?). Never produce a noun phrase or fragment such as "चव्हाणी लोणावळा येथे आहे, लोणावळा किल्ल्याजवळ." — instead say "छावणी रिसॉर्ट लोहगड किल्ल्याजवळ, लोणावळ्याजवळ आहे."
+- Correct verb agreement, gender/number, natural word order, and idiomatic particles for that language. Avoid stiff calques.
+- If KNOWLEDGEBASE passages are in another language, restate the facts clearly and fluently in the user's language.`;
 
 /** Always safe for multilingual voice: do not echo STT entity errors (any tenant/language). */
 export const RAG_STT_ENTITY_INTEGRITY_RULE = `
