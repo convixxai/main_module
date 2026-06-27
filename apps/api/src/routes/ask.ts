@@ -113,7 +113,7 @@ function relatedAnswerStrictnessAsk(cs: CustomerSettings | null): RelatedAnswerS
   return cs?.related_answer_strictness || "balanced";
 }
 
-import { relaxAgentPrompt, prependAdditionalSystemPromptOverride } from "../services/rag-prompt-utils";
+import { relaxAgentPrompt, prependAdditionalSystemPromptOverride, RAG_MULTILINGUAL_GRAMMAR_RULE, RAG_STT_ENTITY_INTEGRITY_RULE } from "../services/rag-prompt-utils";
 
 function trimAskHistoryForRag(
   cs: CustomerSettings | null,
@@ -354,13 +354,6 @@ const RAG_RULES_SUFFIX_RELATED = `--- RAG rules (apply on top of agent instructi
 - If the question is unrelated to the tenant/business domain represented by KB, respond with exactly OUT_OF_SCOPE.
 - Keep answers short unless agent instructions require more detail.`;
 
-/** Appended to RAG system when \`customer_settings.voicebot_multilingual\` is true. */
-const RAG_MULTILINGUAL_GRAMMAR_RULE = `
---- Multilingual writing quality (mandatory for non-English replies) ---
-- When you answer in Hindi, Marathi, or any other non-English language the tenant supports, use **fluent, grammatically correct** phrasing a native speaker would use—not a literal translation from English.
-- Pay attention to correct verb agreement, gender/number, natural word order, particles/postpositions, and idioms for that language. Prefer short correct sentences over long incorrect ones.
-- If KNOWLEDGEBASE passages are in English, restate the facts clearly in the user’s language without broken grammar or awkward calques.`;
-
 function buildRAGMessages(
   systemPrompt: string,
   context: string,
@@ -389,7 +382,9 @@ function buildRAGMessages(
     { customerTtsModelRaw: opts?.customerTtsModelRaw ?? null }
   );
   const grammarBlock =
-    opts?.multilingualGrammarHints === true ? RAG_MULTILINGUAL_GRAMMAR_RULE : "";
+    opts?.multilingualGrammarHints === true
+      ? `${RAG_STT_ENTITY_INTEGRITY_RULE}${RAG_MULTILINGUAL_GRAMMAR_RULE}`
+      : "";
   let rulesSuffix =
     opts?.allowRelatedGeneralAnswers === true
       ? RAG_RULES_SUFFIX_RELATED

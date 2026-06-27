@@ -127,7 +127,12 @@ import {
 } from "../services/voicebot-trace";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { createRagTrace } from "../services/rag-trace";
-import { relaxAgentPrompt } from "../services/rag-prompt-utils";
+import { relaxAgentPrompt, RAG_MULTILINGUAL_GRAMMAR_RULE, RAG_STT_ENTITY_INTEGRITY_RULE } from "../services/rag-prompt-utils";
+import {
+  applySttDomainWordCorrections,
+  buildOfficialEntityNamesRagHint,
+  mergeIndustryBrandSttCorrections,
+} from "../services/voice-brand-entity";
 import {
   correctUtteranceWithOpenAI,
   detectVoiceUtteranceLanguageOpenAI,
@@ -418,9 +423,14 @@ async function applyCustomerVoiceSettingsToSession(
   session.llmTopPVoice =
     ltp != null && Number.isFinite(ltp) ? ltp : null;
 
-  session.sttDomainWords = (cs?.stt_domain_words && typeof cs.stt_domain_words === "object")
-    ? cs.stt_domain_words as Record<string, string>
-    : {};
+  session.sttDomainWords = mergeIndustryBrandSttCorrections(
+    cs?.stt_domain_words && typeof cs.stt_domain_words === "object"
+      ? (cs.stt_domain_words as Record<string, string>)
+      : undefined,
+    cs?.industry_context && typeof cs.industry_context === "object"
+      ? (cs.industry_context as Record<string, unknown>)
+      : undefined
+  );
   session.industryContext = (cs?.industry_context && typeof cs.industry_context === "object")
     ? cs.industry_context as Record<string, any>
     : {};
@@ -3002,16 +3012,21 @@ async function processUtterance(
       session.defaultLanguageCode || "en-IN"
     );
 
-    let sttLanguageHint = !multilingual
+    let sttLanguageHint: string | undefined = !multilingual
       ? normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
       : sttProvider === "sarvam"
-        ? sarvamMultilingualOpenDetect
-          ? normalizeBcp47Tag(session.defaultLanguageCode || "en-IN")
-          : normalizeBcp47Tag(
-            session.currentLanguageCode ||
-            session.defaultLanguageCode ||
-            "en-IN"
-          )
+        ? (() => {
+            const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
+            const current = normalizeBcp47Tag(
+              session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+            );
+            if (sarvamMultilingualOpenDetect) {
+              // First two queries: omit hint so Sarvam auto-detects Hindi/Marathi instead of
+              // forcing default en-IN (which Romanizes Indic speech as English).
+              return !languagesLooselyEqual(current, def) ? current : undefined;
+            }
+            return current;
+          })()
         : sttProvider === "cartesia"
           ? normalizeBcp47Tag(
             session.currentLanguageCode ||
@@ -3020,11 +3035,13 @@ async function processUtterance(
           )
           : session.defaultLanguageCode?.trim() || "en-IN";
 
-    sttLanguageHint = clampLanguageToAllowed(
-      sttLanguageHint,
-      allowedNorm,
-      session.defaultLanguageCode || "en-IN"
-    );
+    if (sttLanguageHint) {
+      sttLanguageHint = clampLanguageToAllowed(
+        sttLanguageHint,
+        allowedNorm,
+        session.defaultLanguageCode || "en-IN"
+      );
+    }
 
     if (sttProvider === "sarvam") {
       voiceTrace(log, "pipeline.stt.sarvam_language_hint", {
@@ -3047,7 +3064,9 @@ async function processUtterance(
     const cartesiaLang =
       sttProvider === "cartesia"
         ? resolveCartesiaSttLanguageParam(multilingual, {
-            sttLanguageHint,
+            sttLanguageHint:
+              sttLanguageHint ??
+              normalizeBcp47Tag(session.defaultLanguageCode || "en-IN"),
             defaultLanguageCode: session.defaultLanguageCode || "en-IN",
             cartesiaSttFullAuto: env.voicebot.cartesiaSttFullAuto,
           })
@@ -3166,7 +3185,9 @@ async function processUtterance(
               pcmBuffer: combinedPcm,
               sampleRate: session.mediaFormat.sample_rate,
               language: cartesiaLang,
-              languageHintBcp47: sttLanguageHint,
+              languageHintBcp47:
+                sttLanguageHint ??
+                normalizeBcp47Tag(session.defaultLanguageCode || "en-IN"),
               multilingual,
               allowedNorm,
               log,
@@ -3180,7 +3201,9 @@ async function processUtterance(
             pcmBuffer: combinedPcm,
             sampleRate: session.mediaFormat.sample_rate,
             language: cartesiaLang,
-            languageHintBcp47: sttLanguageHint,
+            languageHintBcp47:
+              sttLanguageHint ??
+              normalizeBcp47Tag(session.defaultLanguageCode || "en-IN"),
             multilingual,
             allowedNorm,
             log,
@@ -3298,11 +3321,15 @@ async function processUtterance(
     }
 
     if (session.sttDomainWords && Object.keys(session.sttDomainWords).length > 0) {
-      for (const [misrecognised, correctWord] of Object.entries(session.sttDomainWords)) {
-        if (!misrecognised) continue;
-        const escaped = misrecognised.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const re = new RegExp(`\\b${escaped}\\b`, "gi");
-        transcript = transcript.replace(re, correctWord);
+      const before = transcript;
+      transcript = applySttDomainWordCorrections(transcript, session.sttDomainWords);
+      if (transcript !== before) {
+        voiceTrace(log, "pipeline.stt.domain_word_correction", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          before_preview: before.slice(0, 120),
+          after_preview: transcript.slice(0, 120),
+        });
       }
     }
 
@@ -3452,12 +3479,12 @@ async function processUtterance(
     }
 
     let openAiLanguageOverride: string | null = null;
-    if (
+    const useOpenAiLanguageDetect =
       multilingual &&
-      sttProvider === "cartesia" &&
       env.voicebot.cartesiaOpenAiLanguageDetect &&
-      !scriptLang
-    ) {
+      !scriptLang &&
+      (sttProvider === "cartesia" || sttProvider === "sarvam");
+    if (useOpenAiLanguageDetect) {
       const activeForDetect = normalizeBcp47Tag(
         session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
       );
@@ -3565,9 +3592,19 @@ async function processUtterance(
     let effectiveLanguage = multilingual
       ? clampedForPolicy
       : normalizeBcp47Tag("en-IN");
-    if (multilingual && (scriptLang || openAiLanguageOverride)) {
-      effectiveLanguage = clampedForPolicy;
-      session.currentLanguageCode = effectiveLanguage;
+    if (multilingual) {
+      if (scriptLang || openAiLanguageOverride) {
+        effectiveLanguage = clampedForPolicy;
+        persistSessionActiveLanguage(session, effectiveLanguage, log);
+      } else if (
+        sttProvider === "sarvam" &&
+        languageProbability != null &&
+        languageProbability > 0.8 &&
+        !languagesLooselyEqual(clampedForPolicy, activeBcp)
+      ) {
+        effectiveLanguage = clampedForPolicy;
+        persistSessionActiveLanguage(session, effectiveLanguage, log);
+      }
     }
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
     await applyAgentVoicePersonaToSession(session);
@@ -3965,6 +4002,10 @@ async function runVoicebotAskPipeline(
       if (turn) {
         const label = LANG_LABEL[turn] ?? turn;
         languageRule += `\n- This user turn is handled as **${turn}** (${label}) after tenant language policy; prefer that language for your reply when it matches the user's intent and KB.\n`;
+        const primary = turn.split("-")[0]?.toLowerCase() ?? "";
+        if (primary && primary !== "en") {
+          languageRule += `- MANDATORY: The caller used ${label} (${turn}). Reply ONLY in ${label} using the correct script for that language — do NOT reply in English.\n`;
+        }
       }
     } else {
       const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
@@ -3990,6 +4031,7 @@ async function runVoicebotAskPipeline(
     if (session.industryContext && Object.keys(session.industryContext).length > 0) {
       industryContextPrompt = "\n--- INDUSTRY CONTEXT & TONE GUIDELINES ---\n";
       for (const [key, val] of Object.entries(session.industryContext)) {
+        if (key === "stt_corrections" || key === "brand_stt_corrections" || key === "brand_names" || key === "localized_entity_names" || key === "official_entity_names") continue;
         if (typeof val === "string") {
           industryContextPrompt += `- ${key}: ${val}\n`;
         } else {
@@ -3998,6 +4040,17 @@ async function runVoicebotAskPipeline(
       }
       industryContextPrompt += "--- END INDUSTRY CONTEXT ---\n";
     }
+
+    const entityNamesHint = buildOfficialEntityNamesRagHint(
+      session.industryContext as Record<string, unknown> | undefined,
+      kbResult.rows as Array<{ question?: string; answer?: string }>,
+      session.effectiveSttLanguageThisTurn ?? null,
+      session.effectiveSttLanguageThisTurn
+        ? (LANG_LABEL[session.effectiveSttLanguageThisTurn] ?? session.effectiveSttLanguageThisTurn)
+        : null
+    );
+    const multilingualGrammarBlock = multilingual ? RAG_MULTILINGUAL_GRAMMAR_RULE : "";
+    const sttEntityBlock = multilingual ? RAG_STT_ENTITY_INTEGRITY_RULE : "";
 
     const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
     const listHuman = humanizeAllowedList(allowedNorm);
@@ -4023,12 +4076,12 @@ async function runVoicebotAskPipeline(
 - If exact fact is missing but the query is related to this business/domain (e.g., travel distance, nearby cities, landmarks), answer with grounded general knowledge, estimation, or simple calculation.
 - For inferred/estimated values, clearly mention they are approximate.
 - Never invent tenant-specific operational details (pricing, policy, inventory) not present in KB. General travel distances/times are permitted if location is known.
-- ${strictnessHint}${languageRule}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`
+- ${strictnessHint}${languageRule}${sttEntityBlock}${multilingualGrammarBlock}${entityNamesHint}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`
       : `--- RAG rules ---
 - Answer using ONLY information from the KNOWLEDGEBASE below.
 - Keep answers SHORT and conversational — suitable for voice/phone.
 - Avoid bullet points and complex formatting; speak naturally.
-- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`;
+- If no passage answers the question: ${noKbFallbackInstruction}${languageRule}${sttEntityBlock}${multilingualGrammarBlock}${entityNamesHint}${elevenLabsTagHint}${cartesiaHint}${industryContextPrompt}${strictConstraint}`;
 
     const historyMsgs = history.map((h: { role: string; content: string }) => ({
       role: h.role as "user" | "assistant",

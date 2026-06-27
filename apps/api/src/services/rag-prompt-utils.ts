@@ -1,3 +1,17 @@
+/** Appended to voice/chat RAG when multilingual is enabled. */
+export const RAG_MULTILINGUAL_GRAMMAR_RULE = `
+--- Multilingual writing quality (mandatory for non-English replies) ---
+- When you answer in any allowed non-English language, use **fluent, grammatically correct** phrasing a native speaker would use on a phone call—not a literal word-for-word translation from English.
+- Pay attention to correct verb agreement, gender/number, natural word order, particles/postpositions, and idioms for that language. Prefer one or two short, correct sentences.
+- If KNOWLEDGEBASE passages are in another language, restate the facts clearly in the user's language without broken grammar or awkward calques.`;
+
+/** Always safe for multilingual voice: do not echo STT entity errors (any tenant/language). */
+export const RAG_STT_ENTITY_INTEGRITY_RULE = `
+--- Speech-to-text & entity names (mandatory) ---
+- Caller messages are speech-to-text transcripts and may mistranscribe business, product, place, or person names.
+- Do NOT echo likely STT errors in your reply. Prefer authoritative names from KNOWLEDGEBASE and any OFFICIAL ENTITY NAMES block when present.
+- Answer with KB facts in natural, conversational phrasing for the reply language — suitable for live telephony.`;
+
 /**
  * Softens strict "KB ONLY" instructions in the agent's main system prompt
  * when allow_related_general_answers is enabled.

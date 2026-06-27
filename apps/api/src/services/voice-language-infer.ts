@@ -27,7 +27,7 @@ export function inferLanguageFromTranscript(
 
   if (/\p{Script=Devanagari}/u.test(t)) {
     const marathiHints =
-      /(?:आहे|नाही|मी\s|तुम्ही|बोल|मराठी|काय|कशी|ऐकत|सांग)/u;
+      /(?:आहे|नाही|मी\s|मला|तुम्ही|तुमच|बोल|मराठी|काय|कशी|ऐकत|सांग|विचार|होत|पासून|किती|लांब|शकते|शकत)/u;
     const candidate = marathiHints.test(t) ? "mr-IN" : "hi-IN";
     return pick(candidate) ?? pick("hi-IN") ?? pick("mr-IN");
   }
@@ -54,6 +54,33 @@ export function inferLanguageFromTranscript(
   }
 
   return null;
+}
+
+const INDIC_DIGIT_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x0966, 0x096f], // Devanagari
+  [0x09e6, 0x09ef], // Bengali
+  [0x0a66, 0x0a6f], // Gurmukhi
+  [0x0ae6, 0x0aef], // Gujarati
+  [0x0b66, 0x0b6f], // Oriya
+  [0x0c66, 0x0c6f], // Telugu
+  [0x0ce6, 0x0cef], // Kannada
+  [0x0d66, 0x0d6f], // Malayalam
+  [0x0e50, 0x0e59], // Thai
+  [0x0f20, 0x0f29], // Tibetan
+];
+
+/** Indic-script digits → ASCII 0-9 so telephony TTS reads numbers reliably. */
+export function normalizeIndicDigitsForTts(text: string): string {
+  return [...text]
+    .map((ch) => {
+      const cp = ch.codePointAt(0);
+      if (cp == null) return ch;
+      for (const [start, end] of INDIC_DIGIT_RANGES) {
+        if (cp >= start && cp <= end) return String(cp - start);
+      }
+      return ch;
+    })
+    .join("");
 }
 
 /**

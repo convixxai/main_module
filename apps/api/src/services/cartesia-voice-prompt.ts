@@ -1,6 +1,7 @@
 import {
   type CartesiaGenerationConfig,
 } from "./cartesia";
+import { normalizeIndicDigitsForTts } from "./voice-language-infer";
 import {
   buildHumanizerStyleBlock,
   DEFAULT_HUMANIZER_STYLE,
@@ -70,11 +71,12 @@ Rules:
 - Return ONLY speakable words — no labels, quotes, markdown, JSON, emotion tags, or explanation.
 - Do NOT use [emotion] tags or EMOTION: lines — voice tone is always neutral.
 - Keep the same facts and language as the knowledge base allows.
+- Use official business/property names from KNOWLEDGEBASE — never repeat caller speech-to-text errors for brand names.
 - Write **complete flowing sentences** with proper punctuation (. ? !).
 - Use commas only for natural breath within one sentence — do not break one thought into choppy fragments.
 - Prefer one or two full sentences over many tiny pieces.
 - Stay concise; contractions where natural; warm professional phone tone.
-- Write numbers, dates, currency in conventional form (Rs 7,000, 3 PM).
+- Write numbers, dates, currency in conventional form (Rs 7,000, 3 PM) using Western/Arabic digits (0-9) only — never Devanagari numerals.
 - Never: bullet points, URLs, ALL CAPS, stage directions.
 ${feminineHint}
 
@@ -97,8 +99,6 @@ export function prepareCartesiaTtsText(
   raw: string,
   options?: { speakRaw?: boolean }
 ): { text: string; emotion: null } {
-  if (options?.speakRaw) {
-    return { text: raw.trim(), emotion: null };
-  }
-  return { text: stripCartesiaEmotionTags(raw), emotion: null };
+  const stripped = options?.speakRaw ? raw.trim() : stripCartesiaEmotionTags(raw);
+  return { text: normalizeIndicDigitsForTts(stripped), emotion: null };
 }
