@@ -240,6 +240,19 @@ export interface VoicebotSession {
    * Entries expire after 30 seconds. Used to detect when STT captures bot's own speech.
    */
   recentTTSTexts?: Array<{ text: string; timestamp: number }>;
+
+  // --- Cross-Leg Echo Suppression Fields (Phase 2 Fix) ---
+  /**
+   * When set, suppress ALL STT processing until this timestamp (Date.now() epoch ms).
+   * Used after losing the script lock to ignore audio during script playback on other leg.
+   * Set to: Date.now() + estimatedScriptDuration + bufferMs
+   */
+  sttSuppressionUntil?: number;
+  /**
+   * True if this stream is the designated primary stream for the call.
+   * Only the primary stream plays TTS; secondary streams may suppress STT during script.
+   */
+  isPrimaryStream?: boolean;
 }
 
 /**
@@ -299,6 +312,9 @@ export function createSession(params: {
     scriptPlaybackComplete: false,
     campaignScriptMarkName: null,
     recentTTSTexts: [],
+    // Cross-leg echo suppression (Phase 2)
+    sttSuppressionUntil: undefined,
+    isPrimaryStream: undefined,
   };
 
   activeSessions.set(params.streamSid, session);

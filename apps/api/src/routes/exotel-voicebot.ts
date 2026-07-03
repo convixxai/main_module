@@ -145,6 +145,11 @@ import {
   isEchoOfRecentTTS,
   addToRecentTTSBuffer,
   pruneRecentTTSBuffer,
+  addToSharedTTSBuffer,
+  getSharedTTSBuffer,
+  isEchoOfSharedTTS,
+  markScriptPlaybackComplete,
+  estimateTTSDurationMs,
 } from "../utils/echo-detection";
 
 // ============================================================
@@ -1586,6 +1591,19 @@ async function speakToExotel(
       { stream_sid: session.streamSid, text_chars: text.length, buffer_size: session.recentTTSTexts.length },
       "voicebot: added TTS text to echo detection buffer"
     );
+    
+    // Also add to shared DB buffer for cross-leg echo detection
+    if (env.voicebot.outboundCrossLegEchoEnabled && session.callSessionDbId) {
+      addToSharedTTSBuffer(
+        pool,
+        session.callSessionDbId,
+        text,
+        session.streamSid,
+        env.voicebot.outboundTtsBufferMaxAgeSecs
+      ).catch((err) => {
+        log?.warn({ err, stream_sid: session.streamSid }, "Failed to add TTS to shared buffer");
+      });
+    }
   }
   
   try {
@@ -2596,6 +2614,43 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
   if (session.isClosing) return;
 
+  // --- CROSS-LEG ECHO FIX: Time-based STT suppression window ---
+  // If this stream lost the script lock, suppress STT for the calculated duration
+  // to prevent transcribing the other stream's campaign script playback.
+  if (
+    env.voicebot.outboundCrossLegEchoEnabled &&
+    session.mode === "outbound_campaign" &&
+    session.sttSuppressionUntil &&
+    Date.now() < session.sttSuppressionUntil
+  ) {
+    const remainingMs = session.sttSuppressionUntil - Date.now();
+    log?.info(
+      {
+        stream_sid: session.streamSid,
+        transcript_preview: transcript.slice(0, 100),
+        suppression_remaining_ms: remainingMs,
+        is_primary: session.isPrimaryStream,
+      },
+      "voicebot: STT suppressed during script playback window (cross-leg echo prevention)"
+    );
+    voiceTrace(log, "pipeline.echo.time_suppressed", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      transcript_chars: transcript.length,
+      remaining_ms: remainingMs,
+    });
+    return;
+  }
+  
+  // Clear expired suppression window if we got past the check
+  if (session.sttSuppressionUntil && Date.now() >= session.sttSuppressionUntil) {
+    log?.info(
+      { stream_sid: session.streamSid, was_primary: session.isPrimaryStream },
+      "voicebot: STT suppression window expired — resuming normal processing"
+    );
+    session.sttSuppressionUntil = undefined;
+  }
+
   // --- OUTBOUND ECHO SUPPRESSION: Check if this STT result is an echo of our TTS ---
   // For outbound campaign calls, detect when the STT has captured the bot's own speech
   // output and skip processing to prevent feedback loops.
@@ -2656,6 +2711,57 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
     }
   }
 
+  // --- CROSS-LEG ECHO DETECTION: Check shared DB buffer for TTS from other streams ---
+  // After initial script playback, use the shared database buffer to detect echoes
+  // across WebSocket streams. This catches cases where stream A's TTS is transcribed by stream B.
+  if (
+    env.voicebot.outboundCrossLegEchoEnabled &&
+    session.mode === "outbound_campaign" &&
+    session.callSessionDbId &&
+    !session.waitingForFirstSpeech
+  ) {
+    try {
+      const sharedBuffer = await getSharedTTSBuffer(pool, session.callSessionDbId);
+      if (sharedBuffer.length > 0) {
+        const crossLegEchoCheck = isEchoOfSharedTTS(transcript, sharedBuffer, {
+          similarityThreshold: env.voicebot.outboundEchoSimilarityThreshold,
+          maxAgeMs: env.voicebot.outboundTtsBufferMaxAgeSecs * 1000,
+          minTranscriptLength: 5,
+          excludeStreamSid: undefined, // Check ALL streams, including our own
+        });
+
+        if (crossLegEchoCheck.isEcho) {
+          const isCrossLeg = crossLegEchoCheck.matchedStreamSid !== session.streamSid;
+          log?.info(
+            {
+              stream_sid: session.streamSid,
+              transcript_preview: transcript.slice(0, 100),
+              matched_tts: crossLegEchoCheck.matchedText,
+              similarity: crossLegEchoCheck.similarity?.toFixed(2),
+              source_stream: crossLegEchoCheck.matchedStreamSid,
+              is_cross_leg: isCrossLeg,
+            },
+            isCrossLeg
+              ? "voicebot: detected CROSS-LEG echo from shared buffer — suppressing to prevent AI-to-AI loop"
+              : "voicebot: detected echo from shared buffer (same stream)"
+          );
+          voiceTrace(log, "pipeline.echo.cross_leg_detected", {
+            customerId: session.customerId,
+            stream_sid: session.streamSid,
+            transcript_chars: transcript.length,
+            similarity: crossLegEchoCheck.similarity,
+            matched_stream: crossLegEchoCheck.matchedStreamSid,
+            is_cross_leg: isCrossLeg,
+          });
+          return;
+        }
+      }
+    } catch (err) {
+      log?.warn({ err, stream_sid: session.streamSid }, "Failed to check shared TTS buffer for echoes");
+      // Non-fatal: continue processing
+    }
+  }
+
   session.cartesiaReplyStreamContextId = null;
   session.cartesiaReplyStreamPieceCount = 0;
 
@@ -2683,6 +2789,46 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
         if (lockResult.rows.length === 0) {
           // Another stream already claimed the script playback
+          session.isPrimaryStream = false;
+          
+          // --- CROSS-LEG ECHO FIX: Time-based STT suppression for secondary streams ---
+          // This stream lost the lock, meaning another stream is playing the campaign script.
+          // We must suppress STT on this stream during script playback to prevent:
+          // 1. Transcribing the bot's own speech from the other stream
+          // 2. Generating LLM responses to that transcribed speech (AI-to-AI loop)
+          //
+          // Calculate suppression window based on script length estimation.
+          if (env.voicebot.outboundCrossLegEchoEnabled && session.campaignId) {
+            try {
+              const scriptRes = await pool.query(
+                "SELECT script_text FROM outbound_campaigns WHERE id = $1",
+                [session.campaignId]
+              );
+              const scriptText = scriptRes.rows[0]?.script_text || "";
+              const estimatedDurationMs = estimateTTSDurationMs(scriptText);
+              const suppressionMs = Math.round(
+                estimatedDurationMs * env.voicebot.outboundSttSuppressionMultiplier +
+                env.voicebot.outboundSttSuppressionBufferMs
+              );
+              session.sttSuppressionUntil = Date.now() + suppressionMs;
+              
+              log?.info(
+                {
+                  stream_sid: session.streamSid,
+                  campaignId: session.campaignId,
+                  estimated_duration_ms: estimatedDurationMs,
+                  suppression_ms: suppressionMs,
+                  suppression_until: new Date(session.sttSuppressionUntil).toISOString(),
+                },
+                "voicebot: lost script lock — enabling time-based STT suppression (cross-leg echo fix)"
+              );
+            } catch (err) {
+              log?.error({ err, campaignId: session.campaignId }, "Failed to calculate STT suppression window");
+              // Fallback: suppress for 30 seconds
+              session.sttSuppressionUntil = Date.now() + 30000;
+            }
+          }
+          
           log?.info(
             {
               stream_sid: session.streamSid,
@@ -2699,9 +2845,10 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
           return;
         }
 
+        session.isPrimaryStream = true;
         log?.info(
           { stream_sid: session.streamSid, campaignId: session.campaignId },
-          "voicebot: acquired lock to play campaign script (dual-leg coordination)"
+          "voicebot: acquired lock to play campaign script (dual-leg coordination) — marked as primary stream"
         );
       }
 
@@ -2739,6 +2886,19 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
             { campaignId: session.campaignId, buffer_size: session.recentTTSTexts.length },
             "voicebot: added campaign script to echo detection buffer"
           );
+          
+          // Also add to shared DB buffer for cross-leg echo detection
+          if (env.voicebot.outboundCrossLegEchoEnabled && session.callSessionDbId) {
+            addToSharedTTSBuffer(
+              pool,
+              session.callSessionDbId,
+              scriptText,
+              session.streamSid,
+              env.voicebot.outboundTtsBufferMaxAgeSecs
+            ).catch((err) => {
+              log?.warn({ err, campaignId: session.campaignId }, "Failed to add campaign script to shared buffer");
+            });
+          }
         }
         
         await speakToExotel(ws, session, scriptText, langCode, log);
@@ -5232,6 +5392,15 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   ) {
                     session.playingCampaignScript = false;
                     session.scriptPlaybackComplete = true;
+                    
+                    // Mark script playback complete in DB for other streams to know
+                    if (env.voicebot.outboundCrossLegEchoEnabled && session.callSessionDbId) {
+                      const campaignIdForLog = session.campaignId;
+                      markScriptPlaybackComplete(pool, session.callSessionDbId).catch((err) => {
+                        log?.warn({ err, campaign_id: campaignIdForLog }, "Failed to mark script complete in DB");
+                      });
+                    }
+                    
                     log?.info(
                       {
                         stream_sid: session.streamSid,

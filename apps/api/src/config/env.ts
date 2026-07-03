@@ -211,6 +211,38 @@ export const env = {
       1,
       Math.max(0.3, parseFloat(process.env.OUTBOUND_ECHO_SIMILARITY_THRESHOLD || "0.6") || 0.6)
     ),
+    /**
+     * Cross-leg echo detection using shared DB buffer. When `true` (default), TTS texts
+     * are stored in the shared `exotel_call_sessions.metadata` and checked on all streams.
+     * Set `OUTBOUND_CROSS_LEG_ECHO_ENABLED=false` to disable.
+     */
+    outboundCrossLegEchoEnabled:
+      process.env.OUTBOUND_CROSS_LEG_ECHO_ENABLED !== "false",
+    /**
+     * Multiplier for script duration to calculate STT suppression window.
+     * Formula: suppressionMs = scriptDurationMs * multiplier + bufferMs
+     * Default: 1.5 (50% buffer over estimated script duration)
+     */
+    outboundSttSuppressionMultiplier: Math.min(
+      3,
+      Math.max(1, parseFloat(process.env.OUTBOUND_STT_SUPPRESSION_MULTIPLIER || "1.5") || 1.5)
+    ),
+    /**
+     * Extra buffer time (ms) added to STT suppression window after script playback.
+     * Default: 5000ms (5 seconds)
+     */
+    outboundSttSuppressionBufferMs: Math.min(
+      15000,
+      Math.max(1000, parseInt(process.env.OUTBOUND_STT_SUPPRESSION_BUFFER_MS || "5000", 10) || 5000)
+    ),
+    /**
+     * Maximum age (seconds) for entries in the shared TTS buffer.
+     * Older entries are pruned during writes. Default: 60 seconds.
+     */
+    outboundTtsBufferMaxAgeSecs: Math.min(
+      300,
+      Math.max(30, parseInt(process.env.OUTBOUND_TTS_BUFFER_MAX_AGE_SECS || "60", 10) || 60)
+    ),
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */
