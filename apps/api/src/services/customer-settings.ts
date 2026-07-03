@@ -64,6 +64,7 @@ export interface CustomerSettings {
   llm_verification_enabled: boolean;
   llm_verification_threshold: number;
   llm_fallback_to_openai: boolean;
+  llm_language_detection_enabled: boolean;
   openai_model: string;
   no_kb_fallback_instruction: string | null;
   allow_related_general_answers: boolean;
@@ -225,6 +226,7 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   "llm_verification_enabled",
   "llm_verification_threshold",
   "llm_fallback_to_openai",
+  "llm_language_detection_enabled",
   "openai_model",
   "no_kb_fallback_instruction",
   "allow_related_general_answers",

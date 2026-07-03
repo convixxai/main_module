@@ -61,6 +61,7 @@ const settingsPatchSchema = z
     llm_verification_enabled: z.boolean(),
     llm_verification_threshold: z.number().min(0).max(1),
     llm_fallback_to_openai: z.boolean(),
+    llm_language_detection_enabled: z.boolean(),
     openai_model: z.string().min(1),
     no_kb_fallback_instruction: z.string().nullable(),
     allow_related_general_answers: z.boolean(),

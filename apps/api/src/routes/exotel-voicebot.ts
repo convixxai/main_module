@@ -3752,6 +3752,8 @@ async function runVoicebotAskPipeline(
       prepareQuestionForKbEmbedding,
       chatOpenAI,
       streamChatOpenAI,
+      streamChatOpenAIWithLanguageDetection,
+      getLlmLanguageDetectionPrompt,
     } = await import("../services/llm");
 
     let customerPrompt: string;
@@ -4124,10 +4126,20 @@ async function runVoicebotAskPipeline(
       lastHist?.role === "user" &&
       lastHist.content.trim() === questionTrimmed;
 
+    // LLM-integrated language detection: add prompt when multilingual is enabled
+    // This allows the LLM to detect the caller's language from the transcript and respond accordingly
+    const useLlmLanguageDetection = multilingual && (csRag?.llm_language_detection_enabled !== false);
+    const currentLangForLlm = normalizeBcp47Tag(
+      session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+    );
+    const llmLangDetectPrompt = useLlmLanguageDetection
+      ? getLlmLanguageDetectionPrompt(allowedNorm, currentLangForLlm)
+      : "";
+
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       {
         role: "system",
-        content: `${agentPrompt}\n\n${ragRules}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
+        content: `${agentPrompt}\n\n${ragRules}${llmLangDetectPrompt}\n\n--- KNOWLEDGEBASE ---\n${context}\n--- END ---`,
       },
       ...historyMsgs,
       ...(duplicateUserInHistory || !questionTrimmed
@@ -4166,6 +4178,7 @@ async function runVoicebotAskPipeline(
         stream_sid: session.streamSid,
         max_tokens: maxTok,
         tts_streaming_enabled: true,
+        llm_language_detection: useLlmLanguageDetection,
       });
       const ttsq = createStreamingVoiceTts(
         streamCall!.ws,
@@ -4173,13 +4186,45 @@ async function runVoicebotAskPipeline(
         streamCall!.ttsLanguage,
         log
       );
-      const llmResult = await streamChatOpenAI(
-        messages,
-        maxTok,
-        (d) => ttsq.pushDelta(d),
-        ragTrace,
-        voiceRagOpts
-      );
+
+      let llmDetectedLanguage: string | null = null;
+      let llmLanguageConfidence: "high" | "low" = "low";
+
+      // Use LLM-integrated language detection when enabled
+      const llmResult = useLlmLanguageDetection
+        ? await streamChatOpenAIWithLanguageDetection(
+            messages,
+            maxTok,
+            (d) => ttsq.pushDelta(d),
+            (lang, confidence) => {
+              llmDetectedLanguage = lang;
+              llmLanguageConfidence = confidence;
+              // Update session language based on LLM detection
+              if (confidence === "high" && isLanguageInAllowedList(lang, allowedNorm)) {
+                const normalizedLang = normalizeBcp47Tag(lang);
+                voiceTrace(log, "pipeline.llm_language_detected", {
+                  customerId: session.customerId,
+                  stream_sid: session.streamSid,
+                  detected_language: normalizedLang,
+                  confidence,
+                  previous_language: session.currentLanguageCode,
+                });
+                // Update session language for TTS and future turns
+                persistSessionActiveLanguage(session, normalizedLang, log);
+              }
+            },
+            currentLangForLlm,
+            ragTrace,
+            voiceRagOpts
+          )
+        : await streamChatOpenAI(
+            messages,
+            maxTok,
+            (d) => ttsq.pushDelta(d),
+            ragTrace,
+            voiceRagOpts
+          );
+
       await ttsq.flushRest();
       const rawAnswer =
         llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
@@ -4196,6 +4241,8 @@ async function runVoicebotAskPipeline(
         mode: "stream",
         answer_chars: answer.length,
         cost_usd: llmResult.costUsd,
+        llm_detected_language: llmDetectedLanguage,
+        llm_language_confidence: llmLanguageConfidence,
       });
       voiceTrace(log, "pipeline.rag.llm_response", {
         customerId: session.customerId,
@@ -4204,6 +4251,8 @@ async function runVoicebotAskPipeline(
         answer_preview: answer.slice(0, 400),
         cost_usd: llmResult.costUsd,
         mode: "stream",
+        llm_detected_language: llmDetectedLanguage,
+        llm_language_confidence: llmLanguageConfidence,
       });
       await appendVoiceTurnToChat(session, question, answer, {
         assistantSource: "openai",

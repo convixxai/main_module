@@ -413,6 +413,192 @@ export type OpenAiVoiceLanguageDetectResult = {
  * Classify utterance language from Cartesia (or other) STT text. Returns JSON only — never sent to TTS.
  * Used when STT metadata lacks reliable language_probability (Cartesia ink-whisper).
  */
+/**
+ * Language detection prompt addition for LLM-integrated detection.
+ * Instructs the LLM to prefix its response with [LANG:xx-XX] tag.
+ */
+export function getLlmLanguageDetectionPrompt(
+  allowedLanguages: string[],
+  currentLanguage: string
+): string {
+  const allowedList = allowedLanguages.join(", ");
+  return `
+--- LLM LANGUAGE DETECTION (mandatory — do this FIRST) ---
+Before your answer, output a language tag on its own line in this exact format:
+[LANG:xx-XX]
+
+Where xx-XX is the BCP-47 code of the language you will respond in.
+Allowed values: ${allowedList}
+
+Detection rules:
+1. Analyze the user's transcript to determine what language they spoke.
+2. If the transcript uses Devanagari script, distinguish Hindi (hi-IN) vs Marathi (mr-IN) by vocabulary/grammar.
+3. If the transcript is code-mixed (e.g., "Room ka price kya hai?"), detect the dominant language.
+4. If the transcript is very short (<3 words), noise, or unclear (e.g., "uhh", "hmm", "ആ ആ"), use the current session language: ${currentLanguage}
+5. NEVER detect a language not in the allowed list. Default to ${currentLanguage} if uncertain.
+6. Match your response language to the detected language.
+
+After the [LANG:xx-XX] line, write your response normally (NO JSON, just natural speech).
+--- END LLM LANGUAGE DETECTION ---
+`;
+}
+
+/**
+ * Parse the [LANG:xx-XX] prefix from LLM response.
+ * Returns the detected language and the response with the prefix stripped.
+ */
+export function parseLlmLanguagePrefix(
+  response: string,
+  fallbackLanguage: string
+): { detectedLanguage: string; cleanResponse: string; confidence: "high" | "low" } {
+  // Match [LANG:xx-XX] at the start of the response (with optional leading whitespace/newlines)
+  const match = response.match(/^\s*\[LANG:([a-z]{2}-[A-Z]{2})\]\s*/i);
+  
+  if (match) {
+    const detected = match[1];
+    const clean = response.slice(match[0].length).trim();
+    return {
+      detectedLanguage: detected,
+      cleanResponse: clean,
+      confidence: "high",
+    };
+  }
+  
+  // Fallback: no prefix found, use fallback language
+  return {
+    detectedLanguage: fallbackLanguage,
+    cleanResponse: response.trim(),
+    confidence: "low",
+  };
+}
+
+/**
+ * Streaming chat with LLM language detection.
+ * Buffers the first few tokens to extract [LANG:xx-XX] prefix,
+ * then streams the rest to TTS.
+ */
+export async function streamChatOpenAIWithLanguageDetection(
+  messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  maxTokens: number,
+  onTextDelta: (token: string) => void | Promise<void>,
+  onLanguageDetected: (lang: string, confidence: "high" | "low") => void,
+  fallbackLanguage: string,
+  trace?: RagTraceFn,
+  ragOptions?: ChatOpenAIRagOptions
+): Promise<OpenAIUsageResult> {
+  const temperature = ragOptions?.temperature ?? env.openai.ragTemperature;
+  const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
+  const model = (ragOptions?.model?.trim() || env.openai.model).trim();
+
+  trace?.("openai_chat_stream_lang_detect_request", {
+    provider: "openai",
+    model,
+    max_tokens: maxTokens,
+    temperature,
+    top_p: top_p ?? null,
+    language_detection: true,
+    fallback_language: fallbackLanguage,
+  });
+
+  const stream = await openaiClient.chat.completions.create({
+    model,
+    messages,
+    temperature,
+    ...(top_p != null && top_p !== 1 ? { top_p } : {}),
+    max_tokens: maxTokens,
+    stream: true,
+    stream_options: { include_usage: true },
+  });
+
+  let raw = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  let modelUsed = model;
+  
+  // Buffer for language prefix detection
+  let prefixBuffer = "";
+  let prefixExtracted = false;
+  let detectedLanguage = fallbackLanguage;
+  let languageConfidence: "high" | "low" = "low";
+  const PREFIX_BUFFER_LIMIT = 50; // Max chars to buffer for prefix detection
+
+  for await (const part of stream) {
+    if (part.usage) {
+      const u = part.usage;
+      promptTokens = u.prompt_tokens ?? 0;
+      completionTokens = u.completion_tokens ?? 0;
+      totalTokens = u.total_tokens ?? 0;
+    }
+    if (part.model) modelUsed = part.model;
+    const t = part.choices[0]?.delta?.content ?? "";
+    if (t) {
+      raw += t;
+      
+      if (!prefixExtracted) {
+        prefixBuffer += t;
+        
+        // Check if we have enough to extract the prefix
+        const prefixMatch = prefixBuffer.match(/^\s*\[LANG:([a-z]{2}-[A-Z]{2})\]\s*/i);
+        if (prefixMatch) {
+          detectedLanguage = prefixMatch[1];
+          languageConfidence = "high";
+          prefixExtracted = true;
+          onLanguageDetected(detectedLanguage, languageConfidence);
+          
+          // Send any remaining content after the prefix
+          const afterPrefix = prefixBuffer.slice(prefixMatch[0].length);
+          if (afterPrefix) {
+            await onTextDelta(afterPrefix);
+          }
+        } else if (prefixBuffer.length >= PREFIX_BUFFER_LIMIT || prefixBuffer.includes("\n\n")) {
+          // No valid prefix found within buffer limit, stream everything
+          prefixExtracted = true;
+          onLanguageDetected(fallbackLanguage, "low");
+          await onTextDelta(prefixBuffer);
+        }
+      } else {
+        await onTextDelta(t);
+      }
+    }
+  }
+
+  // Handle case where stream ended before prefix was extracted
+  if (!prefixExtracted && prefixBuffer) {
+    const parsed = parseLlmLanguagePrefix(prefixBuffer, fallbackLanguage);
+    detectedLanguage = parsed.detectedLanguage;
+    languageConfidence = parsed.confidence;
+    onLanguageDetected(detectedLanguage, languageConfidence);
+    if (parsed.cleanResponse) {
+      await onTextDelta(parsed.cleanResponse);
+    }
+  }
+
+  const answer = raw.trim();
+  const cleanAnswer = parseLlmLanguagePrefix(answer, fallbackLanguage).cleanResponse;
+  
+  if (promptTokens === 0 && completionTokens === 0) {
+    completionTokens = Math.ceil(answer.length / 4);
+  }
+
+  trace?.("openai_chat_stream_lang_detect_response", {
+    model: modelUsed,
+    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+    raw_reply: cleanAnswer.slice(0, 500),
+    detected_language: detectedLanguage,
+    language_confidence: languageConfidence,
+  });
+
+  return {
+    answer: cleanAnswer,
+    promptTokens,
+    completionTokens,
+    totalTokens: totalTokens || promptTokens + completionTokens,
+    model: modelUsed,
+    costUsd: estimateCost(modelUsed, promptTokens, completionTokens),
+  };
+}
+
 export async function detectVoiceUtteranceLanguageOpenAI(params: {
   transcript: string;
   allowedLanguages: readonly string[];
