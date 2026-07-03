@@ -471,5 +471,68 @@ interface VoicebotSession {
 
 ---
 
-**Document Status:** Ready for Review  
-**Next Action:** Await approval to implement Phase 1
+## 13. Post-Implementation Issue: Double Voice (2026-07-03)
+
+### 13.1 Problem Description
+
+After implementing the initial fix (Phases 1-4), a new issue emerged: **Double Voice** during campaign script playback. The customer heard the campaign script being read **twice simultaneously**, resulting in garbled audio.
+
+### 13.2 Root Cause Analysis
+
+Exotel's dual-leg outbound call creates **TWO separate WebSocket streams** that share the same `exotel_call_session_id`:
+
+| Request ID | Stream SID | Role |
+|------------|------------|------|
+| `req-2` | `1c13266e...` | First leg (connected earlier) |
+| `req-5` | `95a7789...` | Second leg (connected later) |
+
+**The Problem:** Both streams independently:
+1. Detect customer speech ("Hello")
+2. Set `waitingForFirstSpeech = false`
+3. Query the campaign script from DB
+4. Start TTS playback simultaneously
+
+This resulted in **505KB of audio being sent on BOTH streams**, causing the double voice effect.
+
+### 13.3 Fix: Atomic Database Lock for Script Playback
+
+**Implementation:** Added atomic coordination using the shared `exotel_call_session.metadata` field:
+
+```sql
+UPDATE exotel_call_sessions
+SET metadata = COALESCE(metadata, '{}'::jsonb) 
+    || jsonb_build_object('script_played_by_stream', $1::text, 'script_played_at', NOW()::text)
+WHERE id = $2::uuid
+  AND (metadata->>'script_played_by_stream' IS NULL OR metadata->>'script_played_by_stream' = '')
+RETURNING id
+```
+
+**How it works:**
+1. When a stream detects customer speech and wants to play the script
+2. It first attempts an atomic UPDATE with a WHERE clause that only succeeds if no other stream has claimed it
+3. If `RETURNING id` returns a row, this stream won the race and plays the script
+4. If `RETURNING id` returns 0 rows, another stream already claimed it — skip playback
+
+**Location:** `runVoicebotReplyPipelineAfterTranscriptReady()` in `exotel-voicebot.ts`
+
+### 13.4 Log Indicators (After Fix)
+
+**Winner stream (plays script):**
+```json
+{
+  "msg": "voicebot: acquired lock to play campaign script (dual-leg coordination)"
+}
+```
+
+**Loser stream (skips playback):**
+```json
+{
+  "msg": "voicebot: campaign script already being played by another stream — skipping duplicate playback"
+}
+```
+
+---
+
+**Document Status:** Implemented  
+**Last Updated:** 2026-07-03  
+**Fix Verified:** Pending production testing

@@ -2667,16 +2667,54 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
     log?.info({ campaignId: session.campaignId, transcript }, "voicebot: customer speech confirmed via STT — playing campaign script");
 
     try {
+      // --- DUAL-LEG COORDINATION: Prevent both WebSocket streams from playing script ---
+      // In dual-leg outbound calls, both streams may detect customer speech simultaneously.
+      // Use atomic DB update to ensure only ONE stream plays the script.
+      // We atomically set script_played_by_stream and check if we won the race.
+      if (session.callSessionDbId) {
+        const lockResult = await pool.query(
+          `UPDATE exotel_call_sessions
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('script_played_by_stream', $1::text, 'script_played_at', NOW()::text)
+           WHERE id = $2::uuid
+             AND (metadata->>'script_played_by_stream' IS NULL OR metadata->>'script_played_by_stream' = '')
+           RETURNING id`,
+          [session.streamSid, session.callSessionDbId]
+        );
+
+        if (lockResult.rows.length === 0) {
+          // Another stream already claimed the script playback
+          log?.info(
+            {
+              stream_sid: session.streamSid,
+              call_session_id: session.callSessionDbId,
+              campaignId: session.campaignId,
+            },
+            "voicebot: campaign script already being played by another stream — skipping duplicate playback"
+          );
+          voiceTrace(log, "campaign.script_skipped_duplicate", {
+            customerId: session.customerId,
+            stream_sid: session.streamSid,
+            campaign_id: session.campaignId,
+          });
+          return;
+        }
+
+        log?.info(
+          { stream_sid: session.streamSid, campaignId: session.campaignId },
+          "voicebot: acquired lock to play campaign script (dual-leg coordination)"
+        );
+      }
+
       const campaignRes = await pool.query(
         "SELECT script_text, language_code FROM outbound_campaigns WHERE id = $1",
         [session.campaignId]
       );
-      
+
       if (campaignRes.rows.length > 0 && campaignRes.rows[0].script_text) {
         const scriptText = campaignRes.rows[0].script_text;
         const langCode = campaignRes.rows[0].language_code || "en-IN";
         log?.info({ campaignId: session.campaignId, chars: scriptText.length }, "voicebot: synthesizing realtime TTS for campaign script");
-        
+
         // Lock the session into the campaign's language for the rest of the call
         session.currentLanguageCode = langCode;
         if (session.callSessionDbId) {
