@@ -158,7 +158,7 @@ export const env = {
       512,
       Math.max(
         32,
-        parseInt(process.env.VOICEBOT_VOICE_LLM_MAX_TOKENS || "80", 10) || 80
+        parseInt(process.env.VOICEBOT_VOICE_LLM_MAX_TOKENS || "200", 10) || 80
       )
     ),
     /**
