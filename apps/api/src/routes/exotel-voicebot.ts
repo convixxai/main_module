@@ -4774,15 +4774,17 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 session.waitingForFirstSpeech = true;
                 
                 // --- LEG IDENTIFICATION FOR DUAL-LEG OUTBOUND CALLS ---
-                // Exotel's Connect Two Numbers API creates two WebSocket streams:
+                // Exotel's Connect Two Numbers API can create two WebSocket streams:
                 // - Leg 1 (system): connected to the initiating system, receives TTS playback
                 // - Leg 2 (customer): connected to the human callee, receives their voice
-                // We need to identify which leg this stream is to avoid feedback loops.
+                // However, some setups use a single stream for both directions.
                 //
-                // Heuristics for leg identification:
-                // 1. custom_parameters.leg - explicit leg indicator (if Exotel provides it)
-                // 2. First stream to arrive is typically Leg 1 (system)
-                // 3. Stream where from === to is typically an inverted Leg 1
+                // IMPORTANT: We should NOT aggressively suppress STT based on heuristics alone,
+                // as this can break single-stream setups. Instead, we rely on echo detection
+                // as the primary defense against feedback loops.
+                //
+                // Only suppress STT when we have EXPLICIT leg identification:
+                // - custom_parameters.leg = "1" or "system" (explicitly marked)
                 const legParam = details.custom_parameters?.leg?.trim().toLowerCase();
                 if (legParam === "1" || legParam === "leg1" || legParam === "system") {
                   session.legType = "leg1_system";
@@ -4799,16 +4801,21 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     "voicebot: identified as Leg 2 (customer) via custom_parameters"
                   );
                 } else if (details.from && details.to && details.from === details.to) {
-                  // Inverted call pattern: from === to typically indicates the system leg
-                  session.legType = "leg1_system";
-                  session.suppressSTTProcessing = true;
+                  // Inverted call pattern: from === to could indicate:
+                  // 1. System leg in a dual-leg setup, OR
+                  // 2. Single-stream setup where both numbers are normalized
+                  // We CANNOT reliably distinguish these cases, so we:
+                  // - Mark as "inverted" for logging purposes
+                  // - Do NOT suppress STT (would break single-stream setups)
+                  // - Rely on echo detection to filter feedback loops
+                  session.legType = "unknown";
+                  session.suppressSTTProcessing = false;
                   log.info(
                     { campaignId, from: details.from, to: details.to, stream_sid: details.stream_sid },
-                    "voicebot: identified as Leg 1 (system) via from===to pattern — suppressing STT"
+                    "voicebot: from===to pattern detected — using echo detection for feedback prevention (not suppressing STT)"
                   );
                 } else {
-                  // Default: assume this is the customer leg but mark as unknown for logging
-                  // Echo detection will serve as a safety net for misidentified legs
+                  // Default: process normally with echo detection as safety net
                   session.legType = "unknown";
                   session.suppressSTTProcessing = false;
                   log.info(
@@ -5062,17 +5069,17 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 }
               }
               
-              // --- OUTBOUND ECHO SUPPRESSION: Skip audio processing for system leg ---
-              // For outbound campaign calls, if this is identified as leg1_system (the system/agent side),
-              // we should not process any audio from it as it would just be our own TTS output.
+              // --- OUTBOUND ECHO SUPPRESSION: Skip audio processing for EXPLICITLY identified system leg ---
+              // Only suppress audio when we have EXPLICIT leg identification (via custom_parameters).
+              // Do NOT suppress based on heuristics (from===to) as this breaks single-stream setups.
               if (
                 env.voicebot.outboundEchoSuppressionEnabled &&
                 session.mode === "outbound_campaign" &&
                 session.suppressSTTProcessing &&
                 session.legType === "leg1_system"
               ) {
-                // Still allow this stream to continue for any potential monitoring purposes,
-                // but don't buffer or process the audio for STT/RAG
+                // This leg was explicitly marked as system leg via custom_parameters
+                // Don't buffer or process the audio for STT/RAG
                 break;
               }
 
