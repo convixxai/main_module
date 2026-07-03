@@ -439,3 +439,94 @@ export function estimateTTSDurationMs(text: string): number {
   // Add minimum of 2 seconds, cap at 60 seconds
   return Math.min(60000, Math.max(2000, durationSecs * 1000));
 }
+
+// ============================================================
+// Single Active Leg (SAL) Pattern
+// ============================================================
+// After script playback, ONLY ONE stream should respond to prevent
+// AI-to-AI feedback loops. This is simpler and more reliable than
+// echo detection.
+
+/**
+ * Set this stream as the active responder for the call.
+ * Called by the primary stream when script playback completes.
+ * Only one stream can be the active responder.
+ */
+export async function setActiveResponder(
+  pool: Pool,
+  callSessionId: string,
+  streamSid: string
+): Promise<boolean> {
+  if (!callSessionId || !streamSid) return false;
+
+  try {
+    // Use atomic update - only set if not already set
+    const result = await pool.query(
+      `UPDATE exotel_call_sessions
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || 
+           jsonb_build_object(
+             'active_responder_stream_sid', $1::text,
+             'active_responder_set_at', NOW()::text,
+             'script_playback_complete', true,
+             'script_completed_at', NOW()::text
+           )
+       WHERE id = $2::uuid
+         AND (metadata->>'active_responder_stream_sid' IS NULL 
+              OR metadata->>'active_responder_stream_sid' = '')
+       RETURNING id`,
+      [streamSid, callSessionId]
+    );
+
+    return result.rowCount !== null && result.rowCount > 0;
+  } catch (err) {
+    console.error("[echo-detection] Failed to set active responder:", err);
+    return false;
+  }
+}
+
+/**
+ * Check if this stream is the active responder for the call.
+ * Returns null if no active responder is set yet (script still playing).
+ */
+export async function getActiveResponder(
+  pool: Pool,
+  callSessionId: string
+): Promise<string | null> {
+  if (!callSessionId) return null;
+
+  try {
+    const result = await pool.query(
+      `SELECT metadata->>'active_responder_stream_sid' AS active_responder
+       FROM exotel_call_sessions
+       WHERE id = $1::uuid`,
+      [callSessionId]
+    );
+
+    if (result.rows.length === 0) return null;
+    return result.rows[0].active_responder || null;
+  } catch (err) {
+    console.error("[echo-detection] Failed to get active responder:", err);
+    return null;
+  }
+}
+
+/**
+ * Check if this stream is allowed to respond (is the active responder).
+ * Returns:
+ *   - true: This stream is the active responder, proceed with STT/LLM/TTS
+ *   - false: Another stream is the active responder, skip STT processing
+ *   - null: No active responder set yet (script still playing or check failed)
+ */
+export async function isActiveResponder(
+  pool: Pool,
+  callSessionId: string,
+  streamSid: string
+): Promise<boolean | null> {
+  const activeResponder = await getActiveResponder(pool, callSessionId);
+  
+  if (activeResponder === null) {
+    return null; // No active responder set yet
+  }
+  
+  return activeResponder === streamSid;
+}

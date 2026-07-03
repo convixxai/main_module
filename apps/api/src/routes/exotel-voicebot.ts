@@ -146,10 +146,10 @@ import {
   addToRecentTTSBuffer,
   pruneRecentTTSBuffer,
   addToSharedTTSBuffer,
-  getSharedTTSBuffer,
-  isEchoOfSharedTTS,
   markScriptPlaybackComplete,
   estimateTTSDurationMs,
+  setActiveResponder,
+  isActiveResponder,
 } from "../utils/echo-detection";
 
 // ============================================================
@@ -2711,54 +2711,44 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
     }
   }
 
-  // --- CROSS-LEG ECHO DETECTION: Check shared DB buffer for TTS from other streams ---
-  // After initial script playback, use the shared database buffer to detect echoes
-  // across WebSocket streams. This catches cases where stream A's TTS is transcribed by stream B.
+  // --- SINGLE ACTIVE LEG (SAL) CHECK ---
+  // In dual-leg outbound calls, only ONE stream should respond after script playback.
+  // This is a simpler, more reliable approach than echo detection.
+  // If an active responder is set and it's NOT this stream, silently drop the STT.
   if (
     env.voicebot.outboundCrossLegEchoEnabled &&
     session.mode === "outbound_campaign" &&
     session.callSessionDbId &&
-    !session.waitingForFirstSpeech
+    !session.waitingForFirstSpeech // Only check after script playback begins
   ) {
     try {
-      const sharedBuffer = await getSharedTTSBuffer(pool, session.callSessionDbId);
-      if (sharedBuffer.length > 0) {
-        const crossLegEchoCheck = isEchoOfSharedTTS(transcript, sharedBuffer, {
-          similarityThreshold: env.voicebot.outboundEchoSimilarityThreshold,
-          maxAgeMs: env.voicebot.outboundTtsBufferMaxAgeSecs * 1000,
-          minTranscriptLength: 5,
-          excludeStreamSid: undefined, // Check ALL streams, including our own
-        });
-
-        if (crossLegEchoCheck.isEcho) {
-          const isCrossLeg = crossLegEchoCheck.matchedStreamSid !== session.streamSid;
-          log?.info(
-            {
-              stream_sid: session.streamSid,
-              transcript_preview: transcript.slice(0, 100),
-              matched_tts: crossLegEchoCheck.matchedText,
-              similarity: crossLegEchoCheck.similarity?.toFixed(2),
-              source_stream: crossLegEchoCheck.matchedStreamSid,
-              is_cross_leg: isCrossLeg,
-            },
-            isCrossLeg
-              ? "voicebot: detected CROSS-LEG echo from shared buffer — suppressing to prevent AI-to-AI loop"
-              : "voicebot: detected echo from shared buffer (same stream)"
-          );
-          voiceTrace(log, "pipeline.echo.cross_leg_detected", {
-            customerId: session.customerId,
+      const isThisActiveResponder = await isActiveResponder(pool, session.callSessionDbId, session.streamSid);
+      
+      // If active responder is set and it's NOT this stream, drop the STT
+      if (isThisActiveResponder === false) {
+        log?.info(
+          {
             stream_sid: session.streamSid,
-            transcript_chars: transcript.length,
-            similarity: crossLegEchoCheck.similarity,
-            matched_stream: crossLegEchoCheck.matchedStreamSid,
-            is_cross_leg: isCrossLeg,
-          });
-          return;
-        }
+            transcript_preview: transcript.slice(0, 100),
+            is_primary: session.isPrimaryStream,
+          },
+          "voicebot: STT dropped — another stream is the active responder (SAL fix)"
+        );
+        voiceTrace(log, "pipeline.stt.sal_dropped", {
+          customerId: session.customerId,
+          stream_sid: session.streamSid,
+          transcript_chars: transcript.length,
+        });
+        return;
       }
+      
+      // If isThisActiveResponder is null, no active responder set yet (script still playing)
+      // In this case, continue - the time-based suppression should handle it
+      // If isThisActiveResponder is true, this is the active responder - proceed normally
+      
     } catch (err) {
-      log?.warn({ err, stream_sid: session.streamSid }, "Failed to check shared TTS buffer for echoes");
-      // Non-fatal: continue processing
+      log?.warn({ err, stream_sid: session.streamSid }, "Failed to check active responder status");
+      // Non-fatal: continue processing (fail open to not block valid STT)
     }
   }
 
@@ -5393,9 +5383,29 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     session.playingCampaignScript = false;
                     session.scriptPlaybackComplete = true;
                     
-                    // Mark script playback complete in DB for other streams to know
+                    // --- SINGLE ACTIVE LEG (SAL) FIX ---
+                    // Set THIS stream as the sole active responder for the call.
+                    // Only this stream will process STT and generate responses.
+                    // This prevents AI-to-AI feedback loops in dual-leg calls.
                     if (env.voicebot.outboundCrossLegEchoEnabled && session.callSessionDbId) {
                       const campaignIdForLog = session.campaignId;
+                      const streamSidForLog = session.streamSid;
+                      
+                      // Set active responder (atomic - first writer wins)
+                      setActiveResponder(pool, session.callSessionDbId, session.streamSid)
+                        .then((wasSet) => {
+                          if (wasSet) {
+                            log?.info(
+                              { stream_sid: streamSidForLog, campaign_id: campaignIdForLog },
+                              "voicebot: set as active responder for call (SAL fix)"
+                            );
+                          }
+                        })
+                        .catch((err) => {
+                          log?.warn({ err, campaign_id: campaignIdForLog }, "Failed to set active responder in DB");
+                        });
+                      
+                      // Also mark script complete for backward compatibility
                       markScriptPlaybackComplete(pool, session.callSessionDbId).catch((err) => {
                         log?.warn({ err, campaign_id: campaignIdForLog }, "Failed to mark script complete in DB");
                       });
