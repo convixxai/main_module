@@ -1195,6 +1195,10 @@ function schedulePlaybackMarkFallback(
 /**
  * One `chat_sessions` row per phone call; all turns go to `chat_messages` under that id.
  * Call once from Exotel `start` before `createCallSession` so the call row can store `chat_session_id`.
+ * 
+ * For dual-leg calls (outbound campaigns), we check if a chat_session already exists
+ * for this exotel_call_session (from another leg) and reuse it to ensure both legs
+ * share the same conversation history.
  */
 async function bootstrapVoicebotChatSession(
   session: VoicebotSession,
@@ -1202,6 +1206,47 @@ async function bootstrapVoicebotChatSession(
 ): Promise<void> {
   if (session.chatSessionId) return;
 
+  // For dual-leg calls, check if a chat_session already exists for this call
+  // This ensures both legs share the same conversation history
+  if (session.callSessionDbId) {
+    const existingResult = await pool.query(
+      `SELECT chat_session_id FROM exotel_call_sessions WHERE id = $1 AND chat_session_id IS NOT NULL`,
+      [session.callSessionDbId]
+    );
+    if (existingResult.rows.length > 0 && existingResult.rows[0].chat_session_id) {
+      session.chatSessionId = existingResult.rows[0].chat_session_id as string;
+      _log?.info(
+        { call_session_id: session.callSessionDbId, chat_session_id: session.chatSessionId },
+        "voicebot: reusing existing chat_session from another leg (shared history)"
+      );
+      // Load agent info for this existing session
+      const agentResult = await pool.query(
+        `SELECT agent_id FROM chat_sessions WHERE id = $1`,
+        [session.chatSessionId]
+      );
+      if (agentResult.rows.length > 0 && agentResult.rows[0].agent_id) {
+        session.agentId = agentResult.rows[0].agent_id as string;
+        const agentRow = await pool.query(
+          `SELECT greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+                  avatar_id, elevenlabs_avatar_id
+           FROM agents WHERE id = $1`,
+          [session.agentId]
+        );
+        if (agentRow.rows.length > 0) {
+          const row = agentRow.rows[0];
+          session.greetingText = row.greeting_text;
+          session.errorText = row.error_text;
+          session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
+          session.ttsModel = row.tts_model;
+          session.ttsSpeaker = row.tts_speaker;
+          session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
+        }
+      }
+      return;
+    }
+  }
+
+  // No existing chat_session found, create a new one
   const sessionResult = await pool.query(
     `INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`,
     [session.customerId]
@@ -3904,24 +3949,34 @@ async function processUtterance(
       ? clampedForPolicy
       : normalizeBcp47Tag("en-IN");
     if (multilingual) {
-      // Persist session language only on reliable signal; never silently switch
-      // on ambiguous short inputs like single-word fillers.
+      // Language switch policy: NEVER automatically switch to a different language
+      // without user confirmation. The discrepancy count system (above) handles
+      // prompting the user after 2 consecutive detections of a different language.
       const isShortAmbiguous = transcript.trim().length <= 8;
-      if (scriptLang && !isShortAmbiguous) {
-        effectiveLanguage = clampedForPolicy;
-        persistSessionActiveLanguage(session, effectiveLanguage, log);
-      } else if (openAiLanguageOverride && !isShortAmbiguous) {
-        effectiveLanguage = clampedForPolicy;
-        persistSessionActiveLanguage(session, effectiveLanguage, log);
-      } else if (
-        sttProvider === "sarvam" &&
-        languageProbability != null &&
-        languageProbability > 0.8 &&
-        !languagesLooselyEqual(clampedForPolicy, activeBcp) &&
-        !isShortAmbiguous
-      ) {
-        effectiveLanguage = clampedForPolicy;
-        persistSessionActiveLanguage(session, effectiveLanguage, log);
+      const hasReliableSignal = (scriptLang && !isShortAmbiguous) ||
+        (openAiLanguageOverride && !isShortAmbiguous) ||
+        (sttProvider === "sarvam" && languageProbability != null && languageProbability > 0.8 && !isShortAmbiguous);
+
+      if (hasReliableSignal) {
+        // If the detected language is THE SAME as current, persist it (reinforces current language)
+        // If DIFFERENT, do NOT persist - let the pendingLanguageSwitch confirmation flow handle it
+        if (languagesLooselyEqual(clampedForPolicy, activeBcp)) {
+          // Same language - safe to persist (just reinforcing current setting)
+          effectiveLanguage = clampedForPolicy;
+          persistSessionActiveLanguage(session, effectiveLanguage, log);
+        } else {
+          // DIFFERENT language detected - DO NOT auto-switch
+          // Use detected language for this turn's response, but don't persist the switch
+          // The discrepancy count system will prompt for confirmation after 2 detections
+          effectiveLanguage = clampedForPolicy;
+          voiceTrace(log, "voicebot.language.switch_blocked_pending_confirmation", {
+            customerId: session.customerId,
+            stream_sid: session.streamSid,
+            detected_language: clampedForPolicy,
+            current_language: activeBcp,
+            discrepant_count: session.discrepantLanguageCount || 0,
+          });
+        }
       } else {
         // Short or ambiguous: reply in current session language
         effectiveLanguage = normalizeBcp47Tag(
@@ -4084,7 +4139,9 @@ async function runVoicebotAskPipeline(
           multilingual: session.voicebotMultilingualEffective === true,
           languageTag: session.effectiveSttLanguageThisTurn,
           trace: ragTrace,
-          voicePreferNativeEmbeddingForIndic: true,
+          // Enable Sarvam translation for Hindi/Marathi queries to match English KB content
+          // This adds ~150ms latency but significantly improves cross-lingual KB search accuracy
+          voicePreferNativeEmbeddingForIndic: false,
         });
       voiceTrace(log, "pipeline.rag.embedding_query", {
         customerId: session.customerId,
