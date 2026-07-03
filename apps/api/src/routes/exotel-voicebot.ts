@@ -4407,8 +4407,32 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
       const preStartInboundPcm: Buffer[] = [];
       const PRE_START_MEDIA_MAX_CHUNKS = 150;
 
+      // ---- Diagnostic tracking for debugging missing start events ----
+      let receivedConnectedEvent = false;
+      let receivedStartEvent = false;
+      let totalMessagesReceived = 0;
+      let totalMediaMessages = 0;
+      const connectionAcceptedAt = Date.now();
+
+      // Timeout warning: if no `start` event within 5s, something is wrong with Exotel flow
+      const startEventTimeout = setTimeout(() => {
+        if (!receivedStartEvent) {
+          log.error(
+            {
+              customerId,
+              receivedConnectedEvent,
+              totalMessagesReceived,
+              totalMediaMessages,
+              elapsedMs: Date.now() - connectionAcceptedAt,
+            },
+            "voicebot: CRITICAL — no 'start' event received within 5s after connection; caller will hear silence. Check Exotel flow configuration: ensure Voicebot applet (not just Stream) is attached and WebSocket URL is correct."
+          );
+        }
+      }, 5000);
+
       // ---- Message handler ----
       socket.on("message", async (rawData: Buffer | string) => {
+        totalMessagesReceived++;
         const raw = typeof rawData === "string" ? rawData : rawData.toString("utf-8");
         const msg = parseExotelMessage(raw);
 
@@ -4434,12 +4458,15 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
           switch (msg.event) {
             // ---- connected ----
             case "connected":
+              receivedConnectedEvent = true;
               voiceTrace(log, "exotel.in.connected", { customerId });
               log.info("voicebot: Exotel connected");
               break;
 
             // ---- start ----
             case "start": {
+              clearTimeout(startEventTimeout);
+              receivedStartEvent = true;
               const startMsg = msg as ExotelStartMessage;
               const details = startMsg.start;
 
@@ -4800,6 +4827,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
 
             // ---- media (caller audio) ----
             case "media": {
+              totalMediaMessages++;
               if (!session) {
                 if (preStartInboundPcm.length < PRE_START_MEDIA_MAX_CHUNKS) {
                   try {
@@ -4944,9 +4972,30 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
 
             // ---- stop ----
             case "stop": {
+              clearTimeout(startEventTimeout);
               const reason = (msg as any).stop?.reason || "unknown";
+              const stopStreamSid = (msg as any).stream_sid || (msg as any).stop?.stream_sid;
+              const stopCallSid = (msg as any).stop?.call_sid;
+
+              // Critical diagnostic: if we never received start, the caller heard silence
+              if (!receivedStartEvent) {
+                log.error(
+                  {
+                    customerId,
+                    stream_sid: stopStreamSid,
+                    call_sid: stopCallSid,
+                    reason,
+                    receivedConnectedEvent,
+                    totalMessagesReceived,
+                    totalMediaMessages,
+                    elapsedMs: Date.now() - connectionAcceptedAt,
+                  },
+                  "voicebot: CALL FAILED — call ended before 'start' event was received. Caller heard complete silence. Likely causes: (1) Exotel flow uses Stream applet instead of Voicebot applet, (2) WebSocket URL misconfigured in Exotel dashboard, (3) Exotel platform issue. Check Exotel flow configuration."
+                );
+              }
+
               log.info({
-                stream_sid: session?.streamSid,
+                stream_sid: session?.streamSid || stopStreamSid,
                 reason,
               }, "voicebot: stream stopped");
 
@@ -4981,13 +5030,36 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
 
       // ---- Connection close ----
       socket.on("close", (code, reason) => {
+        clearTimeout(startEventTimeout);
         if (vadTimer) clearTimeout(vadTimer);
 
+        // Enhanced logging with diagnostic info for debugging silent calls
         log.info({
+          customerId,
           stream_sid: session?.streamSid,
           code,
           reason: reason?.toString(),
+          sessionCreated: !!session,
+          receivedConnectedEvent,
+          receivedStartEvent,
+          totalMessagesReceived,
+          totalMediaMessages,
+          connectionDurationMs: Date.now() - connectionAcceptedAt,
         }, "voicebot: WebSocket closed");
+
+        // Additional warning if connection closed without ever establishing a session
+        if (!session && !receivedStartEvent) {
+          log.warn(
+            {
+              customerId,
+              code,
+              receivedConnectedEvent,
+              totalMessagesReceived,
+              connectionDurationMs: Date.now() - connectionAcceptedAt,
+            },
+            "voicebot: WebSocket closed without session — no greeting was sent to caller. Verify Exotel Voicebot applet configuration."
+          );
+        }
 
         if (session) {
           notifyCallEndOnce(session, `ws_closed:${code}`);
