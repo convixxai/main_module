@@ -214,6 +214,32 @@ export interface VoicebotSession {
   waitingForFirstSpeech?: boolean;
   /** Linked campaign ID if in campaign mode. */
   campaignId?: string | null;
+
+  // --- Outbound Call Echo Suppression Fields ---
+  /**
+   * For outbound campaign calls using Exotel's dual-leg architecture:
+   * 'leg1_system' = WebSocket stream connected to the system/agent side (TTS sent here)
+   * 'leg2_customer' = WebSocket stream connected to the customer side (real user audio)
+   * 'inbound' = single WebSocket stream for inbound calls (default)
+   * 'unknown' = outbound call where leg identification failed
+   */
+  legType?: "leg1_system" | "leg2_customer" | "inbound" | "unknown";
+  /**
+   * When true, skip STT/RAG processing for this session (e.g., leg1_system in dual-leg calls).
+   * Audio is still buffered to detect barge-in but not sent to the pipeline.
+   */
+  suppressSTTProcessing?: boolean;
+  /** True while the campaign script TTS is being played. */
+  playingCampaignScript?: boolean;
+  /** True once the campaign script playback `mark` has been acknowledged. */
+  scriptPlaybackComplete?: boolean;
+  /** The mark name used for the campaign script (e.g., 'campaign_script_<id>'). */
+  campaignScriptMarkName?: string | null;
+  /**
+   * Rolling buffer of recently-sent TTS text for echo detection.
+   * Entries expire after 30 seconds. Used to detect when STT captures bot's own speech.
+   */
+  recentTTSTexts?: Array<{ text: string; timestamp: number }>;
 }
 
 /**
@@ -266,6 +292,13 @@ export function createSession(params: {
     mode: "inbound", // default
     waitingForFirstSpeech: false,
     campaignId: null,
+    // Outbound echo suppression defaults
+    legType: "inbound",
+    suppressSTTProcessing: false,
+    playingCampaignScript: false,
+    scriptPlaybackComplete: false,
+    campaignScriptMarkName: null,
+    recentTTSTexts: [],
   };
 
   activeSessions.set(params.streamSid, session);

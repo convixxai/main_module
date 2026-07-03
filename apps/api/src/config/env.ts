@@ -196,6 +196,21 @@ export const env = {
      */
     cartesiaOpenAiLanguageDetect:
       process.env.VOICEBOT_CARTESIA_OPENAI_LANGUAGE_DETECT !== "false",
+    /**
+     * Outbound campaign echo suppression: when `true` (default), detect and suppress STT transcripts
+     * that match recently-sent TTS output to prevent AI-to-AI feedback loops in dual-leg Exotel calls.
+     * Set `OUTBOUND_ECHO_SUPPRESSION_ENABLED=false` to disable (rollback).
+     */
+    outboundEchoSuppressionEnabled:
+      process.env.OUTBOUND_ECHO_SUPPRESSION_ENABLED !== "false",
+    /**
+     * Echo similarity threshold for outbound calls (0-1). Default 0.6.
+     * Higher values = stricter matching (fewer false positives but may miss some echoes).
+     */
+    outboundEchoSimilarityThreshold: Math.min(
+      1,
+      Math.max(0.3, parseFloat(process.env.OUTBOUND_ECHO_SIMILARITY_THRESHOLD || "0.6") || 0.6)
+    ),
   },
 
   /** ElevenLabs (STT Scribe + TTS). https://elevenlabs.io/docs */

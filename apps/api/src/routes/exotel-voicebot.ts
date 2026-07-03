@@ -141,6 +141,11 @@ import {
   fireTenantWebhook,
   postSlackIncomingWebhook,
 } from "../services/tenant-webhooks";
+import {
+  isEchoOfRecentTTS,
+  addToRecentTTSBuffer,
+  pruneRecentTTSBuffer,
+} from "../utils/echo-detection";
 
 // ============================================================
 // Constants
@@ -1563,6 +1568,26 @@ async function speakToExotel(
 ): Promise<boolean> {
   if (session.isClosing) return false;
   session.ttsInProgress = true;
+  
+  // --- OUTBOUND ECHO SUPPRESSION: Buffer TTS text for echo detection ---
+  // For outbound campaign calls, track all TTS text so we can detect when
+  // STT captures our own speech output (feedback loop prevention).
+  if (
+    env.voicebot.outboundEchoSuppressionEnabled &&
+    session.mode === "outbound_campaign" &&
+    text.length > 0
+  ) {
+    session.recentTTSTexts = addToRecentTTSBuffer(
+      session.recentTTSTexts || [],
+      text,
+      30000 // 30 second TTL for regular TTS
+    );
+    log?.debug(
+      { stream_sid: session.streamSid, text_chars: text.length, buffer_size: session.recentTTSTexts.length },
+      "voicebot: added TTS text to echo detection buffer"
+    );
+  }
+  
   try {
     const cs = tenantCs(session);
     const ttsProvider = cs?.tts_provider ?? "sarvam";
@@ -2571,6 +2596,66 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
   if (session.isClosing) return;
 
+  // --- OUTBOUND ECHO SUPPRESSION: Check if this STT result is an echo of our TTS ---
+  // For outbound campaign calls, detect when the STT has captured the bot's own speech
+  // output and skip processing to prevent feedback loops.
+  if (
+    env.voicebot.outboundEchoSuppressionEnabled &&
+    session.mode === "outbound_campaign" &&
+    !session.waitingForFirstSpeech && // Don't filter the initial trigger speech
+    session.recentTTSTexts &&
+    session.recentTTSTexts.length > 0
+  ) {
+    // First check: if this is leg1_system, suppress all STT processing
+    if (session.suppressSTTProcessing) {
+      log?.info(
+        {
+          stream_sid: session.streamSid,
+          leg_type: session.legType,
+          transcript_preview: transcript.slice(0, 100),
+        },
+        "voicebot: suppressing STT from system leg (leg1) to prevent feedback loop"
+      );
+      voiceTrace(log, "pipeline.echo.suppressed_system_leg", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        leg_type: session.legType,
+        transcript_chars: transcript.length,
+      });
+      return;
+    }
+
+    // Second check: echo detection based on text similarity
+    const echoCheck = isEchoOfRecentTTS(transcript, session.recentTTSTexts, {
+      similarityThreshold: env.voicebot.outboundEchoSimilarityThreshold,
+      maxAgeMs: 30000,
+      minTranscriptLength: 5,
+    });
+
+    if (echoCheck.isEcho) {
+      log?.info(
+        {
+          stream_sid: session.streamSid,
+          transcript_preview: transcript.slice(0, 100),
+          matched_tts: echoCheck.matchedText,
+          similarity: echoCheck.similarity?.toFixed(2),
+        },
+        "voicebot: detected echo of recent TTS — suppressing to prevent feedback loop"
+      );
+      voiceTrace(log, "pipeline.echo.detected", {
+        customerId: session.customerId,
+        stream_sid: session.streamSid,
+        transcript_chars: transcript.length,
+        similarity: echoCheck.similarity,
+        matched_tts_preview: echoCheck.matchedText,
+      });
+      
+      // Prune old entries from the buffer
+      session.recentTTSTexts = pruneRecentTTSBuffer(session.recentTTSTexts, 30000);
+      return;
+    }
+  }
+
   session.cartesiaReplyStreamContextId = null;
   session.cartesiaReplyStreamPieceCount = 0;
 
@@ -2601,7 +2686,27 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
           ).catch((e) => log?.error({ err: e }, "failed to update call session language"));
         }
         
+        // --- OUTBOUND ECHO SUPPRESSION: Track campaign script playback ---
+        session.playingCampaignScript = true;
+        session.scriptPlaybackComplete = false;
+        
+        // Add script text to echo detection buffer so any STT that captures it will be filtered
+        if (env.voicebot.outboundEchoSuppressionEnabled) {
+          session.recentTTSTexts = addToRecentTTSBuffer(
+            session.recentTTSTexts || [],
+            scriptText,
+            60000 // Keep campaign script in buffer for 60s (longer than typical playback)
+          );
+          log?.info(
+            { campaignId: session.campaignId, buffer_size: session.recentTTSTexts.length },
+            "voicebot: added campaign script to echo detection buffer"
+          );
+        }
+        
         await speakToExotel(ws, session, scriptText, langCode, log);
+        
+        // Note: playingCampaignScript will be set to false in the mark handler
+        // when playback completes
 
         // Link to chat session as initial bot message
         appendAssistantChatLine(session, scriptText, "campaign_script").catch(() => {});
@@ -4667,11 +4772,61 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 session.mode = "outbound_campaign";
                 session.campaignId = String(campaignId);
                 session.waitingForFirstSpeech = true;
+                
+                // --- LEG IDENTIFICATION FOR DUAL-LEG OUTBOUND CALLS ---
+                // Exotel's Connect Two Numbers API creates two WebSocket streams:
+                // - Leg 1 (system): connected to the initiating system, receives TTS playback
+                // - Leg 2 (customer): connected to the human callee, receives their voice
+                // We need to identify which leg this stream is to avoid feedback loops.
+                //
+                // Heuristics for leg identification:
+                // 1. custom_parameters.leg - explicit leg indicator (if Exotel provides it)
+                // 2. First stream to arrive is typically Leg 1 (system)
+                // 3. Stream where from === to is typically an inverted Leg 1
+                const legParam = details.custom_parameters?.leg?.trim().toLowerCase();
+                if (legParam === "1" || legParam === "leg1" || legParam === "system") {
+                  session.legType = "leg1_system";
+                  session.suppressSTTProcessing = true;
+                  log.info(
+                    { campaignId, legParam, stream_sid: details.stream_sid },
+                    "voicebot: identified as Leg 1 (system) via custom_parameters — suppressing STT"
+                  );
+                } else if (legParam === "2" || legParam === "leg2" || legParam === "customer") {
+                  session.legType = "leg2_customer";
+                  session.suppressSTTProcessing = false;
+                  log.info(
+                    { campaignId, legParam, stream_sid: details.stream_sid },
+                    "voicebot: identified as Leg 2 (customer) via custom_parameters"
+                  );
+                } else if (details.from && details.to && details.from === details.to) {
+                  // Inverted call pattern: from === to typically indicates the system leg
+                  session.legType = "leg1_system";
+                  session.suppressSTTProcessing = true;
+                  log.info(
+                    { campaignId, from: details.from, to: details.to, stream_sid: details.stream_sid },
+                    "voicebot: identified as Leg 1 (system) via from===to pattern — suppressing STT"
+                  );
+                } else {
+                  // Default: assume this is the customer leg but mark as unknown for logging
+                  // Echo detection will serve as a safety net for misidentified legs
+                  session.legType = "unknown";
+                  session.suppressSTTProcessing = false;
+                  log.info(
+                    { campaignId, from: details.from, to: details.to, stream_sid: details.stream_sid },
+                    "voicebot: leg identification inconclusive — using echo detection as fallback"
+                  );
+                }
+
+                // Initialize the TTS buffer for echo detection
+                session.recentTTSTexts = [];
+                
                 log.info({ campaignId }, "voicebot: identified as outbound campaign call");
               } else if (outboundLinkedId) {
                 session.mode = "outbound";
+                session.legType = "inbound"; // Non-campaign outbound uses single stream
               } else {
                 session.mode = "inbound";
+                session.legType = "inbound";
               }
 
               log.info({
@@ -4906,6 +5061,20 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   break;
                 }
               }
+              
+              // --- OUTBOUND ECHO SUPPRESSION: Skip audio processing for system leg ---
+              // For outbound campaign calls, if this is identified as leg1_system (the system/agent side),
+              // we should not process any audio from it as it would just be our own TTS output.
+              if (
+                env.voicebot.outboundEchoSuppressionEnabled &&
+                session.mode === "outbound_campaign" &&
+                session.suppressSTTProcessing &&
+                session.legType === "leg1_system"
+              ) {
+                // Still allow this stream to continue for any potential monitoring purposes,
+                // but don't buffer or process the audio for STT/RAG
+                break;
+              }
 
               // --- Energy-based VAD ---
               // Exotel sends media chunks every 20ms continuously, even during silence.
@@ -5008,6 +5177,29 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   // to ignore the telephony tail echo of the bot's own voice.
                   if (session.mode === "outbound" || session.mode === "outbound_campaign") {
                     session.echoCancellationEndTime = Date.now() + 1500;
+                  }
+
+                  // --- OUTBOUND ECHO SUPPRESSION: Track campaign script completion ---
+                  // When the campaign script finishes playing, transition to listening mode.
+                  if (
+                    session.mode === "outbound_campaign" &&
+                    session.playingCampaignScript
+                  ) {
+                    session.playingCampaignScript = false;
+                    session.scriptPlaybackComplete = true;
+                    log?.info(
+                      {
+                        stream_sid: session.streamSid,
+                        campaign_id: session.campaignId,
+                        mark: markName,
+                      },
+                      "voicebot: campaign script playback complete — transitioning to listening mode for customer questions"
+                    );
+                    voiceTrace(log, "campaign.script_complete", {
+                      customerId: session.customerId,
+                      stream_sid: session.streamSid,
+                      campaign_id: session.campaignId,
+                    });
                   }
 
                   log?.info({
