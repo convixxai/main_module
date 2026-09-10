@@ -71,6 +71,22 @@
     {
       "name": "Outbound Campaigns",
       "description": "Manage outbound call campaigns. Set up scripts (script-to-audio), add leads, and trigger automated calls. Requires `x-api-key`."
+    },
+    {
+      "name": "Company Phone Numbers",
+      "description": "Feature 3 — one company, many phone numbers. Admin CRUD for `company_phone_numbers` (`x-admin-token`). Inbound calls route to a number's `default_agent_id` when set; outbound calls/campaigns may pick a specific number as caller ID via `phone_number_id`."
+    },
+    {
+      "name": "Cartesia",
+      "description": "Cartesia TTS: tenant-scoped avatars (`cartesia_avatars`, `x-api-key`), a standalone voice browser/preview, and a diagnostic simulator. Used when `customer_settings.tts_provider` is `cartesia`; link an agent with `agents.cartesia_avatar_id`."
+    },
+    {
+      "name": "Google TTS",
+      "description": "Diagnostic Google Cloud TTS simulator. Bring-your-own Google Cloud OAuth credentials (this server has no server-side Google TTS credential) — not a tenant-configurable production TTS provider today."
+    },
+    {
+      "name": "Simulator Utilities",
+      "description": "Cross-simulator helpers: email a saved simulator character (settings + last audio output) and check/test SMTP configuration. Requires x-api-key."
     }
   ],
   "components": {
@@ -192,7 +208,7 @@
             "type": "number",
             "format": "float",
             "minimum": 0.5,
-            "maximum": 2.0,
+            "maximum": 2,
             "nullable": true
           },
           "tts_default_pitch": {
@@ -613,7 +629,7 @@
           "tts_default_pace": {
             "type": "number",
             "minimum": 0.5,
-            "maximum": 2.0,
+            "maximum": 2,
             "nullable": true
           },
           "tts_default_pitch": {
@@ -930,7 +946,7 @@
           "tts_pace": {
             "type": "number",
             "minimum": 0.5,
-            "maximum": 2.0,
+            "maximum": 2,
             "nullable": true
           },
           "tts_pitch": {
@@ -998,7 +1014,7 @@
             "nullable": true,
             "example": 0.95,
             "minimum": 0.5,
-            "maximum": 2.0
+            "maximum": 2
           },
           "tts_pitch": {
             "type": "number",
@@ -1078,7 +1094,7 @@
           "tts_pace": {
             "type": "number",
             "minimum": 0.5,
-            "maximum": 2.0,
+            "maximum": 2,
             "nullable": true
           },
           "tts_pitch": {
@@ -1143,7 +1159,7 @@
           "tts_pace": {
             "type": "number",
             "minimum": 0.5,
-            "maximum": 2.0,
+            "maximum": 2,
             "nullable": true
           },
           "tts_pitch": {
@@ -1534,6 +1550,12 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "phone_number_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "FK to company_phone_numbers. Null falls back to customer_exotel_settings.default_outbound_caller_id || inbound_phone_number when triggering calls."
           }
         }
       },
@@ -1555,6 +1577,11 @@
           "language_code": {
             "type": "string",
             "default": "en-IN"
+          },
+          "phone_number_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional. Must reference an enabled number owned by this customer (see /customers/{customerId}/phone-numbers)."
           }
         }
       },
@@ -1570,6 +1597,382 @@
               "type": "string"
             },
             "minItems": 1
+          }
+        }
+      },
+      "CompanyPhoneNumber": {
+        "type": "object",
+        "description": "Row in `company_phone_numbers`. One company can own many numbers; `customer_id` is unique per `phone_number`.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "customer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "phone_number": {
+            "type": "string",
+            "example": "+9102048555864"
+          },
+          "label": {
+            "type": "string",
+            "nullable": true,
+            "example": "Sales line"
+          },
+          "default_agent_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Agent this number routes inbound calls to. Null falls back to the company's oldest active agent."
+          },
+          "is_primary": {
+            "type": "boolean",
+            "description": "At most one primary number per customer; used as the default outbound caller ID."
+          },
+          "is_enabled": {
+            "type": "boolean"
+          },
+          "provider_override_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Reserved for future carrier-migration support (§8.5 roadmap). Not currently settable via this API."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CompanyPhoneNumberCreate": {
+        "type": "object",
+        "required": [
+          "phone_number"
+        ],
+        "properties": {
+          "phone_number": {
+            "type": "string",
+            "minLength": 3,
+            "example": "+9102048555864"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default_agent_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_primary": {
+            "type": "boolean",
+            "description": "If true, unsets any other primary number for this customer first."
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "CompanyPhoneNumberUpdate": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true
+          },
+          "default_agent_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "is_enabled": {
+            "type": "boolean"
+          },
+          "is_primary": {
+            "type": "boolean",
+            "description": "If true, unsets any other primary number for this customer first."
+          }
+        }
+      },
+      "CartesiaGenerationConfig": {
+        "type": "object",
+        "properties": {
+          "speed": {
+            "type": "number",
+            "minimum": 0.6,
+            "maximum": 1.5
+          },
+          "volume": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 2
+          },
+          "emotion": {
+            "type": "string"
+          }
+        }
+      },
+      "CartesiaLanguageVoiceMapEntry": {
+        "type": "object",
+        "properties": {
+          "voice_id": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "generation_config": {
+            "$ref": "#/components/schemas/CartesiaGenerationConfig"
+          }
+        }
+      },
+      "CartesiaAvatar": {
+        "type": "object",
+        "description": "Row in `cartesia_avatars`. Used when `customer_settings.tts_provider` is `cartesia`; agents reference it via `agents.cartesia_avatar_id`.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "customer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "voice_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Cartesia voice id (see GET /voice/cartesia/voices)."
+          },
+          "model_id": {
+            "type": "string",
+            "maxLength": 128,
+            "example": "sonic-3.5"
+          },
+          "generation_config": {
+            "$ref": "#/components/schemas/CartesiaGenerationConfig"
+          },
+          "pronunciation_dict_id": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true
+          },
+          "legacy_speed": {
+            "type": "string",
+            "enum": [
+              "slow",
+              "normal",
+              "fast"
+            ],
+            "nullable": true
+          },
+          "is_pvc_voice": {
+            "type": "boolean",
+            "description": "Personal Voice Clone — bills at a higher credits/char rate."
+          },
+          "language_voice_map": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CartesiaLanguageVoiceMapEntry"
+            }
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "is_active": {
+            "type": "boolean",
+            "default": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CartesiaAvatarCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "voice_id"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "voice_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Cartesia voice id (see GET /voice/cartesia/voices)."
+          },
+          "model_id": {
+            "type": "string",
+            "maxLength": 128,
+            "example": "sonic-3.5"
+          },
+          "generation_config": {
+            "$ref": "#/components/schemas/CartesiaGenerationConfig"
+          },
+          "pronunciation_dict_id": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true
+          },
+          "legacy_speed": {
+            "type": "string",
+            "enum": [
+              "slow",
+              "normal",
+              "fast"
+            ],
+            "nullable": true
+          },
+          "is_pvc_voice": {
+            "type": "boolean",
+            "description": "Personal Voice Clone — bills at a higher credits/char rate."
+          },
+          "language_voice_map": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CartesiaLanguageVoiceMapEntry"
+            }
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "is_active": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "CartesiaAvatarUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "voice_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Cartesia voice id (see GET /voice/cartesia/voices)."
+          },
+          "model_id": {
+            "type": "string",
+            "maxLength": 128,
+            "example": "sonic-3.5"
+          },
+          "generation_config": {
+            "$ref": "#/components/schemas/CartesiaGenerationConfig"
+          },
+          "pronunciation_dict_id": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true
+          },
+          "legacy_speed": {
+            "type": "string",
+            "enum": [
+              "slow",
+              "normal",
+              "fast"
+            ],
+            "nullable": true
+          },
+          "is_pvc_voice": {
+            "type": "boolean",
+            "description": "Personal Voice Clone — bills at a higher credits/char rate."
+          },
+          "language_voice_map": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CartesiaLanguageVoiceMapEntry"
+            }
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "is_active": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "description": "All fields optional; provide at least one."
+      },
+      "SimulatorCharacterSave": {
+        "type": "object",
+        "required": [
+          "character_name",
+          "simulator_type",
+          "settings",
+          "audio_base64"
+        ],
+        "properties": {
+          "character_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "simulator_type": {
+            "type": "string",
+            "enum": [
+              "elevenlabs",
+              "openai_tts",
+              "cartesia_tts",
+              "google_tts",
+              "sarvam_tts"
+            ]
+          },
+          "customer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "last_output": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          },
+          "audio_base64": {
+            "type": "string"
+          },
+          "audio_content_type": {
+            "type": "string"
+          },
+          "audio_filename": {
+            "type": "string"
           }
         }
       }
@@ -3532,7 +3935,7 @@
                 "target_language_code": "hi-IN",
                 "speaker": "ritu",
                 "model": "bulbul:v3",
-                "pace": 1.0,
+                "pace": 1,
                 "speech_sample_rate": "24000",
                 "output_audio_codec": "wav",
                 "temperature": 0.65
@@ -3630,22 +4033,22 @@
               }
             }
           },
-          "404": {
-            "description": "No Exotel settings configured for this customer",
-            "content": {
-              "application/json": {
-                "example": {
-                  "error": "Exotel settings not found for this customer"
-                }
-              }
-            }
-          },
           "401": {
             "description": "Missing or invalid admin token",
             "content": {
               "application/json": {
                 "example": {
                   "error": "Missing or invalid x-admin-token"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Exotel settings configured for this customer",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Exotel settings not found for this customer"
                 }
               }
             }
@@ -4041,6 +4444,11 @@
                   "startPlaybackValueNew": {
                     "type": "string",
                     "description": "Audio URL for pre-call playback."
+                  },
+                  "phone_number_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Alternative to a literal `callerId` — references a row in company_phone_numbers belonging to this customer."
                   }
                 }
               },
@@ -4557,7 +4965,7 @@
                       },
                       "en-IN": {
                         "tts_speaker": "meera",
-                        "tts_pace": 1.0
+                        "tts_pace": 1
                       }
                     },
                     "is_default": true,
@@ -4605,7 +5013,7 @@
                   },
                   "en-IN": {
                     "tts_speaker": "meera",
-                    "tts_pace": 1.0
+                    "tts_pace": 1
                   }
                 },
                 "is_default": true
@@ -4717,7 +5125,7 @@
                   },
                   "mr-IN": {
                     "tts_speaker": "meera",
-                    "tts_pace": 1.0
+                    "tts_pace": 1
                   }
                 }
               }
@@ -5317,6 +5725,11 @@
                   "phone_number": {
                     "type": "string",
                     "example": "+91XXXXXXXXXX"
+                  },
+                  "phone_number_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Optional. Overrides the default caller ID with a specific company_phone_numbers row."
                   }
                 }
               }
@@ -5374,7 +5787,7 @@
             "content": {
               "application/json": {
                 "example": {
-                  "message": "Campaign deleted"
+                  "message": "Campaign deleted and audio file removed"
                 }
               }
             }
@@ -5486,6 +5899,3238 @@
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/customers/{customerId}/phone-numbers": {
+      "get": {
+        "tags": [
+          "Company Phone Numbers"
+        ],
+        "summary": "List phone numbers",
+        "description": "Returns every number owned by this company, primary first. Requires x-admin-token.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CompanyPhoneNumber"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Company Phone Numbers"
+        ],
+        "summary": "Add a phone number",
+        "description": "Adds a number to this company. Fails with 409 if the number is already assigned to any company (numbers are globally unique). Requires x-admin-token.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompanyPhoneNumberCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanyPhoneNumber"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "default_agent_id does not belong to this customer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Customer not found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "This phone number is already assigned to a company"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{customerId}/phone-numbers/{id}": {
+      "put": {
+        "tags": [
+          "Company Phone Numbers"
+        ],
+        "summary": "Update a phone number",
+        "description": "Partial update. Setting `is_primary: true` unsets any other primary number for this customer first. Requires x-admin-token.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompanyPhoneNumberUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanyPhoneNumber"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "default_agent_id does not belong to this customer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Phone number not found for this customer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Company Phone Numbers"
+        ],
+        "summary": "Delete a phone number",
+        "description": "Refuses (409) to delete the primary number while other numbers exist for this customer — set another number as primary first. Requires x-admin-token.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Phone number deleted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Phone number not found for this customer"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Cannot delete the primary number while other numbers exist — set another number as primary first"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cartesia-avatars/emotions": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "List supported emotion tags",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "emotions": [
+                    "neutral",
+                    "happy",
+                    "sad",
+                    "anger",
+                    "curious"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cartesia-avatars": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "List Cartesia avatars",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CartesiaAvatar"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Create Cartesia avatar",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CartesiaAvatarCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartesiaAvatar"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Cartesia avatar with this name already exists for this customer"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cartesia-avatars/{id}": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Get Cartesia avatar",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartesiaAvatar"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Update Cartesia avatar",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CartesiaAvatarUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartesiaAvatar"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Provide at least one field"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Cartesia avatar with this name already exists for this customer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Delete Cartesia avatar",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cartesia-avatars/{id}/set-default": {
+      "post": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Set as default Cartesia avatar",
+        "description": "Clears any other default for this customer and sets this row as default.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartesiaAvatar"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/browser": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Voice browser UI (HTML)",
+        "description": "Standalone voice picker page. No auth on the page itself; its API calls need x-api-key.",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/voices": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "List Cartesia voices",
+        "description": "Proxies Cartesia's voice catalog. Requires CARTESIA_API_KEY configured on the server.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "gender",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "is_owner",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expand_preview",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "voices": [],
+                  "has_more": false,
+                  "next_page": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be 1–100"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Cartesia voices failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "CARTESIA_API_KEY is not configured on this server"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/preview-file": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Proxy a Cartesia voice preview file",
+        "description": "url must be an https://*.cartesia.ai preview URL.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audio bytes",
+            "content": {
+              "audio/mpeg": {}
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "url must be a Cartesia preview URL"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Preview download failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "CARTESIA_API_KEY is not configured on this server"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/preview": {
+      "post": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Synthesize a Cartesia voice preview",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "voice_id"
+                ],
+                "properties": {
+                  "voice_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "language": {
+                    "type": "string",
+                    "maxLength": 16
+                  },
+                  "emotion": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Audio bytes (mp3). Headers: X-Voice-Id, X-Model-Id, X-Credits-Estimated.",
+            "content": {
+              "audio/mpeg": {}
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Preview failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "CARTESIA_API_KEY is not configured on this server"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/simulator": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Cartesia TTS simulator UI (HTML)",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/simulator/config": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Simulator defaults/config",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "model_id": "sonic-3.5",
+                  "voice_id": "",
+                  "cartesia_configured": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/simulator/turn": {
+      "post": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Run one simulator turn (speech/text in, humanized Cartesia TTS audio out)",
+        "description": "multipart/form-data (mode=speech, with `file`) or application/json (mode=text). Requires x-api-key and CARTESIA_API_KEY on the server.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "speech",
+                      "text"
+                    ],
+                    "default": "text"
+                  },
+                  "customer_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Must match the authenticated x-api-key's customer, if provided."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Required when mode=text."
+                  },
+                  "question": {
+                    "type": "string",
+                    "description": "Alias for `text`."
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Required when mode=speech. Recorded audio (WAV recommended)."
+                  },
+                  "stt_mode": {
+                    "type": "string",
+                    "enum": [
+                      "transcribe",
+                      "translate",
+                      "verbatim",
+                      "translit",
+                      "codemix"
+                    ],
+                    "default": "transcribe"
+                  },
+                  "target_language_code": {
+                    "type": "string",
+                    "description": "BCP-47 hint for STT language detection."
+                  },
+                  "skip_humanizer": {
+                    "type": "string",
+                    "default": "true"
+                  },
+                  "humanizer_system_prompt": {
+                    "type": "string"
+                  },
+                  "llm_temperature": {
+                    "type": "string",
+                    "description": "Stringified number; humanizer LLM sampling temperature."
+                  },
+                  "llm_max_tokens": {
+                    "type": "string",
+                    "description": "Stringified integer."
+                  },
+                  "llm_model": {
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "example": "sonic-3.5"
+                  },
+                  "voice_id": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string",
+                    "example": "en"
+                  },
+                  "gen_speed": {
+                    "type": "string"
+                  },
+                  "gen_volume": {
+                    "type": "string"
+                  },
+                  "gen_emotion": {
+                    "type": "string"
+                  },
+                  "output_preset": {
+                    "type": "string",
+                    "example": "mp3_44100"
+                  },
+                  "output_container": {
+                    "type": "string"
+                  },
+                  "output_sample_rate": {
+                    "type": "string"
+                  },
+                  "output_bit_rate": {
+                    "type": "string"
+                  },
+                  "pronunciation_dict_id": {
+                    "type": "string"
+                  },
+                  "legacy_speed": {
+                    "type": "string",
+                    "enum": [
+                      "slow",
+                      "normal",
+                      "fast"
+                    ]
+                  },
+                  "is_pvc_voice": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "speech",
+                      "text"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "voice_id": {
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turn processed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "mode": "speech",
+                  "customer_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "source_text": "What are your business hours?",
+                  "stt_language_code": "en-IN",
+                  "audio": {
+                    "content_type": "audio/mpeg",
+                    "base64": "..."
+                  },
+                  "timings": {
+                    "stt_ms": 400,
+                    "humanizer_ms": 300,
+                    "tts_ms": 900,
+                    "total_ms": 1700
+                  },
+                  "cartesia": {
+                    "model_id": "sonic-3.5",
+                    "voice_id": "...",
+                    "generation_config": {}
+                  },
+                  "api_usage": {
+                    "tts_credits": 42,
+                    "tts_cost_usd_estimated": 0.0004
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Text mode requires `text`"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "TTS provider request failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Provider is not configured for this tenant"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/elevenlabs/browser": {
+      "get": {
+        "tags": [
+          "ElevenLabs"
+        ],
+        "summary": "ElevenLabs voice browser UI (HTML)",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/elevenlabs/preview": {
+      "post": {
+        "tags": [
+          "ElevenLabs"
+        ],
+        "summary": "Synthesize an ElevenLabs voice preview",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "voice_id"
+                ],
+                "properties": {
+                  "voice_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "example": "eleven_turbo_v2_5"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "language_code": {
+                    "type": "string",
+                    "maxLength": 16
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Audio bytes (mp3). Headers: X-Voice-Id, X-Model-Id, X-Language-Code-Sent.",
+            "content": {
+              "audio/mpeg": {}
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Preview failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "ELEVENLABS_API_KEY is not configured on this server"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/google-tts/simulator": {
+      "get": {
+        "tags": [
+          "Google TTS"
+        ],
+        "summary": "Google Cloud TTS simulator UI (HTML)",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/google-tts/oauth/callback": {
+      "get": {
+        "tags": [
+          "Google TTS"
+        ],
+        "summary": "OAuth popup callback (HTML)",
+        "description": "Receives Google's OAuth redirect, posts the `code` back to the opener window via postMessage, then closes itself.",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/google-tts/oauth/token": {
+      "post": {
+        "tags": [
+          "Google TTS"
+        ],
+        "summary": "Exchange an OAuth authorization code for tokens",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "client_id",
+                  "client_secret",
+                  "redirect_uri"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "type": "string"
+                  },
+                  "redirect_uri": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "access_token": "...",
+                  "refresh_token": "...",
+                  "expires_in": 3599
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Missing required parameters (code, client_id, client_secret, redirect_uri)"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/google-tts/voices": {
+      "post": {
+        "tags": [
+          "Google TTS"
+        ],
+        "summary": "List Google Cloud TTS voices for an access token",
+        "description": "Auto-refreshes and retries once if the access token is expired and refresh_token/client_id/client_secret are provided.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "access_token"
+                ],
+                "properties": {
+                  "access_token": {
+                    "type": "string"
+                  },
+                  "refresh_token": {
+                    "type": "string"
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "voices": [],
+                  "access_token": "new-token-if-refreshed"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "access_token is required"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed fetching Google TTS voices"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/google-tts/simulator/turn": {
+      "post": {
+        "tags": [
+          "Google TTS"
+        ],
+        "summary": "Run one simulator turn (speech/text in, humanized Google TTS audio out)",
+        "description": "multipart/form-data or application/json. Requires a valid Google OAuth access_token (obtained via the oauth/token endpoint) — this is a bring-your-own-Google-Cloud-project simulator, not backed by a server-side Google credential.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "access_token"
+                ],
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "speech",
+                      "text"
+                    ],
+                    "default": "text"
+                  },
+                  "customer_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Must match the authenticated x-api-key's customer, if provided."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Required when mode=text."
+                  },
+                  "question": {
+                    "type": "string",
+                    "description": "Alias for `text`."
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Required when mode=speech. Recorded audio (WAV recommended)."
+                  },
+                  "stt_mode": {
+                    "type": "string",
+                    "enum": [
+                      "transcribe",
+                      "translate",
+                      "verbatim",
+                      "translit",
+                      "codemix"
+                    ],
+                    "default": "transcribe"
+                  },
+                  "target_language_code": {
+                    "type": "string",
+                    "description": "BCP-47 hint for STT language detection."
+                  },
+                  "skip_humanizer": {
+                    "type": "string",
+                    "description": "\"true\"/\"false\" — skip the OpenAI humanizer LLM pass and speak the source text verbatim."
+                  },
+                  "humanizer_system_prompt": {
+                    "type": "string"
+                  },
+                  "llm_temperature": {
+                    "type": "string",
+                    "description": "Stringified number; humanizer LLM sampling temperature."
+                  },
+                  "llm_max_tokens": {
+                    "type": "string",
+                    "description": "Stringified integer."
+                  },
+                  "llm_model": {
+                    "type": "string"
+                  },
+                  "access_token": {
+                    "type": "string"
+                  },
+                  "refresh_token": {
+                    "type": "string"
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "type": "string"
+                  },
+                  "voice_name": {
+                    "type": "string"
+                  },
+                  "language_code": {
+                    "type": "string"
+                  },
+                  "ssml_mode": {
+                    "type": "string"
+                  },
+                  "speaking_rate": {
+                    "type": "string"
+                  },
+                  "pitch": {
+                    "type": "string"
+                  },
+                  "volume_gain_db": {
+                    "type": "string"
+                  },
+                  "audio_encoding": {
+                    "type": "string",
+                    "enum": [
+                      "LINEAR16",
+                      "MP3",
+                      "OGG_OPUS",
+                      "MULAW",
+                      "ALAW"
+                    ]
+                  },
+                  "sample_rate_hertz": {
+                    "type": "string"
+                  },
+                  "effects_profile_id": {
+                    "type": "string",
+                    "description": "Comma-separated list."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turn processed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "mode": "speech",
+                  "customer_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "source_text": "What are your business hours?",
+                  "stt_language_code": "en-IN",
+                  "audio": {
+                    "content_type": "audio/mpeg",
+                    "base64": "..."
+                  },
+                  "timings": {
+                    "stt_ms": 400,
+                    "humanizer_ms": 300,
+                    "tts_ms": 900,
+                    "total_ms": 1700
+                  },
+                  "google": {
+                    "voice_name": "en-IN-Wavenet-D",
+                    "language_code": "en-IN"
+                  },
+                  "new_access_token": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Text mode requires `text`"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "TTS provider request failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Provider is not configured for this tenant"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/openai-tts/simulator": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "OpenAI TTS simulator UI (HTML)",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/openai-tts/simulator/config": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Simulator defaults/config",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "tts_model": "gpt-4o-mini-tts",
+                  "voice": "alloy"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/openai-tts/simulator/turn": {
+      "post": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Run one simulator turn (speech/text in, humanized OpenAI TTS audio out)",
+        "description": "multipart/form-data or application/json. Requires x-api-key and OPENAI_API_KEY on the server.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "speech",
+                      "text"
+                    ],
+                    "default": "text"
+                  },
+                  "customer_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Must match the authenticated x-api-key's customer, if provided."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Required when mode=text."
+                  },
+                  "question": {
+                    "type": "string",
+                    "description": "Alias for `text`."
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Required when mode=speech. Recorded audio (WAV recommended)."
+                  },
+                  "stt_mode": {
+                    "type": "string",
+                    "enum": [
+                      "transcribe",
+                      "translate",
+                      "verbatim",
+                      "translit",
+                      "codemix"
+                    ],
+                    "default": "transcribe"
+                  },
+                  "target_language_code": {
+                    "type": "string",
+                    "description": "BCP-47 hint for STT language detection."
+                  },
+                  "skip_humanizer": {
+                    "type": "string",
+                    "description": "\"true\"/\"false\" — skip the OpenAI humanizer LLM pass and speak the source text verbatim."
+                  },
+                  "humanizer_system_prompt": {
+                    "type": "string"
+                  },
+                  "llm_temperature": {
+                    "type": "string",
+                    "description": "Stringified number; humanizer LLM sampling temperature."
+                  },
+                  "llm_max_tokens": {
+                    "type": "string",
+                    "description": "Stringified integer."
+                  },
+                  "llm_model": {
+                    "type": "string"
+                  },
+                  "tts_model": {
+                    "type": "string",
+                    "example": "gpt-4o-mini-tts"
+                  },
+                  "voice": {
+                    "type": "string",
+                    "example": "alloy"
+                  },
+                  "speed": {
+                    "type": "string"
+                  },
+                  "tts_instructions": {
+                    "type": "string"
+                  },
+                  "tts_instructions_auto": {
+                    "type": "string"
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "mp3",
+                      "opus",
+                      "aac",
+                      "flac",
+                      "wav",
+                      "pcm"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turn processed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "mode": "speech",
+                  "customer_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "source_text": "What are your business hours?",
+                  "stt_language_code": "en-IN",
+                  "audio": {
+                    "content_type": "audio/mpeg",
+                    "base64": "..."
+                  },
+                  "timings": {
+                    "stt_ms": 400,
+                    "humanizer_ms": 300,
+                    "tts_ms": 900,
+                    "total_ms": 1700
+                  },
+                  "humanized_text": "...",
+                  "tts": {
+                    "model": "gpt-4o-mini-tts",
+                    "voice": "alloy"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Text mode requires `text`"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "TTS provider request failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Provider is not configured for this tenant"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/sarvam-tts/simulator": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Sarvam TTS simulator UI (HTML)",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/sarvam-tts/simulator/config": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Simulator defaults/config",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "model": "bulbul:v3",
+                  "speaker": "ritu"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/sarvam-tts/simulator/turn": {
+      "post": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Run one simulator turn (speech/text in, humanized Sarvam TTS audio out)",
+        "description": "multipart/form-data or application/json. Requires x-api-key and SARVAM_API_KEY on the server.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "speech",
+                      "text"
+                    ],
+                    "default": "text"
+                  },
+                  "customer_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Must match the authenticated x-api-key's customer, if provided."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Required when mode=text."
+                  },
+                  "question": {
+                    "type": "string",
+                    "description": "Alias for `text`."
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Required when mode=speech. Recorded audio (WAV recommended)."
+                  },
+                  "stt_mode": {
+                    "type": "string",
+                    "enum": [
+                      "transcribe",
+                      "translate",
+                      "verbatim",
+                      "translit",
+                      "codemix"
+                    ],
+                    "default": "transcribe"
+                  },
+                  "target_language_code": {
+                    "type": "string",
+                    "description": "BCP-47 hint for STT language detection."
+                  },
+                  "skip_humanizer": {
+                    "type": "string",
+                    "default": "true"
+                  },
+                  "humanizer_system_prompt": {
+                    "type": "string"
+                  },
+                  "llm_temperature": {
+                    "type": "string",
+                    "description": "Stringified number; humanizer LLM sampling temperature."
+                  },
+                  "llm_max_tokens": {
+                    "type": "string",
+                    "description": "Stringified integer."
+                  },
+                  "llm_model": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "enum": [
+                      "bulbul:v2",
+                      "bulbul:v3"
+                    ],
+                    "default": "bulbul:v3"
+                  },
+                  "speaker": {
+                    "type": "string",
+                    "default": "ritu"
+                  },
+                  "pace": {
+                    "type": "string"
+                  },
+                  "output_audio_codec": {
+                    "type": "string",
+                    "default": "wav"
+                  },
+                  "speech_sample_rate": {
+                    "type": "string",
+                    "default": "24000"
+                  },
+                  "dict_id": {
+                    "type": "string"
+                  },
+                  "temperature": {
+                    "type": "string",
+                    "description": "bulbul:v3 only."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turn processed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "mode": "speech",
+                  "customer_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                  "source_text": "What are your business hours?",
+                  "stt_language_code": "en-IN",
+                  "audio": {
+                    "content_type": "audio/mpeg",
+                    "base64": "..."
+                  },
+                  "timings": {
+                    "stt_ms": 400,
+                    "humanizer_ms": 300,
+                    "tts_ms": 900,
+                    "total_ms": 1700
+                  },
+                  "sarvam": {
+                    "model": "bulbul:v3",
+                    "speaker": "ritu",
+                    "target_language_code": "hi-IN"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Text mode requires `text`"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "TTS provider request failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Provider is not configured for this tenant"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/simulator": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "ElevenLabs-backed voice+RAG simulator UI (HTML)",
+        "description": "Runs the same RAG pipeline as /ask (`runAskPipeline`) end-to-end with real STT and ElevenLabs TTS — the closest local approximation of a live voicebot call, over plain HTTP.",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/simulator/config": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Simulator defaults/config",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/simulator/tenant-defaults": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Tenant-specific simulator defaults",
+        "description": "Resolves the authenticated customer's tts/stt provider, languages, and ElevenLabs model/language defaults.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "tts_provider": "sarvam",
+                  "stt_provider": "sarvam",
+                  "voicebot_multilingual": false,
+                  "default_language_code": "en-IN"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/simulator/turn": {
+      "post": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Run one simulator turn: STT → runAskPipeline (RAG) → ElevenLabs TTS",
+        "description": "multipart/form-data (mode=speech) or application/json (mode=text). Requires x-api-key and ELEVENLABS_API_KEY on the server.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "speech",
+                      "text"
+                    ],
+                    "default": "text"
+                  },
+                  "customer_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "question": {
+                    "type": "string",
+                    "description": "Required when mode=text."
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Required when mode=speech."
+                  },
+                  "stt_mode": {
+                    "type": "string",
+                    "enum": [
+                      "transcribe",
+                      "translate",
+                      "verbatim",
+                      "translit",
+                      "codemix"
+                    ]
+                  },
+                  "target_language_code": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Continue an existing chat_sessions row for multi-turn context."
+                  },
+                  "agent_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "additional_system_prompt": {
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "type": "string"
+                  },
+                  "voice_id": {
+                    "type": "string"
+                  },
+                  "stability": {
+                    "type": "string"
+                  },
+                  "similarity_boost": {
+                    "type": "string"
+                  },
+                  "style": {
+                    "type": "string"
+                  },
+                  "speed": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "mode": "speech",
+                  "customer_id": "...",
+                  "transcript": "What are your business hours?",
+                  "stt_language_code": "en-IN",
+                  "answer": "We're open 9 to 7, Monday to Saturday.",
+                  "source": "kb-direct",
+                  "session_id": "...",
+                  "agent_id": "...",
+                  "agent_name": "Support Agent",
+                  "tts_settings": {},
+                  "audio": {
+                    "sample_rate": 8000,
+                    "format": "pcm_s16le",
+                    "channels": 1,
+                    "base64": "...",
+                    "duration_ms": 1200
+                  },
+                  "timings": {
+                    "stt_ms": 400,
+                    "ask_ms": 200,
+                    "tts_ms": 500,
+                    "total_ms": 1100,
+                    "pipeline_timings": null
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Text mode requires `question`"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "RAG pipeline failed"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "TTS failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "ELEVENLABS_API_KEY is not configured on this server"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/simulator/save-character": {
+      "post": {
+        "tags": [
+          "Simulator Utilities"
+        ],
+        "summary": "Email a saved ElevenLabs simulator character",
+        "description": "Emails the character's settings + last output audio as an attachment. Requires SMTP configured on the server (SMTP_HOST, SMTP_USER, SMTP_PASS).",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatorCharacterSave"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "character_name": "My Voice",
+                  "message_id": "...",
+                  "transport": "smtp",
+                  "emailed_to": "convixx.ai@gmail.com"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed to send email"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Email is not configured. Set SMTP_HOST=smtp.gmail.com, SMTP_USER, SMTP_PASS (Gmail App Password)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/openai-tts/simulator/save-character": {
+      "post": {
+        "tags": [
+          "Simulator Utilities"
+        ],
+        "summary": "Email a saved OpenAI TTS simulator character",
+        "description": "Emails the character's settings + last output audio as an attachment. Requires SMTP configured on the server (SMTP_HOST, SMTP_USER, SMTP_PASS).",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatorCharacterSave"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "character_name": "My Voice",
+                  "message_id": "...",
+                  "transport": "smtp",
+                  "emailed_to": "convixx.ai@gmail.com"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed to send email"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Email is not configured. Set SMTP_HOST=smtp.gmail.com, SMTP_USER, SMTP_PASS (Gmail App Password)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia/simulator/save-character": {
+      "post": {
+        "tags": [
+          "Simulator Utilities"
+        ],
+        "summary": "Email a saved Cartesia simulator character",
+        "description": "Emails the character's settings + last output audio as an attachment. Requires SMTP configured on the server (SMTP_HOST, SMTP_USER, SMTP_PASS).",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatorCharacterSave"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "character_name": "My Voice",
+                  "message_id": "...",
+                  "transport": "smtp",
+                  "emailed_to": "convixx.ai@gmail.com"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed to send email"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Email is not configured. Set SMTP_HOST=smtp.gmail.com, SMTP_USER, SMTP_PASS (Gmail App Password)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/google-tts/simulator/save-character": {
+      "post": {
+        "tags": [
+          "Simulator Utilities"
+        ],
+        "summary": "Email a saved Google TTS simulator character",
+        "description": "Emails the character's settings + last output audio as an attachment. Requires SMTP configured on the server (SMTP_HOST, SMTP_USER, SMTP_PASS).",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatorCharacterSave"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "character_name": "My Voice",
+                  "message_id": "...",
+                  "transport": "smtp",
+                  "emailed_to": "convixx.ai@gmail.com"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed to send email"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Email is not configured. Set SMTP_HOST=smtp.gmail.com, SMTP_USER, SMTP_PASS (Gmail App Password)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/sarvam-tts/simulator/save-character": {
+      "post": {
+        "tags": [
+          "Simulator Utilities"
+        ],
+        "summary": "Email a saved Sarvam TTS simulator character",
+        "description": "Emails the character's settings + last output audio as an attachment. Requires SMTP configured on the server (SMTP_HOST, SMTP_USER, SMTP_PASS).",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatorCharacterSave"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "character_name": "My Voice",
+                  "message_id": "...",
+                  "transport": "smtp",
+                  "emailed_to": "convixx.ai@gmail.com"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed to send email"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Email is not configured. Set SMTP_HOST=smtp.gmail.com, SMTP_USER, SMTP_PASS (Gmail App Password)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/simulator/email-status": {
+      "get": {
+        "tags": [
+          "Simulator Utilities"
+        ],
+        "summary": "Check whether simulator save-to-email is configured",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "configured": true,
+                  "transport": "smtp"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/simulator/test-email": {
+      "post": {
+        "tags": [
+          "Simulator Utilities"
+        ],
+        "summary": "Send a test email to verify SMTP configuration",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sent",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "emailed_to": "convixx.ai@gmail.com"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed to send test email"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Email is not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS (Gmail App Password)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/test-ui": {
+      "get": {
+        "tags": [
+          "Voice"
+        ],
+        "summary": "Temporary browser UI for Sarvam STT/TTS (HTML)",
+        "description": "No auth on the page itself; its API calls still need x-api-key.",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/kb/sample": {
+      "get": {
+        "tags": [
+          "Knowledgebase"
+        ],
+        "summary": "Download a sample KB JSON file",
+        "description": "Returns a small example array of {question, answer} pairs as a downloadable attachment, matching the shape expected by /kb/upload and /kb/upload-file.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sample file",
+            "content": {
+              "application/json": {
+                "example": [
+                  {
+                    "question": "What are the check-in and check-out timings?",
+                    "answer": "Check-in is 2:00 PM, check-out is 11:00 AM."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/industry-context": {
+      "get": {
+        "tags": [
+          "Settings"
+        ],
+        "summary": "Get industry context",
+        "description": "Free-form JSON used to steer RAG tone/domain grounding for this tenant.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "industry_context": {}
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Customer not found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Settings"
+        ],
+        "summary": "Update industry context",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "industry_context"
+                ],
+                "properties": {
+                  "industry_context": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "industry_context": {}
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Validation error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Customer not found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exotel-callback/status": {
+      "post": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "Legacy Exotel StatusCallback (no customerId, matched by CallSid)",
+        "description": "Older status-callback shape kept for backward compatibility. Prefer POST /exotel/status-callback/{customerId} for new integrations, which supports the webhook_secret token and matches by the CustomField session id first. Updates exotel_call_sessions.metadata.callee_answered when the callee leg of an outbound Connect-two-numbers call answers.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Raw Exotel StatusCallback payload (CallSid, EventType, Legs[], etc.)."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exotel/status-callback/{customerId}": {
+      "post": {
+        "tags": [
+          "Exotel Voicebot"
+        ],
+        "summary": "Exotel StatusCallback (per-tenant)",
+        "description": "Exotel posts call-lifecycle events here (set as `statusCallback` on outbound Connect-two-numbers calls). Optional `?token=` query param must match customer_exotel_settings.webhook_secret when set. Matches the originating outbound_campaign/call session via the `ccs=<uuid>` marker in CustomField, falling back to CallSid. Updates exotel_call_sessions.metadata.callee_answered when the callee leg answers.",
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match customer_exotel_settings.webhook_secret if one is set."
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Unauthorized"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia-test-console": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Voice test console UI (HTML) — TEMPORARY/DIAGNOSTIC",
+        "description": "Records mic audio, streams the answer via SSE, plays Cartesia TTS back incrementally. Not a general-purpose API — hardcoded to one temp test customer seeded by scripts/create-temp-voice-test-customer.ts.",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia-test-console/config": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Resolve the temp test customer's config (TEMPORARY/DIAGNOSTIC)",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "cartesia_configured": true,
+                  "customer_id": "...",
+                  "agent_id": "...",
+                  "api_key": "temp_test_...",
+                  "voice_id": "...",
+                  "model_id": "sonic-3.5"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Temp test customer not found. Run: npx ts-node scripts/create-temp-voice-test-customer.ts (from apps/api)"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia-test-console/sample-audio/{name}": {
+      "get": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Serve a pre-recorded sample WAV for automated testing (TEMPORARY/DIAGNOSTIC)",
+        "description": "Debug-only: lets this console be exercised end-to-end without a physical microphone. `name` must match `^[a-zA-Z0-9_-]+\\.wav$`.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]+\\.wav$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WAV audio",
+            "content": {
+              "audio/wav": {}
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid filename"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "not found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia-test-console/turn": {
+      "post": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Batch turn: STT → runAskPipeline (RAG) → one-shot Cartesia TTS (TEMPORARY/DIAGNOSTIC)",
+        "description": "multipart/form-data with a `file` field (recorded WAV). Returns the full answer and audio in one response, with a stage-by-stage timings breakdown. Uses the hardcoded temp test customer regardless of x-api-key value (any key works — the customer is resolved server-side by a marker name).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "example": {
+                  "transcript": "Do you offer a free trial?",
+                  "answer": "Yes, we offer a 14-day free trial...",
+                  "source": "kb-direct",
+                  "audio": {
+                    "content_type": "audio/mpeg",
+                    "bytes": 90324,
+                    "base64": "..."
+                  },
+                  "timings": {
+                    "stt_ms": 654,
+                    "ask_ms": 161,
+                    "tts_ms": 1169,
+                    "tts_ttfb_ms": 135,
+                    "tts_wall_ms": 1171,
+                    "total_ms": 2006
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Multipart field `file` with recorded audio is required."
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Temp test customer not found — run the seed script first."
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "RAG pipeline failed"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Cartesia TTS failed"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "CARTESIA_API_KEY is not configured on this server"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/cartesia-test-console/turn-stream": {
+      "post": {
+        "tags": [
+          "Cartesia"
+        ],
+        "summary": "Streaming turn: STT → token-streamed RAG → chunked, concurrent Cartesia TTS via SSE (TEMPORARY/DIAGNOSTIC)",
+        "description": "multipart/form-data with a `file` field (recorded WAV). Response is `text/event-stream` (Server-Sent Events), not a single JSON body: events are `transcript`, `retrieval_done`, `first_token`, `text_delta` (repeated), `answer_complete`, `first_audio`, `audio_chunk` (repeated, one per synthesized sentence, in order), `done`, and `error`. Sentence-level TTS chunks synthesize concurrently (capped at 2 in flight, matching this Cartesia account's concurrency limit) while later text is still streaming from the LLM, so audio for the first sentence can start playing before the full answer is generated.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream. Example frames (each `event:`/`data:` pair):\ntranscript {\"transcript\":\"...\",\"stt_ms\":414}\ntext_delta {\"delta\":\"Yes\"}\naudio_chunk {\"index\":0,\"text\":\"...\",\"base64\":\"...\",\"contentType\":\"audio/mpeg\",\"bytes\":95339,\"synthMs\":1127}\ndone {\"total_ms\":6301,\"first_token_ms\":4445,\"first_audio_ms\":6300,\"chunk_count\":1}",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Multipart field `file` with recorded audio is required."
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Temp test customer not found — run the seed script first."
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Temp agent has no cartesia_avatar_id configured."
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "CARTESIA_API_KEY is not configured on this server"
+                }
+              }
+            }
           }
         }
       }

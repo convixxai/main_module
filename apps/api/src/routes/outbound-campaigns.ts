@@ -10,7 +10,27 @@ import { getExotelSettings, createCallSession } from "../services/exotel-setting
 import { getCustomerSettings } from "../services/customer-settings";
 import { exotelConnectCall, restApiBaseUrlFromSubdomain } from "../services/exotel-connect-call";
 import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
+import { resolvePhoneNumberById } from "../services/company-phone-numbers";
 import { env } from "../config/env";
+import type { ExotelSettings } from "../services/exotel-settings";
+
+/**
+ * Feature 3 (one company, many numbers): resolves the caller ID to use for
+ * an outbound call. If `phoneNumberId` names an enabled number belonging to
+ * this customer, uses it; otherwise falls back to exactly today's
+ * `default_outbound_caller_id || inbound_phone_number` chain, unchanged.
+ */
+async function resolveOutboundCallerId(
+  customerId: string,
+  phoneNumberId: string | null | undefined,
+  settings: ExotelSettings
+): Promise<string | null> {
+  if (phoneNumberId) {
+    const number = await resolvePhoneNumberById(customerId, phoneNumberId);
+    if (number) return number.phone_number;
+  }
+  return settings.default_outbound_caller_id || settings.inbound_phone_number || null;
+}
 
 const CAMPAIGN_UPLOAD_DIR = path.join(process.cwd(), "uploads", "campaigns");
 
@@ -23,6 +43,7 @@ const createCampaignSchema = z.object({
   name: z.string().min(1),
   script_text: z.string().min(1),
   language_code: z.string().default("en-IN"),
+  phone_number_id: z.string().uuid().optional(),
 });
 
 const addLeadsSchema = z.object({
@@ -31,6 +52,7 @@ const addLeadsSchema = z.object({
 
 const normalOutboundCallSchema = z.object({
   phone_number: z.string().min(3),
+  phone_number_id: z.string().uuid().optional(),
 });
 
 const triggerCampaignSchema = z.object({
@@ -49,7 +71,14 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       }
 
       const customerId = request.customerId!;
-      const { name, script_text, language_code } = body.data;
+      const { name, script_text, language_code, phone_number_id } = body.data;
+
+      if (phone_number_id) {
+        const number = await resolvePhoneNumberById(customerId, phone_number_id);
+        if (!number) {
+          return reply.status(400).send({ error: "phone_number_id does not belong to this customer or is disabled" });
+        }
+      }
 
       // Generate Audio via Sarvam TTS
       try {
@@ -73,10 +102,10 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         fs.writeFileSync(filePath, ttsResult.audioBuffer);
 
         const result = await pool.query(
-          `INSERT INTO outbound_campaigns (id, customer_id, name, script_text, language_code, audio_file_path, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `INSERT INTO outbound_campaigns (id, customer_id, name, script_text, language_code, audio_file_path, status, phone_number_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING *`,
-          [campaignId, customerId, name, script_text, language_code, filePath, "ready"]
+          [campaignId, customerId, name, script_text, language_code, filePath, "ready", phone_number_id ?? null]
         );
 
         return reply.status(201).send(result.rows[0]);
@@ -201,17 +230,21 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         failed: 0,
       };
 
+      // Feature 3 (one company, many numbers): resolve once per trigger call
+      // (same caller ID for every lead in this run) rather than per-lead.
+      const resolvedCallerId = await resolveOutboundCallerId(customerId, campaign.phone_number_id, settings);
+
       // Background triggering (simplified one-by-one for now)
       // In a real production app, this would be a background queue.
       for (const lead of leads) {
         try {
-          
+
           const pendingSessionId = await createCallSession({
             customerId,
             callSid: null,
             streamSid: null,
             direction: "outbound",
-            fromNumber: settings.default_outbound_caller_id || settings.inbound_phone_number || "",
+            fromNumber: resolvedCallerId || "",
             toNumber: lead.phone_number,
             chatSessionId: null,
             metadata: {
@@ -225,18 +258,18 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
           });
 
           const customField = `campaign_id=${id}|ccs=${pendingSessionId}`;
-          const callerId = settings.default_outbound_caller_id || settings.inbound_phone_number;
+          const callerId = resolvedCallerId;
 
           const { voicebot_wss_url: streamUrl, voicebot_status_callback_url: statusCallback } = voicebotUrlsForCustomer(customerId, request);
-          
+
           app.log.info({ streamUrl, statusCallback, customerId }, "Triggering outbound campaign call via Exotel");
-          
+
           const exotelResult = await exotelConnectCall({
             accountSid: settings.exotel_account_sid!,
             apiKey: settings.exotel_api_key!,
             apiToken: settings.exotel_api_token!,
             restApiBaseUrl: restApiBaseUrlFromSubdomain(settings.exotel_subdomain) || undefined,
-            from: settings.default_outbound_caller_id || settings.inbound_phone_number || "",
+            from: resolvedCallerId || "",
             to: lead.phone_number,
             callerId: callerId!,
             streamUrl,
@@ -320,13 +353,14 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       }
 
       const customerId = request.customerId!;
-      const { phone_number } = body.data;
+      const { phone_number, phone_number_id } = body.data;
 
       const settings = await getExotelSettings(customerId);
       const customerSettings = await getCustomerSettings(customerId);
       if (!settings || !settings.is_enabled) {
         return reply.status(400).send({ error: "Exotel not configured" });
       }
+      const resolvedCallerId = await resolveOutboundCallerId(customerId, phone_number_id, settings);
 
       try {
         const pendingSessionId = await createCallSession({
@@ -334,7 +368,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
           callSid: null,
           streamSid: null,
           direction: "outbound",
-          fromNumber: settings.default_outbound_caller_id || settings.inbound_phone_number || "",
+          fromNumber: resolvedCallerId || "",
           toNumber: phone_number,
           chatSessionId: null,
           metadata: {
@@ -346,7 +380,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         });
 
         const customField = `ccs=${pendingSessionId}`;
-        const callerId = settings.default_outbound_caller_id || settings.inbound_phone_number;
+        const callerId = resolvedCallerId;
 
         const { voicebot_wss_url: streamUrl, voicebot_status_callback_url: statusCallback } = voicebotUrlsForCustomer(customerId, request);
         
@@ -357,7 +391,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
           apiKey: settings.exotel_api_key!,
           apiToken: settings.exotel_api_token!,
           restApiBaseUrl: restApiBaseUrlFromSubdomain(settings.exotel_subdomain) || undefined,
-          from: settings.default_outbound_caller_id || settings.inbound_phone_number || "",
+          from: resolvedCallerId || "",
           to: phone_number,
           callerId: callerId!,
           streamUrl,

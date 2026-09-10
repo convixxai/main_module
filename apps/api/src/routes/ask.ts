@@ -77,6 +77,7 @@ interface ChatMessage {
 
 const DIRECT_MATCH_THRESHOLD = 0.3;
 const RELATED_SCOPE_DISTANCE_THRESHOLD_DEFAULT = 0.55;
+const OUT_OF_SCOPE_DISTANCE_THRESHOLD_DEFAULT = 0.8;
 
 function ragTopKAsk(cs: CustomerSettings | null): number {
   const v = cs?.rag_top_k;
@@ -101,6 +102,14 @@ function relatedScopeDistanceThresholdAsk(cs: CustomerSettings | null): number {
   if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2)
     return Number(v);
   return RELATED_SCOPE_DISTANCE_THRESHOLD_DEFAULT;
+}
+
+/** Tenant-tunable "definitely out of scope" cosine-distance cutoff. NULL/invalid -> 0.8 (unchanged default). */
+function outOfScopeDistanceThresholdAsk(cs: CustomerSettings | null): number {
+  const v = cs?.out_of_scope_distance_threshold;
+  if (v != null && Number.isFinite(v) && Number(v) > 0 && Number(v) < 2)
+    return Number(v);
+  return OUT_OF_SCOPE_DISTANCE_THRESHOLD_DEFAULT;
 }
 
 function outOfScopeMessageAsk(cs: CustomerSettings | null): string {
@@ -625,6 +634,7 @@ export async function runAskPipeline(params: {
   const directTh = ragDirectThresholdAsk(custSettings ?? null);
   const relatedScopeTh = relatedScopeDistanceThresholdAsk(custSettings ?? null);
   const outOfScopeMessage = outOfScopeMessageAsk(custSettings ?? null);
+  const outOfScopeTh = outOfScopeDistanceThresholdAsk(custSettings ?? null);
 
   const tVec0 = Date.now();
   const [matches, history] = await Promise.all([
@@ -690,13 +700,14 @@ export async function runAskPipeline(params: {
     allowRelatedGeneralAnswers &&
     !isShortQuery &&
     Number.isFinite(topDistance) &&
-    topDistance > 0.8;
+    topDistance > outOfScopeTh;
 
   if (definitelyOutOfScope) {
     trace?.("pipeline_exit", {
       branch: "rag_last_resort",
       answer_source: "out_of_scope_distance_gate",
       top_distance: topDistance,
+      out_of_scope_distance_threshold: outOfScopeTh,
       related_scope_distance_threshold: relatedScopeTh,
     });
     saveMessage(sessionId, "assistant", outOfScopeMessage, "none");

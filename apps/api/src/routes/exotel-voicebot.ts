@@ -126,6 +126,7 @@ import {
   redactOutboundExotelForLog,
 } from "../services/voicebot-trace";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
+import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
 import { createRagTrace } from "../services/rag-trace";
 import { relaxAgentPrompt, RAG_MULTILINGUAL_GRAMMAR_RULE, RAG_STT_ENTITY_INTEGRITY_RULE } from "../services/rag-prompt-utils";
 import {
@@ -380,6 +381,9 @@ function voiceTtsCanRun(session: VoicebotSession): boolean {
       )
     );
   }
+  if (p === "cartesia") {
+    return !!env.cartesia.apiKey;
+  }
   return !!env.sarvam.apiKey;
 }
 
@@ -399,6 +403,10 @@ function voiceTtsBlockingReason(session: VoicebotSession): string {
       return "no ElevenLabs voice_id (set agent tts_speaker, customer tts_default_speaker, elevenlabs avatar, ELEVENLABS_DEFAULT_VOICE_ID, or ELEVENLABS_DEFAULT_INDIAN_MULTILINGUAL_VOICE_ID; built-in Indian default applies when none are set)";
     }
     return "ElevenLabs TTS unavailable (check configuration)";
+  }
+  if (p === "cartesia") {
+    if (!env.cartesia.apiKey) return "CARTESIA_API_KEY is not set";
+    return "Cartesia TTS unavailable (check configuration)";
   }
   if (!env.sarvam.apiKey) return "SARVAM_API_KEY is not set";
   return "Sarvam TTS unavailable (check configuration)";
@@ -901,135 +909,125 @@ function persistSessionActiveLanguage(
   });
 }
 
-type LanguageSwitchPolicyOutcome =
+/**
+ * Decides whether a detected language mismatch should be surfaced to the
+ * caller as an explicit "which language would you like?" question, or
+ * ignored for now. Deliberately NEVER returns a silent-switch action — the
+ * only two outcomes are "keep answering in the current session language"
+ * or "offer an explicit choice." See exotel-voicebot.ts language-switch
+ * section notes (2026-09) for why: a single noisy/mis-detected turn used to
+ * flip the reply language with no warning, which is exactly what callers
+ * experienced as "it randomly switched languages."
+ */
+type LanguageSwitchDecision =
   | { action: "continue" }
-  | { action: "pending"; target: string; confidence: number | null };
+  | { action: "offer"; target: string; confidence: number | null };
 
-function applyLanguageSwitchPolicy(
+export function decideLanguageSwitchAction(
   session: VoicebotSession,
+  cust: CustomerSettings | null | undefined,
   params: {
     multilingual: boolean;
-    nextQueryIndex: number;
     clampedDetected: string;
-    detectedRaw: string;
     languageProbability: number | null;
     sttProvider: string;
     allowedNorm: string[];
     log?: FastifyRequest["log"];
   }
-): LanguageSwitchPolicyOutcome {
-  const {
-    multilingual,
-    nextQueryIndex,
-    clampedDetected,
-    languageProbability,
-    sttProvider,
-    allowedNorm,
-  } = params;
-  if (!multilingual) {
-    return { action: "continue" };
-  }
+): LanguageSwitchDecision {
+  const { multilingual, clampedDetected, languageProbability, sttProvider, allowedNorm } = params;
+  if (!multilingual) return { action: "continue" };
+
   const active = normalizeBcp47Tag(
     session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
   );
   if (!isLanguageInAllowedList(clampedDetected, allowedNorm)) {
-    voiceTrace(params.log, "voicebot.language.policy.detected_disallowed", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      clamped_detected: clampedDetected,
-      active_language: active,
-    });
     return { action: "continue" };
   }
   if (languagesLooselyEqual(clampedDetected, active)) {
     return { action: "continue" };
   }
-  // Early window: first 3 customer queries.
-  // Within this window, silent-switch only with high-confidence Sarvam detection.
-  // After this window, any discrepancy triggers a confirmation prompt.
-  const EARLY_SWITCH_QUERY_LIMIT = 3;
-  const conf = sttProvider === "sarvam" ? params.languageProbability : null;
-  const silentOk =
-    nextQueryIndex <= EARLY_SWITCH_QUERY_LIMIT && conf != null && conf > 0.8;
-  if (silentOk) {
-    persistSessionActiveLanguage(session, clampedDetected, params.log);
-    voiceTrace(params.log, "voicebot.language.silent_switch_early_window", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      from: active,
-      to: normalizeBcp47Tag(clampedDetected),
-      query_index: nextQueryIndex,
-      language_probability: conf,
-    });
-    return { action: "continue" };
+
+  // Track consecutive detections of the same different language — a single
+  // noisy/mis-detected turn should never trigger anything by itself.
+  if (session.discrepantLanguageTarget === clampedDetected) {
+    session.discrepantLanguageCount = (session.discrepantLanguageCount || 0) + 1;
+  } else {
+    session.discrepantLanguageTarget = clampedDetected;
+    session.discrepantLanguageCount = 1;
   }
-  if (nextQueryIndex <= EARLY_SWITCH_QUERY_LIMIT) {
-    voiceTrace(params.log, "voicebot.language.early_no_switch", {
+
+  const conf = sttProvider === "sarvam" ? languageProbability : null;
+  const canOffer =
+    cust?.allow_language_switch === true &&
+    !session.languageSwitchOfferedThisCall &&
+    !session.pendingLanguageSwitch &&
+    (session.discrepantLanguageCount ?? 0) >= 2;
+
+  if (!canOffer) {
+    voiceTrace(params.log, "voicebot.language.discrepancy_not_offered", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
       active_language: active,
       detected_clamped: clampedDetected,
-      language_probability: conf,
-      query_index: nextQueryIndex,
-      early_switch_query_limit: EARLY_SWITCH_QUERY_LIMIT,
+      discrepant_count: session.discrepantLanguageCount ?? 0,
+      allow_language_switch: cust?.allow_language_switch === true,
+      already_offered_this_call: session.languageSwitchOfferedThisCall === true,
     });
     return { action: "continue" };
   }
-  return {
-    action: "pending",
-    target: normalizeBcp47Tag(clampedDetected),
-    confidence: conf,
-  };
+
+  return { action: "offer", target: normalizeBcp47Tag(clampedDetected), confidence: conf };
 }
 
-function languageSwitchConfirmPrompt(activeTag: string, targetTag: string): string {
-  return `I detected ${targetTag}. Would you like to continue in that language? Please say yes or no.`;
+/** Builds the "which language would you like?" prompt from the tenant's configured template. */
+export function languageSwitchOptionsPrompt(cust: CustomerSettings | null | undefined, allowedNorm: string[]): string {
+  const template =
+    cust?.language_switch_options_prompt?.trim() || "Please say one of: {LANGUAGE_LIST}.";
+  return template.replace("{LANGUAGE_LIST}", humanizeAllowedList(allowedNorm));
 }
 
-function parseLanguageSwitchConfirmation(transcript: string): "yes" | "no" | "unclear" {
+/**
+ * Parses the customer's reply to a pending language-switch offer. Accepts
+ * either a directly-named language (from the tenant's allowed list) or a
+ * tenant-configured yes/no word confirming/declining the best-guess target.
+ */
+export function parseLanguageChoice(
+  transcript: string,
+  allowedNorm: string[],
+  yesWords: string[],
+  noWords: string[]
+): { kind: "language"; target: string } | { kind: "yes" } | { kind: "no" } | { kind: "unclear" } {
   const t = transcript.trim().toLowerCase();
-  if (!t) return "unclear";
-  if (
-    /\bhindi\b/.test(t) ||
-    /\bmarathi\b/.test(t) ||
-    /\benglish\b/.test(t) ||
-    /\bgujarati\b/.test(t) ||
-    /\bchange\b/.test(t) ||
-    /\bswitch\b/.test(t)
-  ) {
-    return "yes";
+  if (!t) return { kind: "unclear" };
+
+  // Native-language self-names, so "hindi mein" / "मराठीत" etc. are recognized
+  // even though LANG_LABEL's values are English names.
+  const NATIVE_NAMES: Record<string, string[]> = {
+    "hi-IN": ["hindi", "हिंदी", "हिन्दी"],
+    "mr-IN": ["marathi", "मराठी"],
+    "en-IN": ["english", "इंग्लिश"],
+    "gu-IN": ["gujarati", "ગુજરાતી"],
+    "bn-IN": ["bengali", "বাংলা"],
+    "kn-IN": ["kannada", "ಕನ್ನಡ"],
+    "ml-IN": ["malayalam", "മലയാളം"],
+    "od-IN": ["odia", "ଓଡ଼ିଆ"],
+    "pa-IN": ["punjabi", "ਪੰਜਾਬੀ"],
+    "ta-IN": ["tamil", "தமிழ்"],
+    "te-IN": ["telugu", "తెలుగు"],
+  };
+  for (const tag of allowedNorm) {
+    const names = NATIVE_NAMES[tag] ?? [LANG_LABEL[tag]?.toLowerCase() ?? ""];
+    if (names.some((n) => n && t.includes(n.toLowerCase()))) {
+      return { kind: "language", target: tag };
+    }
   }
-  if (
-    /\bno\b/.test(t) ||
-    /\bnahi\b/.test(t) ||
-    /\bनहीं\b/.test(t) ||
-    /\bmat\b/.test(t) ||
-    /\bcancel\b/.test(t) ||
-    /\bdon't\b/.test(t) ||
-    /\bdo not\b/.test(t) ||
-    /\bnope\b/.test(t) ||
-    /\bdon't switch\b/.test(t)
-  ) {
-    return "no";
-  }
-  if (
-    /\byes\b/.test(t) ||
-    /\byeah\b/.test(t) ||
-    /\bokay\b/.test(t) ||
-    /\bok\b/.test(t) ||
-    /\bsure\b/.test(t) ||
-    /\bhaan\b/.test(t) ||
-    /\bha\b/.test(t) ||
-    /\bहाँ\b/.test(t) ||
-    /\bजी\b/.test(t) ||
-    /\btheek\b/.test(t) ||
-    /\bthik\b/.test(t) ||
-    /\bswitch\b/.test(t)
-  ) {
-    return "yes";
-  }
-  if (/^[ny]$/i.test(t)) return t === "y" || t === "Y" ? "yes" : "no";
-  return "unclear";
+
+  const norm = (w: string) => w.trim().toLowerCase();
+  if (yesWords.some((w) => norm(w) && t.includes(norm(w)))) return { kind: "yes" };
+  if (noWords.some((w) => norm(w) && t.includes(norm(w)))) return { kind: "no" };
+
+  return { kind: "unclear" };
 }
 
 /**
@@ -1253,14 +1251,32 @@ async function bootstrapVoicebotChatSession(
   );
   session.chatSessionId = sessionResult.rows[0].id as string;
 
-  const agentsResult = await pool.query(
-    `SELECT id, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
-            avatar_id, elevenlabs_avatar_id
+  // Feature 3 (one company, many numbers): prefer the dialed number's
+  // configured default agent, if any; falls back to today's "oldest active
+  // agent" query when the number has no company_phone_numbers row, no
+  // default_agent_id set (e.g. both live customers today), or that agent is
+  // no longer active (deleted/deactivated since the number was configured).
+  const agentSelectColumns = `id, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+            avatar_id, elevenlabs_avatar_id`;
+  const oldestActiveAgentQuery = `SELECT ${agentSelectColumns}
      FROM agents
      WHERE customer_id = $1 AND is_active = TRUE
-     ORDER BY created_at ASC LIMIT 1`,
-    [session.customerId]
-  );
+     ORDER BY created_at ASC LIMIT 1`;
+
+  const numberDefaultAgentId = await resolveDefaultAgentForNumber(session.customerId, session.to);
+  let agentsResult = numberDefaultAgentId
+    ? await pool.query(
+        `SELECT ${agentSelectColumns}
+         FROM agents
+         WHERE id = $1 AND customer_id = $2 AND is_active = TRUE
+         LIMIT 1`,
+        [numberDefaultAgentId, session.customerId]
+      )
+    : await pool.query(oldestActiveAgentQuery, [session.customerId]);
+
+  if (agentsResult.rows.length === 0 && numberDefaultAgentId) {
+    agentsResult = await pool.query(oldestActiveAgentQuery, [session.customerId]);
+  }
   if (agentsResult.rows.length > 0) {
     const row = agentsResult.rows[0];
     session.agentId = row.id as string;
@@ -2985,6 +3001,45 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
   }
 
   // ------------------------------------------------------------------
+  // Explicit "please switch language" request (customer_settings.language_switch_trigger_keywords).
+  // Independent of the auto-detection path and NOT gated by
+  // languageSwitchOfferedThisCall — the customer can always ask again.
+  // ------------------------------------------------------------------
+  if (
+    multilingual &&
+    csTurn?.allow_language_switch === true &&
+    csTurn?.language_switch_trigger_keywords?.length &&
+    !session.pendingLanguageSwitch &&
+    textMatchesAnyPhrase(transcript, csTurn.language_switch_trigger_keywords)
+  ) {
+    const allowedNormTurn = normalizeAllowedLangList(
+      session.allowedLanguageCodes,
+      session.defaultLanguageCode || "en-IN"
+    );
+    const activeBcpTurn = normalizeBcp47Tag(
+      session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+    );
+    session.pendingLanguageSwitch = {
+      targetLanguage: activeBcpTurn,
+      deferredTranscript: "",
+      fromLanguage: activeBcpTurn,
+      confidence: null,
+      unclearRetries: 0,
+    };
+    voiceTrace(log, "voicebot.language.explicit_switch_requested", {
+      customerId: session.customerId,
+      stream_sid: session.streamSid,
+      transcript_preview: transcript.slice(0, 200),
+    });
+    const prompt = languageSwitchOptionsPrompt(csTurn, allowedNormTurn);
+    await appendVoiceTurnToChat(session, transcript, prompt, {
+      assistantSource: "language_switch_offered_explicit",
+    });
+    await speakToExotel(ws, session, prompt, ttsLanguage, log);
+    return;
+  }
+
+  // ------------------------------------------------------------------
   // Filler-only utterance handling (hmm, um, uh, …)
   // English-only tenants: voicebot_multilingual=false and a single en-* allowed language.
   // Controlled by customer_settings.filler_ack_enabled (per-tenant).
@@ -3745,9 +3800,17 @@ async function processUtterance(
         });
         return;
       }
-      const reply = parseLanguageSwitchConfirmation(transcript);
-      if (reply === "yes") {
-        persistSessionActiveLanguage(session, pending.targetLanguage, log);
+      const choice = parseLanguageChoice(
+        transcript,
+        allowedNorm,
+        csUtterance?.language_switch_yes_words ?? [],
+        csUtterance?.language_switch_no_words ?? []
+      );
+      const chosenTarget =
+        choice.kind === "language" ? choice.target : choice.kind === "yes" ? pending.targetLanguage : null;
+
+      if (chosenTarget) {
+        persistSessionActiveLanguage(session, chosenTarget, log);
         session.pendingLanguageSwitch = null;
         session.effectiveSttLanguageThisTurn = normalizeBcp47Tag(
           session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
@@ -3760,11 +3823,11 @@ async function processUtterance(
           ).catch(() => { });
         }
 
-        const targetLabel = LANG_LABEL[pending.targetLanguage] ?? pending.targetLanguage;
+        const targetLabel = LANG_LABEL[chosenTarget] ?? chosenTarget;
         let ackMsg = `Okay, let's continue in ${targetLabel}. How can I help you?`;
-        if (pending.targetLanguage.startsWith("hi")) {
+        if (chosenTarget.startsWith("hi")) {
           ackMsg = `ठीक है, अब हम हिंदी में बात करेंगे। मैं आपकी क्या मदद कर सकता हूँ?`;
-        } else if (pending.targetLanguage.startsWith("mr")) {
+        } else if (chosenTarget.startsWith("mr")) {
           ackMsg = `ठीक आहे, आता आपण मराठीत बोलूया. मी तुम्हाला कशी मदत करू?`;
         }
 
@@ -3785,14 +3848,14 @@ async function processUtterance(
           await appendVoiceTurnToChat(session, transcript, ackMsg, {
             assistantSource: "language_switch_acknowledged",
           });
-          const ttsLang = multilingual ? mapToTtsLanguage(pending.targetLanguage) : "en-IN";
+          const ttsLang = multilingual ? mapToTtsLanguage(chosenTarget) : "en-IN";
           await speakToExotel(ws, session, ackMsg, ttsLang, log);
         }
         return;
       }
-      if (reply === "no") {
+      if (choice.kind === "no") {
         session.pendingLanguageSwitch = null;
-        const msg = `Okay, we will continue in ${activeBcp}.`;
+        const msg = `Okay, we will continue in ${LANG_LABEL[activeBcp] ?? activeBcp}.`;
         await appendVoiceTurnToChat(session, transcript, msg, {
           assistantSource: "language_switch_declined",
         });
@@ -3800,8 +3863,9 @@ async function processUtterance(
         return;
       }
       pending.unclearRetries += 1;
-      if (pending.unclearRetries <= 1) {
-        const prompt = languageSwitchConfirmPrompt(activeBcp, pending.targetLanguage);
+      const maxAttempts = csUtterance?.language_switch_max_attempts ?? 2;
+      if (pending.unclearRetries <= maxAttempts) {
+        const prompt = languageSwitchOptionsPrompt(csUtterance, allowedNorm);
         await appendVoiceTurnToChat(session, transcript, prompt, {
           assistantSource: "language_switch_reprompt",
         });
@@ -3809,7 +3873,7 @@ async function processUtterance(
         return;
       }
       session.pendingLanguageSwitch = null;
-      const msg = `I will continue in ${activeBcp}.`;
+      const msg = `I will continue in ${LANG_LABEL[activeBcp] ?? activeBcp}.`;
       await appendVoiceTurnToChat(session, transcript, msg, {
         assistantSource: "language_switch_unclear_abort",
       });
@@ -3915,61 +3979,60 @@ async function processUtterance(
       session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
     );
 
-    const isDifferentLang = !languagesLooselyEqual(clampedForPolicy, activeBcp);
-    if (isDifferentLang) {
-      if (session.discrepantLanguageTarget === clampedForPolicy) {
-        session.discrepantLanguageCount = (session.discrepantLanguageCount || 0) + 1;
-      } else {
-        session.discrepantLanguageTarget = clampedForPolicy;
-        session.discrepantLanguageCount = 1;
-      }
-    } else {
-      session.discrepantLanguageCount = 0;
-      session.discrepantLanguageTarget = null;
-    }
-
-    if (session.discrepantLanguageCount >= 2 && session.voicebotMultilingualEffective === true) {
-      session.pendingLanguageSwitch = {
-        targetLanguage: clampedForPolicy,
-        deferredTranscript: "",
-        fromLanguage: activeBcp,
-        confidence: 1.0,
-        unclearRetries: 0,
-      };
-
-      session.addLanguagePromptRule = {
-        targetLanguage: clampedForPolicy,
-        fromLanguage: activeBcp,
-      };
-    }
-
     session.customerQueryCount = nextQueryIndex;
 
-    let effectiveLanguage = multilingual
-      ? clampedForPolicy
-      : normalizeBcp47Tag("en-IN");
+    // Default: always answer in the CURRENT session language. It only ever
+    // changes below via an explicit, customer-confirmed switch — never
+    // silently, from a single (possibly noisy/mis-detected) turn. This is
+    // the fix for callers hearing the bot flip language mid-call with no
+    // warning: previously a single high-confidence-but-wrong detection
+    // could change effectiveLanguage for that turn on the spot.
+    let effectiveLanguage = multilingual ? activeBcp : normalizeBcp47Tag("en-IN");
+
     if (multilingual) {
-      // Language switch policy: NEVER automatically switch to a different language
-      // without user confirmation. The discrepancy count system (above) handles
-      // prompting the user after 2 consecutive detections of a different language.
       const isShortAmbiguous = transcript.trim().length <= 8;
       const hasReliableSignal = (scriptLang && !isShortAmbiguous) ||
         (openAiLanguageOverride && !isShortAmbiguous) ||
         (sttProvider === "sarvam" && languageProbability != null && languageProbability > 0.8 && !isShortAmbiguous);
 
       if (hasReliableSignal) {
-        // If the detected language is THE SAME as current, persist it (reinforces current language)
-        // If DIFFERENT, do NOT persist - let the pendingLanguageSwitch confirmation flow handle it
         if (languagesLooselyEqual(clampedForPolicy, activeBcp)) {
-          // Same language - safe to persist (just reinforcing current setting)
+          // Same language — safe to persist (reinforces current setting).
           effectiveLanguage = clampedForPolicy;
           persistSessionActiveLanguage(session, effectiveLanguage, log);
         } else {
-          // DIFFERENT language detected - DO NOT auto-switch
-          // Use detected language for this turn's response, but don't persist the switch
-          // The discrepancy count system will prompt for confirmation after 2 detections
-          effectiveLanguage = clampedForPolicy;
-          voiceTrace(log, "voicebot.language.switch_blocked_pending_confirmation", {
+          const decision = decideLanguageSwitchAction(session, csUtterance, {
+            multilingual,
+            clampedDetected: clampedForPolicy,
+            languageProbability,
+            sttProvider,
+            allowedNorm,
+            log,
+          });
+          if (decision.action === "offer") {
+            session.pendingLanguageSwitch = {
+              targetLanguage: decision.target,
+              deferredTranscript: "",
+              fromLanguage: activeBcp,
+              confidence: decision.confidence,
+              unclearRetries: 0,
+            };
+            session.languageSwitchOfferedThisCall = true;
+            session.discrepantLanguageCount = 0;
+            session.discrepantLanguageTarget = null;
+
+            const prompt = languageSwitchOptionsPrompt(csUtterance, allowedNorm);
+            await appendVoiceTurnToChat(session, transcript, prompt, {
+              assistantSource: "language_switch_offered",
+            });
+            await speakToExotel(ws, session, prompt, mapToTtsLanguage(activeBcp), log);
+            return;
+          }
+          // action === "continue": not enough consecutive signal yet (or the
+          // feature is disabled / already offered once this call) — stay on
+          // the current language for this turn (effectiveLanguage already
+          // defaults to activeBcp above).
+          voiceTrace(log, "voicebot.language.staying_on_current", {
             customerId: session.customerId,
             stream_sid: session.streamSid,
             detected_language: clampedForPolicy,
@@ -3977,12 +4040,8 @@ async function processUtterance(
             discrepant_count: session.discrepantLanguageCount || 0,
           });
         }
-      } else {
-        // Short or ambiguous: reply in current session language
-        effectiveLanguage = normalizeBcp47Tag(
-          session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
-        );
       }
+      // else: short/ambiguous signal — effectiveLanguage already defaults to activeBcp above.
     }
     session.effectiveSttLanguageThisTurn = effectiveLanguage;
     await applyAgentVoicePersonaToSession(session);

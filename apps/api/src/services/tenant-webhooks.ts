@@ -28,7 +28,12 @@ export async function postTenantWebhook(
         "User-Agent": "Convixx-API/1.0",
       };
       if (sig) headers["X-Convixx-Signature"] = `sha256=${sig}`;
-      const res = await fetch(u, { method: "POST", headers, body });
+      const res = await fetch(u, {
+        method: "POST",
+        headers,
+        body,
+        signal: AbortSignal.timeout(8000),
+      });
       if (res.ok) return;
     } catch {
       /* retry */
@@ -56,6 +61,7 @@ export async function postSlackIncomingWebhook(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(8000),
     });
   } catch {
     /* ignore */

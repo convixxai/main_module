@@ -118,7 +118,7 @@ export interface VoicebotSession {
    * Count of substantive user turns (non-empty STT) — used for early-window auto language alignment.
    */
   customerQueryCount?: number;
-  /** When set, the next utterance is interpreted as yes/no for switching to `targetLanguage`. */
+  /** When set, the next utterance is interpreted as a language choice (named language, or yes/no toward `targetLanguage`). */
   pendingLanguageSwitch?: {
     targetLanguage: string;
     deferredTranscript: string;
@@ -126,6 +126,13 @@ export interface VoicebotSession {
     confidence: number | null;
     unclearRetries: number;
   } | null;
+  /**
+   * True once the AUTO-DETECTION path has asked the customer to confirm a
+   * language switch once this call — prevents asking again automatically.
+   * Does NOT gate an explicit customer request (language_switch_trigger_keywords),
+   * which may always re-open the flow.
+   */
+  languageSwitchOfferedThisCall?: boolean;
   /**
    * From `customer_settings.allowed_language_codes` at call `start` (BCP-47 tags).
    */

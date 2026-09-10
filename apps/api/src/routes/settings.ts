@@ -68,6 +68,7 @@ const settingsPatchSchema = z
     related_scope_distance_threshold: z.number().min(0).max(2),
     related_answer_strictness: z.enum(["strict", "balanced", "permissive"]),
     out_of_scope_message: z.string().nullable(),
+    out_of_scope_distance_threshold: z.number().min(0).max(2).nullable(),
 
     // E. VAD / audio handling
     vad_silence_timeout_ms: z.number().int().nonnegative(),

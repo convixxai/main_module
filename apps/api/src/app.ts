@@ -13,7 +13,9 @@ import { voiceRoutes } from "./routes/voice";
 import { elevenlabsApiRoutes } from "./routes/elevenlabs-api";
 import { settingsRoutes } from "./routes/settings";
 import { exotelVoicebotRoutes } from "./routes/exotel-voicebot";
+import { vodafoneVoicebotRoutes } from "./routes/vodafone-voicebot";
 import { exotelSettingsRoutes } from "./routes/exotel-settings";
+import { companyPhoneNumbersRoutes } from "./routes/company-phone-numbers";
 import { exotelOutboundCallRoutes } from "./routes/exotel-outbound-call";
 import { exotelStatusCallbackRoutes } from "./routes/exotel-status-callback";
 import { adminLogsRoutes } from "./routes/adminLogs";
@@ -27,6 +29,7 @@ import { cartesiaApiRoutes } from "./routes/cartesia-api";
 import { simulatorSaveRoutes } from "./routes/simulator-save";
 import { googleTtsSimulatorRoutes } from "./routes/google-tts-simulator";
 import { sarvamTtsSimulatorRoutes } from "./routes/sarvam-tts-simulator";
+import { voiceCartesiaTestConsoleRoutes } from "./routes/voice-cartesia-test-console";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -68,13 +71,16 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(cartesiaSimulatorRoutes);
   app.register(cartesiaVoiceBrowserRoutes);
   app.register(cartesiaApiRoutes);
+  app.register(voiceCartesiaTestConsoleRoutes); // TEMP: Cartesia voice test console, see docs note
   app.register(simulatorSaveRoutes);
   app.register(googleTtsSimulatorRoutes);
   app.register(sarvamTtsSimulatorRoutes);
   app.register(elevenlabsVoiceBrowserRoutes);
   app.register(elevenlabsApiRoutes);
   app.register(exotelVoicebotRoutes);          // Exotel Voicebot WebSocket (multi-tenant)
+  app.register(vodafoneVoicebotRoutes);         // Vodafone (VI) Voicebot WebSocket (Feature 5)
   app.register(exotelSettingsRoutes);           // Exotel settings admin API
+  app.register(companyPhoneNumbersRoutes);      // company_phone_numbers admin CRUD (Feature 3)
   app.register(exotelOutboundCallRoutes);       // Exotel outbound dial (REST Connect API)
   app.register(exotelStatusCallbackRoutes);      // Exotel HTTP StatusCallback (answered)
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)

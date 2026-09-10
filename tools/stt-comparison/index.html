@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Deepgram vs AssemblyAI — STT Comparison Tool</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e2229;
+    --border: #2a2f3a;
+    --text: #e6e8eb;
+    --muted: #8a90a0;
+    --accent: #5b9dfd;
+    --good: #4caf7d;
+    --bad: #e0625a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .card h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  label { display: block; font-size: 13px; margin-bottom: 4px; color: var(--muted); }
+  input[type=text], input[type=password], select {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 220px; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 9px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-right: 8px;
+  }
+  button.secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .results { display: flex; gap: 16px; flex-wrap: wrap; }
+  .result-panel { flex: 1; min-width: 300px; }
+  .result-panel h3 { font-size: 14px; margin: 0 0 8px; }
+  .stat-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); padding: 3px 0; border-bottom: 1px dashed var(--border); }
+  .transcript-box {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 14px;
+    min-height: 60px;
+    margin-top: 8px;
+    white-space: pre-wrap;
+  }
+  .status { font-size: 12px; padding: 2px 8px; border-radius: 10px; display: inline-block; }
+  .status.ok { background: rgba(76,175,125,0.15); color: var(--good); }
+  .status.err { background: rgba(224,98,90,0.15); color: var(--bad); }
+  .status.pending { background: rgba(139,144,160,0.15); color: var(--muted); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  pre { font-size: 11px; overflow-x: auto; background: #0b0d11; padding: 8px; border-radius: 6px; }
+  .note { font-size: 12px; color: var(--muted); background: var(--panel-2); border-left: 3px solid var(--accent); padding: 10px 12px; border-radius: 4px; margin-bottom: 16px; }
+  .rec-indicator { display: none; color: var(--bad); font-size: 12px; margin-left: 8px; }
+  .rec-indicator.active { display: inline; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Deepgram vs AssemblyAI — STT Comparison Tool</h1>
+  <div class="sub">Standalone, local-only page — nothing here talks to your Convixx backend. Audio and API keys go straight from your browser to Deepgram/AssemblyAI.</div>
+
+  <div class="note">
+    <strong>Getting trial keys (no credit card required, confirmed as of Sept 2026):</strong><br/>
+    Deepgram: sign up at <a href="https://deepgram.com" target="_blank" rel="noopener">deepgram.com</a> → Console → API Keys ($200 free credit, ~25k+ minutes of STT).<br/>
+    AssemblyAI: sign up at <a href="https://www.assemblyai.com" target="_blank" rel="noopener">assemblyai.com</a> → dashboard → API key ($50 free credit).<br/>
+    Keys are stored only in this browser's <code>localStorage</code> — never sent anywhere except directly to the provider you're testing.
+  </div>
+
+  <div class="note">
+    <strong>Important asymmetry:</strong> Deepgram's <code>/v1/listen</code> call below is a single request (comparable to real transcription latency). AssemblyAI's file API is upload → submit job → poll until done, so its "total time" includes queueing overhead and is <em>not</em> a fair proxy for their real-time streaming latency. Use this tool for <strong>accuracy</strong> comparison (especially Hindi/Marathi) — for a true latency comparison, test each provider's real-time streaming API directly.
+  </div>
+
+  <div class="card">
+    <h2>1. API Keys</h2>
+    <div class="row">
+      <div>
+        <label for="dgKey">Deepgram API Key</label>
+        <input type="password" id="dgKey" placeholder="paste Deepgram key" />
+      </div>
+      <div>
+        <label for="aaiKey">AssemblyAI API Key</label>
+        <input type="password" id="aaiKey" placeholder="paste AssemblyAI key" />
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Audio input</h2>
+    <div class="row">
+      <div>
+        <label for="langSelect">Language (used for both providers)</label>
+        <select id="langSelect">
+          <option value="en">English (en)</option>
+          <option value="hi">Hindi (hi)</option>
+          <option value="mr">Marathi (mr) — support varies by provider, will error if unsupported</option>
+        </select>
+      </div>
+      <div>
+        <label for="fileInput">Upload a real call recording (wav/mp3/m4a/webm)</label>
+        <input type="file" id="fileInput" accept="audio/*" />
+      </div>
+    </div>
+    <div>
+      <button id="recordBtn" class="secondary" type="button">Record from mic</button>
+      <button id="stopBtn" class="secondary" type="button" disabled>Stop recording</button>
+      <span id="recIndicator" class="rec-indicator">● recording…</span>
+    </div>
+    <div id="audioPreviewWrap" style="margin-top:12px; display:none;">
+      <label>Loaded audio</label>
+      <audio id="audioPreview" controls style="width:100%"></audio>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. Run</h2>
+    <button id="runBtn" type="button" disabled>Transcribe with both providers</button>
+    <span id="runStatus" class="sub" style="margin-left:8px;"></span>
+  </div>
+
+  <div class="results">
+    <div class="result-panel card">
+      <h3>Deepgram <span id="dgStatus" class="status pending">idle</span></h3>
+      <div class="stat-row"><span>Latency</span><span id="dgLatency">—</span></div>
+      <div class="stat-row"><span>Confidence</span><span id="dgConfidence">—</span></div>
+      <div class="transcript-box" id="dgTranscript">—</div>
+      <details><summary>Raw response</summary><pre id="dgRaw"></pre></details>
+    </div>
+    <div class="result-panel card">
+      <h3>AssemblyAI <span id="aaiStatus" class="status pending">idle</span></h3>
+      <div class="stat-row"><span>Total time (upload+queue+process)</span><span id="aaiLatency">—</span></div>
+      <div class="stat-row"><span>Confidence</span><span id="aaiConfidence">—</span></div>
+      <div class="transcript-box" id="aaiTranscript">—</div>
+      <details><summary>Raw response</summary><pre id="aaiRaw"></pre></details>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const dgKeyInput = document.getElementById('dgKey');
+  const aaiKeyInput = document.getElementById('aaiKey');
+  const langSelect = document.getElementById('langSelect');
+  const fileInput = document.getElementById('fileInput');
+  const recordBtn = document.getElementById('recordBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const recIndicator = document.getElementById('recIndicator');
+  const runBtn = document.getElementById('runBtn');
+  const runStatus = document.getElementById('runStatus');
+  const audioPreview = document.getElementById('audioPreview');
+  const audioPreviewWrap = document.getElementById('audioPreviewWrap');
+
+  // Restore saved keys
+  dgKeyInput.value = localStorage.getItem('stt_cmp_dg_key') || '';
+  aaiKeyInput.value = localStorage.getItem('stt_cmp_aai_key') || '';
+  dgKeyInput.addEventListener('input', () => localStorage.setItem('stt_cmp_dg_key', dgKeyInput.value));
+  aaiKeyInput.addEventListener('input', () => localStorage.setItem('stt_cmp_aai_key', aaiKeyInput.value));
+
+  let currentBlob = null;
+  let mediaRecorder = null;
+  let chunks = [];
+
+  function setAudio(blob) {
+    currentBlob = blob;
+    audioPreview.src = URL.createObjectURL(blob);
+    audioPreviewWrap.style.display = 'block';
+    runBtn.disabled = false;
+  }
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files[0]) setAudio(fileInput.files[0]);
+  });
+
+  recordBtn.addEventListener('click', async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+        setAudio(blob);
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      mediaRecorder.start();
+      recordBtn.disabled = true;
+      stopBtn.disabled = false;
+      recIndicator.classList.add('active');
+    } catch (err) {
+      alert('Microphone access failed: ' + err.message);
+    }
+  });
+
+  stopBtn.addEventListener('click', () => {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    recordBtn.disabled = false;
+    stopBtn.disabled = true;
+    recIndicator.classList.remove('active');
+  });
+
+  function setPanel(prefix, status, text) {
+    const statusEl = document.getElementById(prefix + 'Status');
+    statusEl.textContent = status;
+    statusEl.className = 'status ' + (status === 'ok' ? 'ok' : status === 'error' ? 'err' : 'pending');
+    if (text) document.getElementById(prefix + 'Transcript').textContent = text;
+  }
+
+  async function runDeepgram(apiKey, blob, lang) {
+    setPanel('dg', 'running…');
+    document.getElementById('dgTranscript').textContent = '—';
+    document.getElementById('dgLatency').textContent = '—';
+    document.getElementById('dgConfidence').textContent = '—';
+    const start = performance.now();
+    try {
+      const url = `https://api.deepgram.com/v1/listen?model=nova-2&language=${encodeURIComponent(lang)}&smart_format=true&punctuate=true`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Token ${apiKey}`,
+          'Content-Type': blob.type || 'audio/wav',
+        },
+        body: blob,
+      });
+      const elapsed = Math.round(performance.now() - start);
+      const json = await res.json();
+      document.getElementById('dgRaw').textContent = JSON.stringify(json, null, 2);
+      if (!res.ok) throw new Error(json?.err_msg || json?.reason || `HTTP ${res.status}`);
+      const alt = json?.results?.channels?.[0]?.alternatives?.[0];
+      document.getElementById('dgLatency').textContent = elapsed + ' ms';
+      document.getElementById('dgConfidence').textContent = alt?.confidence != null ? (alt.confidence * 100).toFixed(1) + '%' : 'n/a';
+      setPanel('dg', 'ok', alt?.transcript || '(empty transcript)');
+    } catch (err) {
+      setPanel('dg', 'error', 'Error: ' + err.message);
+    }
+  }
+
+  async function runAssemblyAI(apiKey, blob, lang) {
+    setPanel('aai', 'running…');
+    document.getElementById('aaiTranscript').textContent = '—';
+    document.getElementById('aaiLatency').textContent = '—';
+    document.getElementById('aaiConfidence').textContent = '—';
+    const start = performance.now();
+    try {
+      const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
+        method: 'POST',
+        headers: { authorization: apiKey },
+        body: blob,
+      });
+      const uploadJson = await uploadRes.json();
+      if (!uploadRes.ok) throw new Error(uploadJson?.error || `upload HTTP ${uploadRes.status}`);
+
+      const reqRes = await fetch('https://api.assemblyai.com/v2/transcript', {
+        method: 'POST',
+        headers: { authorization: apiKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ audio_url: uploadJson.upload_url, language_code: lang }),
+      });
+      const reqJson = await reqRes.json();
+      if (!reqRes.ok) throw new Error(reqJson?.error || `transcript request HTTP ${reqRes.status}`);
+
+      let result = reqJson;
+      for (let i = 0; i < 60; i++) {
+        if (result.status === 'completed' || result.status === 'error') break;
+        await new Promise((r) => setTimeout(r, 1500));
+        const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${reqJson.id}`, {
+          headers: { authorization: apiKey },
+        });
+        result = await pollRes.json();
+      }
+      const elapsed = Math.round(performance.now() - start);
+      document.getElementById('aaiRaw').textContent = JSON.stringify(result, null, 2);
+      if (result.status === 'error') throw new Error(result.error || 'transcription failed');
+      if (result.status !== 'completed') throw new Error('timed out waiting for AssemblyAI (>90s)');
+      document.getElementById('aaiLatency').textContent = elapsed + ' ms';
+      document.getElementById('aaiConfidence').textContent = result.confidence != null ? (result.confidence * 100).toFixed(1) + '%' : 'n/a';
+      setPanel('aai', 'ok', result.text || '(empty transcript)');
+    } catch (err) {
+      setPanel('aai', 'error', 'Error: ' + err.message);
+    }
+  }
+
+  runBtn.addEventListener('click', async () => {
+    const dgKey = dgKeyInput.value.trim();
+    const aaiKey = aaiKeyInput.value.trim();
+    if (!currentBlob) { alert('Upload or record audio first.'); return; }
+    if (!dgKey && !aaiKey) { alert('Enter at least one API key.'); return; }
+    const lang = langSelect.value;
+    runBtn.disabled = true;
+    runStatus.textContent = 'Running…';
+    const tasks = [];
+    if (dgKey) tasks.push(runDeepgram(dgKey, currentBlob, lang)); else setPanel('dg', 'no key');
+    if (aaiKey) tasks.push(runAssemblyAI(aaiKey, currentBlob, lang)); else setPanel('aai', 'no key');
+    await Promise.all(tasks);
+    runStatus.textContent = 'Done.';
+    runBtn.disabled = false;
+  });
+})();
+</script>
+</body>
+</html>

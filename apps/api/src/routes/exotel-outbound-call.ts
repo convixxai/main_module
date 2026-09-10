@@ -16,12 +16,15 @@ import {
   restApiBaseUrlFromSubdomain,
 } from "../services/exotel-connect-call";
 import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
+import { resolvePhoneNumberById } from "../services/company-phone-numbers";
 import { env } from "../config/env";
 
 const outboundCallBodySchema = z.object({
   from: z.string().min(3),
   to: z.string().min(3),
   callerId: z.string().min(2).optional(),
+  /** Feature 3 (one company, many numbers): alternative to a literal `callerId` — references a row in company_phone_numbers. */
+  phone_number_id: z.string().uuid().optional(),
   /** When true (default), attaches tenant Voicebot `wss://` URL if `streamUrl` is omitted. Set false for PSTN-only outbound (no streaming bot). */
   voicebot_stream: z.boolean().optional(),
   callType: z.string().optional(),
@@ -96,8 +99,19 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
       }
 
       const body = parsedBody.data;
+      let phoneNumberIdCallerId: string | undefined;
+      if (body.phone_number_id) {
+        const number = await resolvePhoneNumberById(customerId, body.phone_number_id);
+        if (!number) {
+          return reply.status(400).send({
+            error: "phone_number_id does not belong to this customer or is disabled",
+          });
+        }
+        phoneNumberIdCallerId = number.phone_number;
+      }
       const callerId =
         body.callerId?.trim() ||
+        phoneNumberIdCallerId ||
         settings.default_outbound_caller_id?.trim() ||
         settings.inbound_phone_number?.trim();
 

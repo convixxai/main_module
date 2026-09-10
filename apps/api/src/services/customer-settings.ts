@@ -71,6 +71,7 @@ export interface CustomerSettings {
   related_scope_distance_threshold: number;
   related_answer_strictness: RelatedAnswerStrictness;
   out_of_scope_message: string | null;
+  out_of_scope_distance_threshold: number | null;
 
   // E. VAD / audio handling
   vad_silence_timeout_ms: number;
@@ -233,6 +234,7 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   "related_scope_distance_threshold",
   "related_answer_strictness",
   "out_of_scope_message",
+  "out_of_scope_distance_threshold",
   // E
   "vad_silence_timeout_ms",
   "vad_energy_threshold",
@@ -381,6 +383,7 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
     "llm_top_p",
     "llm_verification_threshold",
     "related_scope_distance_threshold",
+    "out_of_scope_distance_threshold",
   ];
   const out = { ...row } as Record<string, unknown>;
   for (const f of numericFields) {
