@@ -69,6 +69,7 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
       <div class="toggle" id="modeToggle">
         <button id="chatModeBtn" class="active">Chat mode</button>
         <button id="audioModeBtn">Audio mode</button>
+        <button id="chatVoiceModeBtn">Chat to voice</button>
       </div>
       <div class="row" style="gap:6px;">
         <span id="sessionBadge" class="badge">No session yet</span>
@@ -80,10 +81,6 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
       <div class="field">
         <label>Agent (optional)</label>
         <select id="agentSelect"><option value="">Auto (default agent)</option></select>
-      </div>
-      <div class="field hidden" id="voiceField">
-        <label>Cartesia voice (audio mode)</label>
-        <select id="voiceSelect"><option value="">Loading voices...</option></select>
       </div>
       <div class="field hidden" id="langField">
         <label>Cartesia language</label>
@@ -98,6 +95,14 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
           <option value="kn">Kannada</option>
         </select>
       </div>
+      <div class="field hidden" id="voiceField">
+        <label>Cartesia voice (filtered by language above)</label>
+        <select id="voiceSelect"><option value="">Loading voices...</option></select>
+      </div>
+      <div class="field hidden" id="modelField">
+        <label>Cartesia model</label>
+        <select id="modelSelect"><option value="">Loading models...</option></select>
+      </div>
     </div>
 
     <div id="chatPanel" style="margin-top:14px;">
@@ -106,11 +111,12 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
       <div class="row" style="margin-top:8px;">
         <button id="sendChatBtn">Send</button>
       </div>
+      <div id="chatVoiceHint" class="hidden" style="font-size:12px;color:#777;margin-top:6px;">Sends your typed message straight through the pipeline (no speech-to-text step), then speaks the answer back using the Cartesia voice and model selected above.</div>
     </div>
 
     <div id="audioPanel" class="hidden" style="margin-top:14px;">
       <button id="recordBtn">Click to record</button>
-      <div style="font-size:12px;color:#777;margin-top:6px;">Records from your microphone, sends it for speech to text, then speaks the answer back using the Cartesia voice selected above.</div>
+      <div style="font-size:12px;color:#777;margin-top:6px;">Records from your microphone, sends it for speech to text, then speaks the answer back using the Cartesia voice and model selected above.</div>
     </div>
 
     <div class="status" id="turnStatus"></div>
@@ -155,13 +161,17 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
 
   var chatModeBtn = document.getElementById("chatModeBtn");
   var audioModeBtn = document.getElementById("audioModeBtn");
+  var chatVoiceModeBtn = document.getElementById("chatVoiceModeBtn");
   var chatPanel = document.getElementById("chatPanel");
   var audioPanel = document.getElementById("audioPanel");
+  var chatVoiceHint = document.getElementById("chatVoiceHint");
   var voiceField = document.getElementById("voiceField");
   var langField = document.getElementById("langField");
+  var modelField = document.getElementById("modelField");
   var voiceSelect = document.getElementById("voiceSelect");
   var agentSelect = document.getElementById("agentSelect");
   var langSelect = document.getElementById("langSelect");
+  var modelSelect = document.getElementById("modelSelect");
 
   var chatInput = document.getElementById("chatInput");
   var sendChatBtn = document.getElementById("sendChatBtn");
@@ -181,7 +191,8 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
   var mode = "chat";
   var sessionId = null;
   var iterationCount = 0;
-  var voicesLoaded = false;
+  var voicesLoadedForLanguage = null;
+  var cartesiaModels = [];
 
   var isRecording = false;
   var stream, recCtx, sourceNode, proc, buffers = [], sampleRate = 44100;
@@ -242,25 +253,26 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
 
   function setMode(next) {
     mode = next;
-    if (mode === "chat") {
-      chatModeBtn.classList.add("active");
-      audioModeBtn.classList.remove("active");
-      chatPanel.classList.remove("hidden");
-      audioPanel.classList.add("hidden");
-      voiceField.classList.add("hidden");
-      langField.classList.add("hidden");
-    } else {
-      audioModeBtn.classList.add("active");
-      chatModeBtn.classList.remove("active");
-      audioPanel.classList.remove("hidden");
-      chatPanel.classList.add("hidden");
-      voiceField.classList.remove("hidden");
-      langField.classList.remove("hidden");
-      if (!voicesLoaded) loadVoices();
+    chatModeBtn.classList.toggle("active", mode === "chat");
+    audioModeBtn.classList.toggle("active", mode === "audio");
+    chatVoiceModeBtn.classList.toggle("active", mode === "chat_voice");
+
+    var needsAudioOut = mode === "audio" || mode === "chat_voice";
+    chatPanel.classList.toggle("hidden", mode === "audio");
+    audioPanel.classList.toggle("hidden", mode !== "audio");
+    chatVoiceHint.classList.toggle("hidden", mode !== "chat_voice");
+    voiceField.classList.toggle("hidden", !needsAudioOut);
+    langField.classList.toggle("hidden", !needsAudioOut);
+    modelField.classList.toggle("hidden", !needsAudioOut);
+
+    if (needsAudioOut && voicesLoadedForLanguage !== langSelect.value) {
+      loadVoices();
     }
   }
   chatModeBtn.addEventListener("click", function () { setMode("chat"); });
   audioModeBtn.addEventListener("click", function () { setMode("audio"); });
+  chatVoiceModeBtn.addEventListener("click", function () { setMode("chat_voice"); });
+  langSelect.addEventListener("change", function () { loadVoices(); });
 
   async function loadAgents() {
     try {
@@ -280,15 +292,19 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
   }
 
   async function loadVoices() {
+    var language = langSelect.value;
     voiceSelect.innerHTML = '<option value="">Loading voices...</option>';
     try {
-      var res = await fetch("/voice/cartesia/voices?limit=100", { headers: headers() });
+      var res = await fetch(
+        "/voice/cartesia/voices?limit=100&language=" + encodeURIComponent(language),
+        { headers: headers() }
+      );
       var data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to load voices");
-      voicesLoaded = true;
+      voicesLoadedForLanguage = language;
       var voices = data.voices || [];
       if (voices.length === 0) {
-        voiceSelect.innerHTML = '<option value="">No voices found</option>';
+        voiceSelect.innerHTML = '<option value="">No voices found for this language</option>';
         return;
       }
       voiceSelect.innerHTML = "";
@@ -302,6 +318,21 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
       voiceSelect.innerHTML = '<option value="">Failed to load voices</option>';
       setTurnError("Could not load Cartesia voices: " + (e.message || e));
     }
+  }
+
+  function loadModels() {
+    modelSelect.innerHTML = "";
+    if (cartesiaModels.length === 0) {
+      modelSelect.innerHTML = '<option value="">No models available</option>';
+      return;
+    }
+    cartesiaModels.forEach(function (m) {
+      var opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label || m.id;
+      if (m.recommended) opt.selected = true;
+      modelSelect.appendChild(opt);
+    });
   }
 
   verifyBtn.addEventListener("click", async function () {
@@ -325,8 +356,10 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
       );
       mainCard.classList.remove("hidden");
       if (!data.cartesia_configured) {
-        setTurnStatus("Note: Cartesia is not configured on this server, so audio mode's text to speech step will fail.");
+        setTurnStatus("Note: Cartesia is not configured on this server, so audio and chat-to-voice mode's text to speech step will fail.");
       }
+      cartesiaModels = data.cartesia_models || [];
+      loadModels();
       loadAgents();
       setSession(null);
     } catch (e) {
@@ -387,12 +420,13 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
     fd.append("mode", mode);
     if (sessionId) fd.append("session_id", sessionId);
     if (agentSelect.value) fd.append("agent_id", agentSelect.value);
-    if (mode === "audio") {
+    if (mode === "audio" || mode === "chat_voice") {
       fd.append("cartesia_voice_id", voiceSelect.value);
       fd.append("cartesia_language", langSelect.value);
+      fd.append("cartesia_model_id", modelSelect.value);
     }
 
-    setTurnStatus(mode === "chat" ? "Running pipeline..." : "Transcribing, then running pipeline...");
+    setTurnStatus(mode === "audio" ? "Transcribing, then running pipeline..." : "Running pipeline...");
 
     var row = { mode: mode, stt_ms: null, ask_ms: 0, tts_ms: 0, total_ms: 0, source: null, pipeline_timings: null };
 

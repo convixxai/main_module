@@ -2,8 +2,12 @@
 // QA test console - a single page where anyone with a customer_id and
 // x-api-key can exercise the SAME conversational pipeline used in production
 // (runAskPipeline, shared with /ask, /ask/voice and the Vodafone voicebot's
-// processUtterance in vodafone-voicebot.ts), in either a chat (text) mode or
-// an audio (mic) mode, with per-turn, per-stage timings surfaced live.
+// processUtterance in vodafone-voicebot.ts), in one of three modes:
+// - chat: text in, text out.
+// - audio: mic in (STT), speech out (Cartesia TTS).
+// - chat_voice: text in, speech out (Cartesia TTS) - no STT step, useful for
+//   testing/comparing TTS voices and models without needing a working mic.
+// Per-turn, per-stage timings are surfaced live in all three.
 //
 // Streaming here means two things, both wired to real production code paths:
 // - The RAG pipeline's own trace hook (the same RagTraceFn shape ask.ts and
@@ -11,17 +15,17 @@
 //   forwarded to the browser over Server-Sent Events as each pipeline stage
 //   completes, so the client sees live progress rather than a single blob
 //   at the end.
-// - In audio mode, once the full answer text is ready, it is split into
-//   speakable chunks and each chunk's Cartesia TTS synthesis is streamed to
-//   the client as an SSE event the moment it is ready, so playback of chunk 1
-//   can start while later chunks are still synthesizing.
+// - In audio/chat_voice modes, once the full answer text is ready, it is
+//   split into speakable chunks and each chunk's Cartesia TTS synthesis is
+//   streamed to the client as an SSE event the moment it is ready, so
+//   playback of chunk 1 can start while later chunks are still synthesizing.
 //
 // STT reuses runSimulatorStt (the exact function vodafone-voicebot.ts calls
 // for each utterance), so provider selection matches the tenant's real
-// settings. TTS in audio mode intentionally always uses Cartesia with a
-// voice the user picks on the page, since that is this console's stated
-// purpose (comparing/testing Cartesia voices) rather than replaying the
-// tenant's configured TTS provider.
+// settings. TTS in audio/chat_voice modes intentionally always uses Cartesia
+// with a voice and model the user picks on the page, since that is this
+// console's stated purpose (comparing/testing Cartesia voices and models)
+// rather than replaying the tenant's configured TTS provider.
 // ============================================================
 
 import { FastifyInstance } from "fastify";
@@ -30,6 +34,7 @@ import { pool } from "../config/db";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { createRagTrace, type RagTraceFn } from "../services/rag-trace";
 import {
+  CARTESIA_MODELS,
   cartesiaConfigured,
   cartesiaTextToSpeech,
   resolveCartesiaModel,
@@ -144,6 +149,7 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
         customer_id: customerId,
         customer_name: row.rows[0].name,
         cartesia_configured: cartesiaConfigured(),
+        cartesia_models: CARTESIA_MODELS,
       });
     }
   );
@@ -184,7 +190,10 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
         }
         const customerId = scope;
         const customerPrompt = request.customerPrompt!;
-        const mode = fields.mode === "audio" ? "audio" : "chat";
+        const mode: "chat" | "audio" | "chat_voice" =
+          fields.mode === "audio" ? "audio" : fields.mode === "chat_voice" ? "chat_voice" : "chat";
+        /** Both audio (mic in, speech out) and chat_voice (text in, speech out) speak the answer back. */
+        const wantsAudioOut = mode === "audio" || mode === "chat_voice";
 
         const sessionId = fields.session_id?.trim() || null;
         const agentId = fields.agent_id?.trim() || null;
@@ -241,7 +250,7 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
         } else {
           question = (fields.question ?? "").trim();
           if (!question) {
-            send("error", { error: "Field `question` is required for chat mode." });
+            send("error", { error: "Field `question` is required for chat and chat-to-voice mode." });
             reply.raw.end();
             return;
           }
@@ -293,7 +302,7 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
         });
 
         let ttsMs = 0;
-        if (mode === "audio" && answer) {
+        if (wantsAudioOut && answer) {
           if (!cartesiaConfigured()) {
             send("tts_error", { error: "CARTESIA_API_KEY is not configured on this server" });
           } else {

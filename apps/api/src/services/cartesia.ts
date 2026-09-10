@@ -7,11 +7,21 @@ export const CARTESIA_VERSION = "2026-03-01";
 const DEFAULT_CREDITS_PER_CHAR = 1;
 const PVC_CREDITS_PER_CHAR = 1.5;
 
+/**
+ * Curated list for UI dropdowns only - NOT an allow-list (see
+ * resolveCartesiaModel below). Verified against the real Cartesia
+ * /tts/bytes endpoint with this server's own CARTESIA_API_KEY on
+ * 2026-09-10: sonic-3.5, sonic-3, sonic-2, sonic-turbo, and sonic-latest
+ * all returned 200; sonic-english, sonic-turbo-2025-03-07, and bare
+ * "sonic" returned 400/404 and are not valid model ids on this account.
+ */
 export const CARTESIA_MODELS = [
   { id: "sonic-3.5", label: "Sonic 3.5 (latest stable)", recommended: true },
   { id: "sonic-3.5-2026-05-04", label: "Sonic 3.5 snapshot (2026-05-04)", pinned: true },
+  { id: "sonic-turbo", label: "Sonic Turbo (lower latency)" },
   { id: "sonic-3", label: "Sonic 3 (legacy)" },
-  { id: "sonic-latest", label: "sonic-latest (beta — not for production)" },
+  { id: "sonic-2", label: "Sonic 2 (legacy)" },
+  { id: "sonic-latest", label: "sonic-latest (beta - not for production)" },
 ] as const;
 
 export const CARTESIA_LANGUAGES = [
@@ -318,11 +328,22 @@ function cartesiaHeaders(): Record<string, string> {
   };
 }
 
+/**
+ * Resolves the Cartesia model id to actually send to the API.
+ *
+ * `CARTESIA_MODELS` is a curated list for UI dropdowns (recommended/known
+ * models), not an allow-list: `customer_settings.tts_model` and
+ * `cartesia_avatars.model_id` are both free-text columns specifically so a
+ * new Cartesia model release, or a customer-supplied custom model id, works
+ * without a code change. This used to silently replace any id outside
+ * CARTESIA_MODELS with "sonic-3.5" - meaning a customer-configured model
+ * was quietly ignored at synthesis time even though it was saved
+ * successfully. Any non-empty string the caller provides is trusted as-is;
+ * only a missing/empty value falls back to the default.
+ */
 export function resolveCartesiaModel(raw: string | null | undefined): string {
-  const m = (raw || "sonic-3.5").trim();
-  const known = CARTESIA_MODELS.map((x) => x.id);
-  if (known.includes(m as (typeof known)[number])) return m;
-  return "sonic-3.5";
+  const m = (raw ?? "").trim();
+  return m || "sonic-3.5";
 }
 
 export function resolveCartesiaEmotion(
