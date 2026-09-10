@@ -65,6 +65,10 @@
       "description": "Multi-tenant Exotel Voicebot WebSocket system. Admin CRUD for per-tenant Exotel settings (**x-admin-token**); tenant outbound PSTN dial via **Exotel Calls/connect** (**x-api-key**); live session monitoring (**x-admin-token**); HTTPS bootstrap and WebSocket status."
     },
     {
+      "name": "Vodafone Voicebot",
+      "description": "Vodafone (VI) Voicebot WebSocket system. Admin CRUD for per-tenant Vodafone settings (**x-admin-token**). Vodafone connects out to us (inbound-only, no outbound trigger API exists yet), so the settings response returns the `wss://` URL to configure on Vodafone's own Streaming Object."
+    },
+    {
       "name": "Admin logs",
       "description": "Daily rotating API log files on disk (`convixx-YYYY-MM-DD.log`). Listing and download require `x-admin-token`. Logs are written whenever the server process runs (PM2, systemd, etc.), not only when an SSH session is open."
     },
@@ -4232,6 +4236,237 @@
               "application/json": {
                 "example": {
                   "error": "No Exotel settings found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{customerId}/vodafone-settings": {
+      "get": {
+        "tags": [
+          "Vodafone Voicebot"
+        ],
+        "summary": "Get Vodafone settings",
+        "description": "Returns the per-tenant Vodafone (VI) configuration for a customer.\n\n`vodafone_voicebot_wss_url` is **always generated** by the server from `PUBLIC_API_HOST` (or the request host) and the path `customerId`; paste it into Vodafone's Streaming Object \"WebSocket URL\" field. Credentials are never returned in plaintext, only `has_credentials`.\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Vodafone settings for the customer",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
+                  "customer_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "provider_id": "vodafone",
+                  "is_enabled": true,
+                  "use_sandbox": false,
+                  "metadata": {
+                    "custom_parameters": {
+                      "agentId": "..."
+                    }
+                  },
+                  "has_credentials": false,
+                  "vodafone_voicebot_wss_url": "wss://convixx.in/telephony/vodafone/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "created_at": "2026-09-09T20:49:29.494Z",
+                  "updated_at": "2026-09-09T20:49:29.494Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Missing or invalid x-admin-token"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Vodafone settings configured for this customer",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Vodafone settings not found for this customer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Vodafone Voicebot"
+        ],
+        "summary": "Create or update Vodafone settings",
+        "description": "Upserts the per-tenant Vodafone (VI) configuration for a customer (one row per customer, shared with Exotel via `company_telephony_settings.customer_id UNIQUE` - switching a customer to Vodafone here overwrites any existing Exotel row for the same customer, returned as `switched_from_provider_id` when that happens).\n\nAll fields are optional; omitted fields are left unchanged (or default to `false`/`{}` on first creation). `is_enabled` must be `true` before `/telephony/vodafone/voicebot/{customerId}` will accept a connection. `metadata` is free-form (e.g. document the custom key/value parameters configured on Vodafone's Streaming Object) and is not enforced by the WS route. `credentials` is an opaque object stored encrypted, in case Vodafone's still-undocumented auth mechanism turns out to need one; omit it if you don't need it.\n\n`vodafone_voicebot_wss_url` is **not** accepted here - it is computed and returned in the response.\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "is_enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "use_sandbox": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "example": {
+                      "custom_parameters": {
+                        "agentId": "..."
+                      }
+                    }
+                  },
+                  "credentials": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "example": {
+                      "some_key": "some_value"
+                    }
+                  }
+                }
+              },
+              "example": {
+                "is_enabled": true,
+                "metadata": {
+                  "custom_parameters": {
+                    "agentId": "..."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Vodafone settings created or updated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
+                  "customer_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "provider_id": "vodafone",
+                  "is_enabled": true,
+                  "use_sandbox": false,
+                  "metadata": {},
+                  "has_credentials": false,
+                  "vodafone_voicebot_wss_url": "wss://convixx.in/telephony/vodafone/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                  "created_at": "2026-09-09T20:49:29.494Z",
+                  "updated_at": "2026-09-09T20:49:29.494Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": {
+                    "formErrors": [],
+                    "fieldErrors": {}
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Customer not found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Vodafone Voicebot"
+        ],
+        "summary": "Delete Vodafone settings",
+        "description": "Removes Vodafone configuration for a customer (only deletes if the existing row's `provider_id` is `vodafone`). This will disable the Vodafone Voicebot for this tenant.\n\nRequires `x-admin-token`.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Customer UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Vodafone settings deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleted": true,
+                  "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Vodafone settings found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "No Vodafone settings found"
                 }
               }
             }
