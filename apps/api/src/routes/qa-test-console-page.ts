@@ -207,6 +207,8 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
   var stream, recCtx, sourceNode, proc, buffers = [], sampleRate = 44100;
   var playCtx = null;
   var nextPlayTime = 0;
+  var audioChunkQueue = [];
+  var audioChunkQueueRunning = false;
 
   function headers() {
     return { "x-api-key": apiKeyEl.value.trim() };
@@ -389,7 +391,32 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
     return bytes.buffer;
   }
 
-  async function scheduleAudioChunk(base64) {
+  // Chunks arrive over SSE and must be decoded+scheduled strictly in the order
+  // the server emitted them. decodeAudioData's completion time depends on each
+  // chunk's own size/complexity, not the order it started - firing chunks off
+  // without awaiting one before starting the next let a later chunk's decode
+  // finish first and read/write the shared nextPlayTime out of turn, so the
+  // reply could play out of sequence or with chunks overlapping/cutting each
+  // other off. Queuing and awaiting each chunk in turn removes that race.
+  function scheduleAudioChunk(base64) {
+    audioChunkQueue.push(base64);
+    if (!audioChunkQueueRunning) runAudioChunkQueue();
+  }
+
+  async function runAudioChunkQueue() {
+    audioChunkQueueRunning = true;
+    while (audioChunkQueue.length > 0) {
+      var base64 = audioChunkQueue.shift();
+      try {
+        await playOneAudioChunk(base64);
+      } catch (e) {
+        setTurnError("Playback error: " + (e.message || e));
+      }
+    }
+    audioChunkQueueRunning = false;
+  }
+
+  async function playOneAudioChunk(base64) {
     if (!playCtx) {
       playCtx = new (window.AudioContext || window.webkitAudioContext)();
       nextPlayTime = playCtx.currentTime;
@@ -427,6 +454,8 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
     qa.classList.remove("hidden");
     nextPlayTime = 0;
     if (playCtx) { try { playCtx.close(); } catch (e) {} playCtx = null; }
+    audioChunkQueue = [];
+    audioChunkQueueRunning = false;
 
     fd.append("customer_id", customerIdEl.value.trim());
     fd.append("mode", mode);
@@ -489,9 +518,7 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
           } else if (parsed.event === "first_audio") {
             logStage("First audio chunk ready to play", parsed.data.first_audio_ms);
           } else if (parsed.event === "audio_chunk") {
-            scheduleAudioChunk(parsed.data.base64).catch(function (e) {
-              setTurnError("Playback error: " + (e.message || e));
-            });
+            scheduleAudioChunk(parsed.data.base64);
           } else if (parsed.event === "tts_error") {
             setTurnError("Text to speech error: " + parsed.data.error);
           } else if (parsed.event === "done") {
