@@ -14,6 +14,7 @@ import { elevenlabsApiRoutes } from "./routes/elevenlabs-api";
 import { settingsRoutes } from "./routes/settings";
 import { exotelVoicebotRoutes } from "./routes/exotel-voicebot";
 import { vodafoneVoicebotRoutes } from "./routes/vodafone-voicebot";
+import { vodafoneSettingsRoutes } from "./routes/vodafone-settings";
 import { exotelSettingsRoutes } from "./routes/exotel-settings";
 import { companyPhoneNumbersRoutes } from "./routes/company-phone-numbers";
 import { exotelOutboundCallRoutes } from "./routes/exotel-outbound-call";
@@ -30,6 +31,7 @@ import { simulatorSaveRoutes } from "./routes/simulator-save";
 import { googleTtsSimulatorRoutes } from "./routes/google-tts-simulator";
 import { sarvamTtsSimulatorRoutes } from "./routes/sarvam-tts-simulator";
 import { voiceCartesiaTestConsoleRoutes } from "./routes/voice-cartesia-test-console";
+import { qaTestConsoleRoutes } from "./routes/qa-test-console";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -72,6 +74,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(cartesiaVoiceBrowserRoutes);
   app.register(cartesiaApiRoutes);
   app.register(voiceCartesiaTestConsoleRoutes); // TEMP: Cartesia voice test console, see docs note
+  app.register(qaTestConsoleRoutes);            // QA test console: chat/audio pipeline test page with per-stage timings
   app.register(simulatorSaveRoutes);
   app.register(googleTtsSimulatorRoutes);
   app.register(sarvamTtsSimulatorRoutes);
@@ -79,6 +82,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(elevenlabsApiRoutes);
   app.register(exotelVoicebotRoutes);          // Exotel Voicebot WebSocket (multi-tenant)
   app.register(vodafoneVoicebotRoutes);         // Vodafone (VI) Voicebot WebSocket (Feature 5)
+  app.register(vodafoneSettingsRoutes);         // Vodafone settings admin API
   app.register(exotelSettingsRoutes);           // Exotel settings admin API
   app.register(companyPhoneNumbersRoutes);      // company_phone_numbers admin CRUD (Feature 3)
   app.register(exotelOutboundCallRoutes);       // Exotel outbound dial (REST Connect API)

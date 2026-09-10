@@ -4,9 +4,11 @@
 // Translates between VI's (Vodafone Idea's Voice Streaming product) raw
 // WebSocket wire protocol and the normalized types in
 // types/telephony-provider.ts. Standalone, additive code, following the
-// same pattern as services/exotel-adapter.ts. Not wired into any live
-// route — there is no Vodafone WS route yet, and no Vodafone customer
-// exists in company_telephony_settings today.
+// same pattern as services/exotel-adapter.ts. Wired into
+// routes/vodafone-voicebot.ts (GET /telephony/vodafone/voicebot/:customerId),
+// which requires an enabled company_telephony_settings row with
+// provider_id='vodafone' — create one via routes/vodafone-settings.ts
+// (PUT /customers/:customerId/vodafone-settings).
 //
 // Several pieces of this adapter are DELIBERATELY INCOMPLETE because the
 // vendor spec we have doesn't cover them yet (see
