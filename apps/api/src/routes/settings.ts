@@ -46,6 +46,8 @@ const settingsPatchSchema = z
     cartesia_max_buffer_delay_ms: z.number().int().min(0).max(10000),
     cartesia_emotion_mode: z.enum(["static", "llm_per_turn", "llm_per_sentence"]),
     cartesia_allowed_emotions: z.array(z.string().min(1)),
+    /** Cartesia `normalization` override (e.g. "en-IN", "off"). Free text, trusted as-is - see resolveCartesiaModel's doc for why. */
+    cartesia_normalization: z.string().nullable(),
 
     // D. RAG / LLM
     rag_use_openai_only: z.boolean(),

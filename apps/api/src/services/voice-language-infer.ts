@@ -1,3 +1,6 @@
+import type { CustomerSettings } from "./customer-settings";
+import type { VoicebotSession } from "./voicebot-session";
+
 /**
  * Infer reply language from transcript script when STT metadata is wrong
  * (e.g. ElevenLabs tags `eng` for Hindi Devanagari).
@@ -132,4 +135,237 @@ export function conversationalOpenerReply(
     return "નમસ્તે! હું તમારી કેવી રીતે મદદ કરી શકું?";
   }
   return "Hi there! How can I help you today?";
+}
+
+// ============================================================
+// Mid-call language switch (explicit-confirmation only)
+//
+// Extracted from exotel-voicebot.ts (2026-09) so vodafone-voicebot.ts can
+// share the exact same, already-proven flow instead of a second
+// implementation. The core rule, unchanged from Exotel's original design:
+// the bot NEVER silently changes the active conversation language on its
+// own inference. A detected mismatch (from STT) only ever produces one of
+// two outcomes - keep answering in the current language, or explicitly ask
+// the caller which language they'd like - and the active language changes
+// ONLY once the caller confirms (by naming a language, or a yes/no word) on
+// a later turn. This was itself a fix for callers hearing the bot flip
+// language mid-call with no warning from a single noisy/mis-detected turn.
+// ============================================================
+
+export const LANGUAGE_DISPLAY_NAME: Record<string, string> = {
+  "en-IN": "English",
+  "hi-IN": "Hindi",
+  "mr-IN": "Marathi",
+  "bn-IN": "Bengali",
+  "gu-IN": "Gujarati",
+  "kn-IN": "Kannada",
+  "ml-IN": "Malayalam",
+  "od-IN": "Odia",
+  "pa-IN": "Punjabi",
+  "ta-IN": "Tamil",
+  "te-IN": "Telugu",
+};
+
+export function humanizeAllowedList(allowed: string[]): string {
+  return allowed.map((c) => LANGUAGE_DISPLAY_NAME[c] ?? c).join(", ");
+}
+
+export function normalizeBcp47Tag(code: string): string {
+  const t = code.trim();
+  if (!t) return "en-IN";
+  const parts = t.split(/[-_]/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0].toLowerCase()}-${parts[1].toUpperCase()}`;
+  }
+  return parts[0].toLowerCase();
+}
+
+/** Non-empty allowlist; if DB list empty, use `[fallback]`. */
+export function normalizeAllowedLangList(
+  fromSession: string[] | undefined,
+  fallback: string
+): string[] {
+  const fb = normalizeBcp47Tag(fallback);
+  const raw = fromSession?.length ? fromSession : [fb];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const c of raw) {
+    const n = normalizeBcp47Tag(c);
+    if (!seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out.length > 0 ? out : [fb];
+}
+
+/** Same acceptance rule as clamp (exact tag or matching primary subtag). */
+export function isLanguageInAllowedList(detectedRaw: string, allowed: string[]): boolean {
+  if (!allowed.length) return true;
+  const d = normalizeBcp47Tag(detectedRaw);
+  if (allowed.includes(d)) return true;
+  const primary = d.split("-")[0]?.toLowerCase() ?? "";
+  return allowed.some((a) => a.split("-")[0]?.toLowerCase() === primary);
+}
+
+/**
+ * If Sarvam STT guesses a language outside the tenant allowlist (e.g. ta-IN),
+ * snap to the tenant default so TTS/LLM stay within policy.
+ */
+export function clampLanguageToAllowed(
+  detectedRaw: string,
+  allowed: string[],
+  fallback: string
+): string {
+  if (allowed.length === 0) return normalizeBcp47Tag(fallback);
+  const d = normalizeBcp47Tag(detectedRaw);
+  if (allowed.includes(d)) return d;
+  const primary = d.split("-")[0]?.toLowerCase() ?? "";
+  const byPrimary = allowed.find((a) => a.split("-")[0]?.toLowerCase() === primary);
+  if (byPrimary) return byPrimary;
+  return normalizeBcp47Tag(fallback);
+}
+
+export function languagesLooselyEqual(a: string, b: string): boolean {
+  const na = normalizeBcp47Tag(a);
+  const nb = normalizeBcp47Tag(b);
+  if (na === nb) return true;
+  const pa = na.split("-")[0]?.toLowerCase() ?? "";
+  const pb = nb.split("-")[0]?.toLowerCase() ?? "";
+  return pa.length > 0 && pa === pb;
+}
+
+/**
+ * Persists the active conversation language onto the session. Callers should
+ * only invoke this after an EXPLICIT customer confirmation (see
+ * decideLanguageSwitchAction/parseLanguageChoice below) - never from a bare
+ * detection signal.
+ */
+export function persistSessionActiveLanguage(session: VoicebotSession, lang: string): string {
+  const n = normalizeBcp47Tag(lang);
+  session.currentLanguageCode = n;
+  return n;
+}
+
+type LanguageSwitchDecision =
+  | { action: "continue" }
+  | { action: "offer"; target: string; confidence: number | null };
+
+/**
+ * Decides whether a detected language mismatch should be surfaced to the
+ * caller as an explicit "which language would you like?" question, or
+ * ignored for now. Deliberately NEVER returns a silent-switch action - the
+ * only two outcomes are "keep answering in the current session language" or
+ * "offer an explicit choice."
+ */
+export function decideLanguageSwitchAction(
+  session: VoicebotSession,
+  cust: CustomerSettings | null | undefined,
+  params: {
+    multilingual: boolean;
+    clampedDetected: string;
+    languageProbability: number | null;
+    sttProvider: string;
+    allowedNorm: string[];
+  }
+): LanguageSwitchDecision {
+  const { multilingual, clampedDetected, languageProbability, sttProvider, allowedNorm } = params;
+  if (!multilingual) return { action: "continue" };
+
+  const active = normalizeBcp47Tag(
+    session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
+  );
+  if (!isLanguageInAllowedList(clampedDetected, allowedNorm)) {
+    return { action: "continue" };
+  }
+  if (languagesLooselyEqual(clampedDetected, active)) {
+    return { action: "continue" };
+  }
+
+  // Track consecutive detections of the same different language - a single
+  // noisy/mis-detected turn should never trigger anything by itself.
+  if (session.discrepantLanguageTarget === clampedDetected) {
+    session.discrepantLanguageCount = (session.discrepantLanguageCount || 0) + 1;
+  } else {
+    session.discrepantLanguageTarget = clampedDetected;
+    session.discrepantLanguageCount = 1;
+  }
+
+  const conf = sttProvider === "sarvam" ? languageProbability : null;
+  const canOffer =
+    cust?.allow_language_switch === true &&
+    !session.languageSwitchOfferedThisCall &&
+    !session.pendingLanguageSwitch &&
+    (session.discrepantLanguageCount ?? 0) >= 2;
+
+  if (!canOffer) {
+    return { action: "continue" };
+  }
+
+  return { action: "offer", target: normalizeBcp47Tag(clampedDetected), confidence: conf };
+}
+
+/** Builds the "which language would you like?" prompt from the tenant's configured template. */
+export function languageSwitchOptionsPrompt(
+  cust: CustomerSettings | null | undefined,
+  allowedNorm: string[]
+): string {
+  const template =
+    cust?.language_switch_options_prompt?.trim() || "Please say one of: {LANGUAGE_LIST}.";
+  return template.replace("{LANGUAGE_LIST}", humanizeAllowedList(allowedNorm));
+}
+
+/**
+ * Parses the customer's reply to a pending language-switch offer. Accepts
+ * either a directly-named language (from the tenant's allowed list) or a
+ * tenant-configured yes/no word confirming/declining the best-guess target.
+ */
+export function parseLanguageChoice(
+  transcript: string,
+  allowedNorm: string[],
+  yesWords: string[],
+  noWords: string[]
+): { kind: "language"; target: string } | { kind: "yes" } | { kind: "no" } | { kind: "unclear" } {
+  const t = transcript.trim().toLowerCase();
+  if (!t) return { kind: "unclear" };
+
+  // Native-language self-names, so "hindi mein" / "मराठीत" etc. are recognized
+  // even though LANGUAGE_DISPLAY_NAME's values are English names.
+  const NATIVE_NAMES: Record<string, string[]> = {
+    "hi-IN": ["hindi", "हिंदी", "हिन्दी"],
+    "mr-IN": ["marathi", "मराठी"],
+    "en-IN": ["english", "इंग्लिश"],
+    "gu-IN": ["gujarati", "ગુજરાતી"],
+    "bn-IN": ["bengali", "বাংলা"],
+    "kn-IN": ["kannada", "ಕನ್ನಡ"],
+    "ml-IN": ["malayalam", "മലയാളം"],
+    "od-IN": ["odia", "ଓଡ଼ିଆ"],
+    "pa-IN": ["punjabi", "ਪੰਜਾਬੀ"],
+    "ta-IN": ["tamil", "தமிழ்"],
+    "te-IN": ["telugu", "తెలుగు"],
+  };
+  for (const tag of allowedNorm) {
+    const names = NATIVE_NAMES[tag] ?? [LANGUAGE_DISPLAY_NAME[tag]?.toLowerCase() ?? ""];
+    if (names.some((n) => n && t.includes(n.toLowerCase()))) {
+      return { kind: "language", target: tag };
+    }
+  }
+
+  const norm = (w: string) => w.trim().toLowerCase();
+  if (yesWords.some((w) => norm(w) && t.includes(norm(w)))) return { kind: "yes" };
+  if (noWords.some((w) => norm(w) && t.includes(norm(w)))) return { kind: "no" };
+
+  return { kind: "unclear" };
+}
+
+/** Default acknowledgement spoken right after a confirmed switch, before the (optional) held-back question is answered. */
+export function languageSwitchAcknowledgement(targetBcp47: string): string {
+  if (targetBcp47.startsWith("hi")) {
+    return "ठीक है, अब हम हिंदी में बात करेंगे। मैं आपकी क्या मदद कर सकता हूँ?";
+  }
+  if (targetBcp47.startsWith("mr")) {
+    return "ठीक आहे, आता आपण मराठीत बोलूया. मी तुम्हाला कशी मदत करू?";
+  }
+  const label = LANGUAGE_DISPLAY_NAME[targetBcp47] ?? targetBcp47;
+  return `Okay, let's continue in ${label}. How can I help you?`;
 }

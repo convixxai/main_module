@@ -8,6 +8,7 @@ import {
   prepareQuestionForKbEmbedding,
   chatSelfHosted,
   chatOpenAI,
+  streamChatOpenAI,
   formatOpenAIClientError,
 } from "../services/llm";
 import {
@@ -530,6 +531,16 @@ export async function runAskPipeline(params: {
   embeddingLanguageHint?: string | null;
   /** When set (e.g. voice simulator), prepended above agent/customer prompt and overrides on conflict. */
   additionalSystemPrompt?: string | null;
+  /**
+   * Opt-in token streaming for incremental TTS (e.g. voicebot low-latency mode). When
+   * provided, the pipeline is FORCED into OpenAI-only mode regardless of `ragOpenaiOnly`
+   * or tenant settings, because self-hosted has no streaming implementation and racing it
+   * against a stream that's already being spoken would risk starting to speak one answer
+   * then needing to switch to a different one. Has no effect on the no_kb/kb_direct/
+   * out_of_scope early-exit branches, which never call an LLM and stay just as fast as
+   * before - only the branch that actually calls OpenAI is affected.
+   */
+  onLlmTextDelta?: (delta: string) => void | Promise<void>;
 }): Promise<AskPipelineResult> {
   const {
     customerId,
@@ -539,11 +550,13 @@ export async function runAskPipeline(params: {
     inputAgentId,
     includeTimings,
     sequentialLlm,
-    ragOpenaiOnly,
     trace,
     embeddingLanguageHint,
     additionalSystemPrompt,
+    onLlmTextDelta,
   } = params;
+  /** Streaming requires a guaranteed single-provider path - see onLlmTextDelta doc above. */
+  const ragOpenaiOnly = onLlmTextDelta ? true : params.ragOpenaiOnly;
   const start = Date.now();
 
   trace?.("pipeline_start", {
@@ -786,9 +799,11 @@ export async function runAskPipeline(params: {
   let openaiCallError: string | null = null;
 
   if (ragOpenaiOnly) {
-    trace?.("rag_llm_mode", { mode: "openai_only" });
+    trace?.("rag_llm_mode", { mode: onLlmTextDelta ? "openai_only_streaming" : "openai_only" });
     try {
-      openaiResult = await chatOpenAI(ragMessages, maxTok, trace, openaiOpts);
+      openaiResult = onLlmTextDelta
+        ? await streamChatOpenAI(ragMessages, maxTok, onLlmTextDelta, trace, openaiOpts)
+        : await chatOpenAI(ragMessages, maxTok, trace, openaiOpts);
     } catch (e) {
       openaiCallError = formatOpenAIClientError(e);
       trace?.("openai_chat_exception", { error: openaiCallError });

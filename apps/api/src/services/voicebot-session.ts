@@ -215,51 +215,23 @@ export interface VoicebotSession {
     targetLanguage: string;
     fromLanguage: string;
   } | null;
-  /** Call mode: 'inbound', 'outbound', or 'outbound_campaign'. */
-  mode?: "inbound" | "outbound" | "outbound_campaign";
-  /** If in campaign mode, true until the customer speaks for the first time. */
-  waitingForFirstSpeech?: boolean;
-  /** Linked campaign ID if in campaign mode. */
+  /**
+   * Call mode: 'inbound' or 'outbound'. 'outbound_campaign' (dual-leg) removed
+   * 2026-09 - see legType's doc comment below for why.
+   */
+  mode?: "inbound" | "outbound";
+  /** Linked campaign ID, when this outbound call originated from a campaign trigger. Informational only - see file header note below. */
   campaignId?: string | null;
-
-  // --- Outbound Call Echo Suppression Fields ---
   /**
-   * For outbound campaign calls using Exotel's dual-leg architecture:
-   * 'leg1_system' = WebSocket stream connected to the system/agent side (TTS sent here)
-   * 'leg2_customer' = WebSocket stream connected to the customer side (real user audio)
-   * 'inbound' = single WebSocket stream for inbound calls (default)
-   * 'unknown' = outbound call where leg identification failed
+   * Single WebSocket stream per call (default 'inbound'). Dual-leg architecture
+   * (leg1_system/leg2_customer/unknown, plus the cross-leg echo-suppression and
+   * single-active-leg fields that went with it) was removed 2026-09 - outbound
+   * calling is not currently in use, and that machinery only ever existed to
+   * coordinate two simultaneous WebSocket streams for one call. See
+   * docs/VOICE_PLATFORM_ARCHITECTURE_REVIEW_AND_ROADMAP_2026-09-07.md for the
+   * prior design if dual-leg outbound is ever needed again.
    */
-  legType?: "leg1_system" | "leg2_customer" | "inbound" | "unknown";
-  /**
-   * When true, skip STT/RAG processing for this session (e.g., leg1_system in dual-leg calls).
-   * Audio is still buffered to detect barge-in but not sent to the pipeline.
-   */
-  suppressSTTProcessing?: boolean;
-  /** True while the campaign script TTS is being played. */
-  playingCampaignScript?: boolean;
-  /** True once the campaign script playback `mark` has been acknowledged. */
-  scriptPlaybackComplete?: boolean;
-  /** The mark name used for the campaign script (e.g., 'campaign_script_<id>'). */
-  campaignScriptMarkName?: string | null;
-  /**
-   * Rolling buffer of recently-sent TTS text for echo detection.
-   * Entries expire after 30 seconds. Used to detect when STT captures bot's own speech.
-   */
-  recentTTSTexts?: Array<{ text: string; timestamp: number }>;
-
-  // --- Cross-Leg Echo Suppression Fields (Phase 2 Fix) ---
-  /**
-   * When set, suppress ALL STT processing until this timestamp (Date.now() epoch ms).
-   * Used after losing the script lock to ignore audio during script playback on other leg.
-   * Set to: Date.now() + estimatedScriptDuration + bufferMs
-   */
-  sttSuppressionUntil?: number;
-  /**
-   * True if this stream is the designated primary stream for the call.
-   * Only the primary stream plays TTS; secondary streams may suppress STT during script.
-   */
-  isPrimaryStream?: boolean;
+  legType?: "inbound";
 }
 
 /**
@@ -310,18 +282,8 @@ export function createSession(params: {
     lastBotResponse: null,
     consecutiveRepeatCount: 0,
     mode: "inbound", // default
-    waitingForFirstSpeech: false,
     campaignId: null,
-    // Outbound echo suppression defaults
     legType: "inbound",
-    suppressSTTProcessing: false,
-    playingCampaignScript: false,
-    scriptPlaybackComplete: false,
-    campaignScriptMarkName: null,
-    recentTTSTexts: [],
-    // Cross-leg echo suppression (Phase 2)
-    sttSuppressionUntil: undefined,
-    isPrimaryStream: undefined,
   };
 
   activeSessions.set(params.streamSid, session);

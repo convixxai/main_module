@@ -84,8 +84,8 @@ export const env = {
   /** Sarvam AI (speech-to-text / text-to-speech). Get key from https://dashboard.sarvam.ai/ */
   sarvam: {
     apiKey: process.env.SARVAM_API_KEY || "",
-    /** TTS model: `bulbul:v2` (natural default) or `bulbul:v3`. */
-    ttsModel: (process.env.SARVAM_TTS_MODEL || "bulbul:v2").trim(),
+    /** TTS model: `bulbul:v3` (default; Sarvam deprecated bulbul:v2 in 2026-09) or `bulbul:v3-beta`/`bulbul:v4`. */
+    ttsModel: (process.env.SARVAM_TTS_MODEL || "bulbul:v3").trim(),
     /**
      * Sarvam TTS synthesis rate (Hz). Higher = better source quality; we resample to Exotel's rate.
      * Common: 22050, 24000, 16000. Must match what Sarvam returns in WAV / request.

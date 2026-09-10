@@ -22,6 +22,8 @@ export type CartesiaWsSpeakParams = {
   maxBufferDelayMs?: number;
   continue?: boolean;
   contextId?: string;
+  /** See CartesiaTtsParams.normalization in services/cartesia.ts. Requires sonic-3.6+. */
+  normalization?: string | null;
 };
 
 type PendingContext = {
@@ -383,6 +385,10 @@ export class CartesiaTtsSession {
 
     if (params.language?.trim()) {
       body.language = params.language.trim();
+    }
+
+    if (params.normalization?.trim()) {
+      body.normalization = params.normalization.trim();
     }
 
     const gen: Record<string, unknown> = {};

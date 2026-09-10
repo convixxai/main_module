@@ -10,13 +10,20 @@ const PVC_CREDITS_PER_CHAR = 1.5;
 /**
  * Curated list for UI dropdowns only - NOT an allow-list (see
  * resolveCartesiaModel below). Verified against the real Cartesia
- * /tts/bytes endpoint with this server's own CARTESIA_API_KEY on
- * 2026-09-10: sonic-3.5, sonic-3, sonic-2, sonic-turbo, and sonic-latest
- * all returned 200; sonic-english, sonic-turbo-2025-03-07, and bare
- * "sonic" returned 400/404 and are not valid model ids on this account.
+ * /tts/bytes endpoint with this server's own CARTESIA_API_KEY:
+ * - 2026-09-10: sonic-3.5, sonic-3, sonic-2, sonic-turbo, and sonic-latest
+ *   all returned 200; sonic-english, sonic-turbo-2025-03-07, and bare
+ *   "sonic" returned 400/404 and are not valid model ids on this account.
+ * - 2026-09-10 (later): sonic-3.6 confirmed - it's Cartesia's own new
+ *   default per their live API docs, required for the `normalization`
+ *   digit/date-reading control (see CartesiaTtsParams.normalization),
+ *   and confirmed working with both Hindi and Marathi voices on this
+ *   account. Also listed on Cartesia's Free tier pricing page alongside
+ *   every paid tier, so this isn't paid-only.
  */
 export const CARTESIA_MODELS = [
-  { id: "sonic-3.5", label: "Sonic 3.5 (latest stable)", recommended: true },
+  { id: "sonic-3.6", label: "Sonic 3.6 (latest, recommended)", recommended: true },
+  { id: "sonic-3.5", label: "Sonic 3.5 (previous stable)" },
   { id: "sonic-3.5-2026-05-04", label: "Sonic 3.5 snapshot (2026-05-04)", pinned: true },
   { id: "sonic-turbo", label: "Sonic Turbo (lower latency)" },
   { id: "sonic-3", label: "Sonic 3 (legacy)" },
@@ -269,6 +276,16 @@ export type CartesiaTtsParams = {
   pronunciationDictId?: string | null;
   legacySpeed?: (typeof CARTESIA_LEGACY_SPEEDS)[number] | null;
   isPvcVoice?: boolean;
+  /**
+   * Cartesia `normalization` override - "auto" (Cartesia's own default,
+   * omit this field entirely to get it), "off", or a locale code like
+   * "en-IN" to pin number/date reading conventions independently of
+   * `language` (e.g. a Hindi voice reading digits the English way).
+   * Requires sonic-3.6+. See docs.cartesia.ai/build-with-cartesia/
+   * capability-guides/advanced-capabilities#hindi-voice-english-digit-reading.
+   * Free-text, trusted as-is, same reasoning as resolveCartesiaModel.
+   */
+  normalization?: string | null;
 };
 
 export function cartesiaConfigured(): boolean {
@@ -549,7 +566,7 @@ export function contentTypeForCartesiaOutput(container: string): string {
 
 export function cartesiaSimulatorDefaults() {
   return {
-    model_id: "sonic-3.5",
+    model_id: "sonic-3.6",
     voice_id: "",
     language: "en",
     generation_config: {
@@ -734,6 +751,10 @@ export async function cartesiaTextToSpeech(
 
   if (params.language?.trim()) {
     body.language = params.language.trim();
+  }
+
+  if (params.normalization?.trim()) {
+    body.normalization = params.normalization.trim();
   }
 
   const gen: Record<string, unknown> = {};

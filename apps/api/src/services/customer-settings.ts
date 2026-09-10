@@ -49,6 +49,8 @@ export interface CustomerSettings {
   cartesia_max_buffer_delay_ms: number;
   cartesia_emotion_mode: CartesiaEmotionMode;
   cartesia_allowed_emotions: string[];
+  /** Cartesia TTS `normalization` override (e.g. "en-IN", "off"). NULL = Cartesia's own "auto" locale-aware default. Requires sonic-3.6+. */
+  cartesia_normalization: string | null;
 
   // D. RAG / LLM
   rag_use_openai_only: boolean;
@@ -180,6 +182,7 @@ export const ADMIN_ONLY_FIELDS = new Set<keyof CustomerSettingsPatch>([
   "webhook_retry_attempts",
   "filler_ack_threshold",
   "cartesia_max_buffer_delay_ms",
+  "cartesia_normalization",
 ]);
 
 /**
@@ -213,6 +216,7 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   "cartesia_max_buffer_delay_ms",
   "cartesia_emotion_mode",
   "cartesia_allowed_emotions",
+  "cartesia_normalization",
   // D
   "rag_use_openai_only",
   "rag_top_k",
@@ -429,6 +433,9 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
   }
   if (out["cartesia_allowed_emotions"] === undefined) {
     out["cartesia_allowed_emotions"] = ["neutral"];
+  }
+  if (out["cartesia_normalization"] === undefined) {
+    out["cartesia_normalization"] = null;
   }
 
   return out as unknown as CustomerSettings;

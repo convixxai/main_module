@@ -18,6 +18,8 @@ export interface VodafoneTtsConfig {
   model?: string | null;
   speaker?: string | null;
   language?: string | null;
+  /** Cartesia-only. See CartesiaTtsParams.normalization in services/cartesia.ts. */
+  normalization?: string | null;
 }
 
 const TARGET_SAMPLE_RATE = 8000;
@@ -34,6 +36,7 @@ export async function synthesizeSpeechToPcm8k(
       modelId: cfg.model ?? undefined,
       voiceId: cfg.speaker,
       language: cfg.language ?? "en",
+      normalization: cfg.normalization ?? undefined,
       outputFormat: cartesiaOutputFormatForExotel(TARGET_SAMPLE_RATE),
     });
     // cartesiaOutputFormatForExotel(8000) always returns raw pcm_s16le @ 8000 for this input.

@@ -1,3 +1,19 @@
+/**
+ * Voice-appropriate spoken-reply style, passed as `additionalSystemPrompt` into
+ * runAskPipeline for any voice/audio caller (Vodafone, the QA test console's
+ * audio/chat_voice modes). Text-only callers (plain chat, production /ask)
+ * should NOT get this - it's specifically about the fact that the answer gets
+ * spoken aloud, not read on a screen. Mirrors the phone-call-specific wording
+ * exotel-voicebot.ts's own separate RAG prompt has always had (short,
+ * conversational, no bullet points) - added here so every voice caller gets it
+ * through the one shared pipeline, instead of only Exotel having it.
+ */
+export const VOICE_SPOKEN_REPLY_STYLE_RULE = `
+--- Spoken reply style (mandatory - this answer will be read aloud on a phone call) ---
+- Keep answers SHORT and conversational - suitable for a live phone call. One or two complete sentences.
+- Avoid bullet points, numbered lists, headings, markdown, or any other formatting meant for reading on a screen - speak naturally, the way a person would say it out loud.
+- Do not spell out URLs, code, or symbols meant for visual reading; describe them in words instead.`;
+
 /** Appended to voice/chat RAG when multilingual is enabled. */
 export const RAG_MULTILINGUAL_GRAMMAR_RULE = `
 --- Multilingual writing quality (mandatory for non-English replies) ---

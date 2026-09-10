@@ -100,6 +100,7 @@ import {
 import {
   getOrCreateCartesiaTtsSession,
 } from "../services/cartesia-tts-ws";
+import { looksLikeRawRagMarker } from "../services/voice-reply-stream";
 import {
   cartesiaSpeechToTextWebsocket,
   cartesiaSttFinalizeStreamingSession,
@@ -117,6 +118,17 @@ import {
   inferLanguageFromTranscript,
   isConversationalOpener,
   isEffectivelyEmptySttTranscript,
+  LANGUAGE_DISPLAY_NAME,
+  humanizeAllowedList,
+  normalizeBcp47Tag,
+  normalizeAllowedLangList,
+  clampLanguageToAllowed,
+  isLanguageInAllowedList,
+  languagesLooselyEqual,
+  persistSessionActiveLanguage as persistSessionActiveLanguageShared,
+  decideLanguageSwitchAction,
+  languageSwitchOptionsPrompt,
+  parseLanguageChoice,
 } from "../services/voice-language-infer";
 import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
 import {
@@ -142,16 +154,6 @@ import {
   fireTenantWebhook,
   postSlackIncomingWebhook,
 } from "../services/tenant-webhooks";
-import {
-  isEchoOfRecentTTS,
-  addToRecentTTSBuffer,
-  pruneRecentTTSBuffer,
-  addToSharedTTSBuffer,
-  markScriptPlaybackComplete,
-  estimateTTSDurationMs,
-  setActiveResponder,
-  isActiveResponder,
-} from "../utils/echo-detection";
 
 // ============================================================
 // Constants
@@ -266,6 +268,7 @@ async function preWarmGreetingCache(
         pronunciationDictId: session.cartesiaPronunciationDictId ?? null,
         legacySpeed: session.cartesiaLegacySpeed ?? null,
         maxBufferDelayMs: cs?.cartesia_max_buffer_delay_ms ?? 0,
+        normalization: cs?.cartesia_normalization ?? undefined,
       });
       if (pcm.length > 0) {
         setCachedGreetingPcm(cacheKey, pcm);
@@ -280,7 +283,7 @@ async function preWarmGreetingCache(
     const ttsPayload: SarvamTtsBody = {
       text: text.slice(0, 2500),
       target_language_code: languageCode,
-      model: session.ttsModel?.trim() || cs?.tts_model?.trim() || env.sarvam.ttsModel || "bulbul:v2",
+      model: session.ttsModel?.trim() || cs?.tts_model?.trim() || env.sarvam.ttsModel || "bulbul:v3",
       speech_sample_rate: exotelRate.toString(),
       output_audio_codec: "wav",
     };
@@ -332,30 +335,6 @@ function pcmRmsEnergy(pcm: Buffer): number {
     sumSq += sample * sample;
   }
   return Math.sqrt(sumSq / sampleCount);
-}
-
-/** Load pre-rendered campaign audio script from file. */
-async function loadCampaignAudio(campaignId: string): Promise<Buffer | null> {
-  const result = await pool.query(
-    "SELECT audio_file_path FROM outbound_campaigns WHERE id = $1",
-    [campaignId]
-  );
-  if (result.rows.length === 0 || !result.rows[0].audio_file_path) return null;
-  const dbPath = result.rows[0].audio_file_path;
-  
-  // Try absolute path from DB
-  if (fs.existsSync(dbPath)) return fs.readFileSync(dbPath);
-  
-  // Try resolving relative to current working directory
-  const baseName = path.basename(dbPath);
-  const localPath = path.join(process.cwd(), "uploads", "campaigns", baseName);
-  if (fs.existsSync(localPath)) return fs.readFileSync(localPath);
-  
-  // Try resolving relative to monorepo structure
-  const nestedPath = path.join(process.cwd(), "apps", "api", "uploads", "campaigns", baseName);
-  if (fs.existsSync(nestedPath)) return fs.readFileSync(nestedPath);
-
-  return null;
 }
 
 /** If Exotel never sends inbound `mark` after our outbound audio, unblock STT after this slack past estimated play time. */
@@ -820,83 +799,21 @@ function scheduleMaxCallDurationTimer(
   }, ms);
 }
 
-/** Normalize to `xx-YY` (e.g. en-IN). */
-function normalizeBcp47Tag(code: string): string {
-  const t = code.trim();
-  if (!t) return "en-IN";
-  const parts = t.split(/[-_]/).filter(Boolean);
-  if (parts.length >= 2) {
-    return `${parts[0].toLowerCase()}-${parts[1].toUpperCase()}`;
-  }
-  return parts[0].toLowerCase();
-}
+// normalizeBcp47Tag, normalizeAllowedLangList, clampLanguageToAllowed,
+// isLanguageInAllowedList, languagesLooselyEqual moved to
+// services/voice-language-infer.ts (2026-09) so vodafone-voicebot.ts can
+// share the exact same logic - see that file's imports below.
 
-/** Non-empty allowlist; if DB list empty, use `[fallback]`. */
-function normalizeAllowedLangList(
-  fromSession: string[] | undefined,
-  fallback: string
-): string[] {
-  const fb = normalizeBcp47Tag(fallback);
-  const raw = fromSession?.length ? fromSession : [fb];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const c of raw) {
-    const n = normalizeBcp47Tag(c);
-    if (!seen.has(n)) {
-      seen.add(n);
-      out.push(n);
-    }
-  }
-  return out.length > 0 ? out : [fb];
-}
-
-/**
- * If Sarvam STT guesses a language outside the tenant allowlist (e.g. ta-IN),
- * snap to the tenant default so TTS/LLM stay within policy.
- */
-function clampLanguageToAllowed(
-  detectedRaw: string,
-  allowed: string[],
-  fallback: string
-): string {
-  if (allowed.length === 0) return normalizeBcp47Tag(fallback);
-  const d = normalizeBcp47Tag(detectedRaw);
-  if (allowed.includes(d)) return d;
-  const primary = d.split("-")[0]?.toLowerCase() ?? "";
-  const byPrimary = allowed.find(
-    (a) => a.split("-")[0]?.toLowerCase() === primary
-  );
-  if (byPrimary) return byPrimary;
-  return normalizeBcp47Tag(fallback);
-}
-
-/** Same acceptance rule as clamp (exact tag or matching primary subtag). */
-function isLanguageInAllowedList(detectedRaw: string, allowed: string[]): boolean {
-  if (!allowed.length) return true;
-  const d = normalizeBcp47Tag(detectedRaw);
-  if (allowed.includes(d)) return true;
-  const primary = d.split("-")[0]?.toLowerCase() ?? "";
-  return allowed.some(
-    (a) => a.split("-")[0]?.toLowerCase() === primary
-  );
-}
-
-function languagesLooselyEqual(a: string, b: string): boolean {
-  const na = normalizeBcp47Tag(a);
-  const nb = normalizeBcp47Tag(b);
-  if (na === nb) return true;
-  const pa = na.split("-")[0]?.toLowerCase() ?? "";
-  const pb = nb.split("-")[0]?.toLowerCase() ?? "";
-  return pa.length > 0 && pa === pb;
-}
-
+/** Exotel-specific wrapper: persists the language on the session, then also
+ *  updates exotel_call_sessions and emits a trace event. Vodafone has no
+ *  equivalent DB column to update, so it calls the shared
+ *  persistSessionActiveLanguage directly instead of this wrapper. */
 function persistSessionActiveLanguage(
   session: VoicebotSession,
   lang: string,
   log?: FastifyRequest["log"]
 ): void {
-  const n = normalizeBcp47Tag(lang);
-  session.currentLanguageCode = n;
+  const n = persistSessionActiveLanguageShared(session, lang);
   if (session.callSessionDbId) {
     void updateExotelCallSessionLanguage(session.callSessionDbId, n).catch(() => { });
   }
@@ -909,126 +826,9 @@ function persistSessionActiveLanguage(
   });
 }
 
-/**
- * Decides whether a detected language mismatch should be surfaced to the
- * caller as an explicit "which language would you like?" question, or
- * ignored for now. Deliberately NEVER returns a silent-switch action — the
- * only two outcomes are "keep answering in the current session language"
- * or "offer an explicit choice." See exotel-voicebot.ts language-switch
- * section notes (2026-09) for why: a single noisy/mis-detected turn used to
- * flip the reply language with no warning, which is exactly what callers
- * experienced as "it randomly switched languages."
- */
-type LanguageSwitchDecision =
-  | { action: "continue" }
-  | { action: "offer"; target: string; confidence: number | null };
-
-export function decideLanguageSwitchAction(
-  session: VoicebotSession,
-  cust: CustomerSettings | null | undefined,
-  params: {
-    multilingual: boolean;
-    clampedDetected: string;
-    languageProbability: number | null;
-    sttProvider: string;
-    allowedNorm: string[];
-    log?: FastifyRequest["log"];
-  }
-): LanguageSwitchDecision {
-  const { multilingual, clampedDetected, languageProbability, sttProvider, allowedNorm } = params;
-  if (!multilingual) return { action: "continue" };
-
-  const active = normalizeBcp47Tag(
-    session.currentLanguageCode || session.defaultLanguageCode || "en-IN"
-  );
-  if (!isLanguageInAllowedList(clampedDetected, allowedNorm)) {
-    return { action: "continue" };
-  }
-  if (languagesLooselyEqual(clampedDetected, active)) {
-    return { action: "continue" };
-  }
-
-  // Track consecutive detections of the same different language — a single
-  // noisy/mis-detected turn should never trigger anything by itself.
-  if (session.discrepantLanguageTarget === clampedDetected) {
-    session.discrepantLanguageCount = (session.discrepantLanguageCount || 0) + 1;
-  } else {
-    session.discrepantLanguageTarget = clampedDetected;
-    session.discrepantLanguageCount = 1;
-  }
-
-  const conf = sttProvider === "sarvam" ? languageProbability : null;
-  const canOffer =
-    cust?.allow_language_switch === true &&
-    !session.languageSwitchOfferedThisCall &&
-    !session.pendingLanguageSwitch &&
-    (session.discrepantLanguageCount ?? 0) >= 2;
-
-  if (!canOffer) {
-    voiceTrace(params.log, "voicebot.language.discrepancy_not_offered", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      active_language: active,
-      detected_clamped: clampedDetected,
-      discrepant_count: session.discrepantLanguageCount ?? 0,
-      allow_language_switch: cust?.allow_language_switch === true,
-      already_offered_this_call: session.languageSwitchOfferedThisCall === true,
-    });
-    return { action: "continue" };
-  }
-
-  return { action: "offer", target: normalizeBcp47Tag(clampedDetected), confidence: conf };
-}
-
-/** Builds the "which language would you like?" prompt from the tenant's configured template. */
-export function languageSwitchOptionsPrompt(cust: CustomerSettings | null | undefined, allowedNorm: string[]): string {
-  const template =
-    cust?.language_switch_options_prompt?.trim() || "Please say one of: {LANGUAGE_LIST}.";
-  return template.replace("{LANGUAGE_LIST}", humanizeAllowedList(allowedNorm));
-}
-
-/**
- * Parses the customer's reply to a pending language-switch offer. Accepts
- * either a directly-named language (from the tenant's allowed list) or a
- * tenant-configured yes/no word confirming/declining the best-guess target.
- */
-export function parseLanguageChoice(
-  transcript: string,
-  allowedNorm: string[],
-  yesWords: string[],
-  noWords: string[]
-): { kind: "language"; target: string } | { kind: "yes" } | { kind: "no" } | { kind: "unclear" } {
-  const t = transcript.trim().toLowerCase();
-  if (!t) return { kind: "unclear" };
-
-  // Native-language self-names, so "hindi mein" / "मराठीत" etc. are recognized
-  // even though LANG_LABEL's values are English names.
-  const NATIVE_NAMES: Record<string, string[]> = {
-    "hi-IN": ["hindi", "हिंदी", "हिन्दी"],
-    "mr-IN": ["marathi", "मराठी"],
-    "en-IN": ["english", "इंग्लिश"],
-    "gu-IN": ["gujarati", "ગુજરાતી"],
-    "bn-IN": ["bengali", "বাংলা"],
-    "kn-IN": ["kannada", "ಕನ್ನಡ"],
-    "ml-IN": ["malayalam", "മലയാളം"],
-    "od-IN": ["odia", "ଓଡ଼ିଆ"],
-    "pa-IN": ["punjabi", "ਪੰਜਾਬੀ"],
-    "ta-IN": ["tamil", "தமிழ்"],
-    "te-IN": ["telugu", "తెలుగు"],
-  };
-  for (const tag of allowedNorm) {
-    const names = NATIVE_NAMES[tag] ?? [LANG_LABEL[tag]?.toLowerCase() ?? ""];
-    if (names.some((n) => n && t.includes(n.toLowerCase()))) {
-      return { kind: "language", target: tag };
-    }
-  }
-
-  const norm = (w: string) => w.trim().toLowerCase();
-  if (yesWords.some((w) => norm(w) && t.includes(norm(w)))) return { kind: "yes" };
-  if (noWords.some((w) => norm(w) && t.includes(norm(w)))) return { kind: "no" };
-
-  return { kind: "unclear" };
-}
+// decideLanguageSwitchAction, languageSwitchOptionsPrompt, parseLanguageChoice
+// moved to services/voice-language-infer.ts (2026-09) so vodafone-voicebot.ts
+// can share the exact same explicit-confirmation-only flow - see imports below.
 
 /**
  * When Sarvam tags a wrong script language (e.g. gu-IN) for clear English speech, the first transcript
@@ -1099,25 +899,8 @@ function rehintLikelyCorruptedFirstPass(first: string, retry: string): boolean {
   return false;
 }
 
-const LANG_LABEL: Record<string, string> = {
-  "en-IN": "English",
-  "hi-IN": "Hindi",
-  "mr-IN": "Marathi",
-  "bn-IN": "Bengali",
-  "gu-IN": "Gujarati",
-  "kn-IN": "Kannada",
-  "ml-IN": "Malayalam",
-  "od-IN": "Odia",
-  "pa-IN": "Punjabi",
-  "ta-IN": "Tamil",
-  "te-IN": "Telugu",
-};
-
-function humanizeAllowedList(allowed: string[]): string {
-  return allowed
-    .map((c) => LANG_LABEL[c] ?? c)
-    .join(", ");
-}
+// LANG_LABEL / humanizeAllowedList moved to services/voice-language-infer.ts
+// as LANGUAGE_DISPLAY_NAME / humanizeAllowedList - see imports below.
 
 /** Extra RAG / system rules when `voicebot_multilingual` is true (DB). */
 function multilingualVoicePolicyRules(
@@ -1130,7 +913,7 @@ function multilingualVoicePolicyRules(
   return `
 --- Voice language policy (this phone call; mandatory) ---
 - You MUST reply only in these languages (tags: ${listTags}) — in practice: ${listHuman}.
-- Prefer matching the user's language when it is clearly one of these. Default when ambiguous: ${def} (${LANG_LABEL[def] ?? def}).
+- Prefer matching the user's language when it is clearly one of these. Default when ambiguous: ${def} (${LANGUAGE_DISPLAY_NAME[def] ?? def}).
 - If the user asks to switch language (e.g. "speak Hindi", "मराठीत बोला"), comply immediately using one of the allowed languages only. Confirm briefly in the language you switched to.
 - NEVER say you cannot speak, or apologize for not speaking, any language whose tag appears in the allowed list above. Just answer in that language.
 - Do not use any language whose tag is not in [${listTags}]. If the user seems to use another language, reply in ${def} and briefly ask them to continue in one of: ${listHuman}.
@@ -1191,6 +974,32 @@ function schedulePlaybackMarkFallback(
 // ============================================================
 
 /**
+ * `agents.tts_model` is a single free-text column shared across TTS providers. If a
+ * tenant switches customer_settings.tts_provider without updating their agent's
+ * tts_model, the stale value (e.g. an ElevenLabs model id while the provider is now
+ * Sarvam) gets sent straight to the new provider's API and is rejected, silencing
+ * the call. Only trust the agent-level value when it looks like it belongs to the
+ * currently active provider; otherwise fall back to the provider's own default.
+ */
+function ttsModelMatchesProvider(
+  model: string | null | undefined,
+  provider: string | null | undefined
+): boolean {
+  const m = (model ?? "").trim();
+  if (!m) return false;
+  switch (provider) {
+    case "sarvam":
+      return /^bulbul:/i.test(m);
+    case "elevenlabs":
+      return /^eleven_/i.test(m);
+    case "cartesia":
+      return /^sonic/i.test(m);
+    default:
+      return true;
+  }
+}
+
+/**
  * One `chat_sessions` row per phone call; all turns go to `chat_messages` under that id.
  * Call once from Exotel `start` before `createCallSession` so the call row can store `chat_session_id`.
  * 
@@ -1235,7 +1044,12 @@ async function bootstrapVoicebotChatSession(
           session.greetingText = row.greeting_text;
           session.errorText = row.error_text;
           session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
-          session.ttsModel = row.tts_model;
+          session.ttsModel = ttsModelMatchesProvider(
+            row.tts_model,
+            session.customerSettingsSnapshot?.tts_provider
+          )
+            ? row.tts_model
+            : null;
           session.ttsSpeaker = row.tts_speaker;
           session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
         }
@@ -1284,7 +1098,12 @@ async function bootstrapVoicebotChatSession(
     session.greetingText = row.greeting_text;
     session.errorText = row.error_text;
     session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
-    session.ttsModel = row.tts_model;
+    session.ttsModel = ttsModelMatchesProvider(
+      row.tts_model,
+      session.customerSettingsSnapshot?.tts_provider
+    )
+      ? row.tts_model
+      : null;
     session.ttsSpeaker = row.tts_speaker;
     session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
 
@@ -1634,38 +1453,6 @@ async function speakToExotel(
 ): Promise<boolean> {
   if (session.isClosing) return false;
   session.ttsInProgress = true;
-  
-  // --- OUTBOUND ECHO SUPPRESSION: Buffer TTS text for echo detection ---
-  // For outbound campaign calls, track all TTS text so we can detect when
-  // STT captures our own speech output (feedback loop prevention).
-  if (
-    env.voicebot.outboundEchoSuppressionEnabled &&
-    session.mode === "outbound_campaign" &&
-    text.length > 0
-  ) {
-    session.recentTTSTexts = addToRecentTTSBuffer(
-      session.recentTTSTexts || [],
-      text,
-      30000 // 30 second TTL for regular TTS
-    );
-    log?.debug(
-      { stream_sid: session.streamSid, text_chars: text.length, buffer_size: session.recentTTSTexts.length },
-      "voicebot: added TTS text to echo detection buffer"
-    );
-    
-    // Also add to shared DB buffer for cross-leg echo detection
-    if (env.voicebot.outboundCrossLegEchoEnabled && session.callSessionDbId) {
-      addToSharedTTSBuffer(
-        pool,
-        session.callSessionDbId,
-        text,
-        session.streamSid,
-        env.voicebot.outboundTtsBufferMaxAgeSecs
-      ).catch((err) => {
-        log?.warn({ err, stream_sid: session.streamSid }, "Failed to add TTS to shared buffer");
-      });
-    }
-  }
   
   try {
     const cs = tenantCs(session);
@@ -2087,6 +1874,7 @@ async function speakToExotel(
         pronunciationDictId: session.cartesiaPronunciationDictId ?? null,
         legacySpeed: session.cartesiaLegacySpeed ?? null,
         maxBufferDelayMs,
+        normalization: cs?.cartesia_normalization ?? undefined,
         contextId,
         continue: continueStream,
       };
@@ -2164,7 +1952,7 @@ async function speakToExotel(
         session.ttsModel?.trim() ||
         cs?.tts_model?.trim() ||
         env.sarvam.ttsModel ||
-        "bulbul:v2",
+        "bulbul:v3",
       speech_sample_rate: (
         session.ttsSampleRate ||
         cs?.tts_default_sample_rate ||
@@ -2530,6 +2318,7 @@ function buildCartesiaReplyStreamBase(
     pronunciationDictId: session.cartesiaPronunciationDictId ?? null,
     legacySpeed: session.cartesiaLegacySpeed ?? null,
     maxBufferDelayMs: cs?.cartesia_max_buffer_delay_ms ?? 0,
+    normalization: cs?.cartesia_normalization ?? undefined,
   };
 }
 
@@ -2597,7 +2386,12 @@ function createStreamingVoiceTts(
         if (cut < 0) break;
         const piece = buffer.slice(0, cut + 1).trim();
         buffer = buffer.slice(cut + 1).replace(/^\s+/, "");
-        if (piece.length > 0 && !session.isClosing) {
+        // Same guard as vodafone-voicebot.ts / qa-test-console.ts: never speak a raw
+        // RAG sentinel token (e.g. out_of_scope) verbatim if the prompt ever emits
+        // one - see services/voice-reply-stream.ts's doc for why this matters once
+        // streaming has already started speaking before the post-processing swap
+        // (below, after ttsq.flushRest()) can run.
+        if (piece.length > 0 && !session.isClosing && !looksLikeRawRagMarker(piece)) {
           if (isCartesia) {
             const stream = await ensureCartesiaReply();
             if (stream) {
@@ -2675,298 +2469,9 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
 
   if (session.isClosing) return;
 
-  // --- CROSS-LEG ECHO FIX: Time-based STT suppression window ---
-  // If this stream lost the script lock, suppress STT for the calculated duration
-  // to prevent transcribing the other stream's campaign script playback.
-  if (
-    env.voicebot.outboundCrossLegEchoEnabled &&
-    session.mode === "outbound_campaign" &&
-    session.sttSuppressionUntil &&
-    Date.now() < session.sttSuppressionUntil
-  ) {
-    const remainingMs = session.sttSuppressionUntil - Date.now();
-    log?.info(
-      {
-        stream_sid: session.streamSid,
-        transcript_preview: transcript.slice(0, 100),
-        suppression_remaining_ms: remainingMs,
-        is_primary: session.isPrimaryStream,
-      },
-      "voicebot: STT suppressed during script playback window (cross-leg echo prevention)"
-    );
-    voiceTrace(log, "pipeline.echo.time_suppressed", {
-      customerId: session.customerId,
-      stream_sid: session.streamSid,
-      transcript_chars: transcript.length,
-      remaining_ms: remainingMs,
-    });
-    return;
-  }
-  
-  // Clear expired suppression window if we got past the check
-  if (session.sttSuppressionUntil && Date.now() >= session.sttSuppressionUntil) {
-    log?.info(
-      { stream_sid: session.streamSid, was_primary: session.isPrimaryStream },
-      "voicebot: STT suppression window expired — resuming normal processing"
-    );
-    session.sttSuppressionUntil = undefined;
-  }
-
-  // --- OUTBOUND ECHO SUPPRESSION: Check if this STT result is an echo of our TTS ---
-  // For outbound campaign calls, detect when the STT has captured the bot's own speech
-  // output and skip processing to prevent feedback loops.
-  if (
-    env.voicebot.outboundEchoSuppressionEnabled &&
-    session.mode === "outbound_campaign" &&
-    !session.waitingForFirstSpeech && // Don't filter the initial trigger speech
-    session.recentTTSTexts &&
-    session.recentTTSTexts.length > 0
-  ) {
-    // First check: if this is leg1_system, suppress all STT processing
-    if (session.suppressSTTProcessing) {
-      log?.info(
-        {
-          stream_sid: session.streamSid,
-          leg_type: session.legType,
-          transcript_preview: transcript.slice(0, 100),
-        },
-        "voicebot: suppressing STT from system leg (leg1) to prevent feedback loop"
-      );
-      voiceTrace(log, "pipeline.echo.suppressed_system_leg", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        leg_type: session.legType,
-        transcript_chars: transcript.length,
-      });
-      return;
-    }
-
-    // Second check: echo detection based on text similarity
-    const echoCheck = isEchoOfRecentTTS(transcript, session.recentTTSTexts, {
-      similarityThreshold: env.voicebot.outboundEchoSimilarityThreshold,
-      maxAgeMs: 30000,
-      minTranscriptLength: 5,
-    });
-
-    if (echoCheck.isEcho) {
-      log?.info(
-        {
-          stream_sid: session.streamSid,
-          transcript_preview: transcript.slice(0, 100),
-          matched_tts: echoCheck.matchedText,
-          similarity: echoCheck.similarity?.toFixed(2),
-        },
-        "voicebot: detected echo of recent TTS — suppressing to prevent feedback loop"
-      );
-      voiceTrace(log, "pipeline.echo.detected", {
-        customerId: session.customerId,
-        stream_sid: session.streamSid,
-        transcript_chars: transcript.length,
-        similarity: echoCheck.similarity,
-        matched_tts_preview: echoCheck.matchedText,
-      });
-      
-      // Prune old entries from the buffer
-      session.recentTTSTexts = pruneRecentTTSBuffer(session.recentTTSTexts, 30000);
-      return;
-    }
-  }
-
-  // --- SINGLE ACTIVE LEG (SAL) CHECK ---
-  // In dual-leg outbound calls, only ONE stream should respond after script playback.
-  // This is a simpler, more reliable approach than echo detection.
-  // If an active responder is set and it's NOT this stream, silently drop the STT.
-  if (
-    env.voicebot.outboundCrossLegEchoEnabled &&
-    session.mode === "outbound_campaign" &&
-    session.callSessionDbId &&
-    !session.waitingForFirstSpeech // Only check after script playback begins
-  ) {
-    try {
-      const isThisActiveResponder = await isActiveResponder(pool, session.callSessionDbId, session.streamSid);
-      
-      // If active responder is set and it's NOT this stream, drop the STT
-      if (isThisActiveResponder === false) {
-        log?.info(
-          {
-            stream_sid: session.streamSid,
-            transcript_preview: transcript.slice(0, 100),
-            is_primary: session.isPrimaryStream,
-          },
-          "voicebot: STT dropped — another stream is the active responder (SAL fix)"
-        );
-        voiceTrace(log, "pipeline.stt.sal_dropped", {
-          customerId: session.customerId,
-          stream_sid: session.streamSid,
-          transcript_chars: transcript.length,
-        });
-        return;
-      }
-      
-      // If isThisActiveResponder is null, no active responder set yet (script still playing)
-      // In this case, continue - the time-based suppression should handle it
-      // If isThisActiveResponder is true, this is the active responder - proceed normally
-      
-    } catch (err) {
-      log?.warn({ err, stream_sid: session.streamSid }, "Failed to check active responder status");
-      // Non-fatal: continue processing (fail open to not block valid STT)
-    }
-  }
-
   session.cartesiaReplyStreamContextId = null;
   session.cartesiaReplyStreamPieceCount = 0;
 
-  // --- CAMPAIGN SCRIPT PLAYBACK ---
-  // Wait until we have a confirmed transcript (e.g., the customer actually said "Hello")
-  // to prevent background noise from triggering the script prematurely.
-  if (session.waitingForFirstSpeech && session.campaignId) {
-    session.waitingForFirstSpeech = false;
-    log?.info({ campaignId: session.campaignId, transcript }, "voicebot: customer speech confirmed via STT — playing campaign script");
-
-    try {
-      // --- DUAL-LEG COORDINATION: Prevent both WebSocket streams from playing script ---
-      // In dual-leg outbound calls, both streams may detect customer speech simultaneously.
-      // Use atomic DB update to ensure only ONE stream plays the script.
-      // We atomically set script_played_by_stream and check if we won the race.
-      if (session.callSessionDbId) {
-        const lockResult = await pool.query(
-          `UPDATE exotel_call_sessions
-           SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('script_played_by_stream', $1::text, 'script_played_at', NOW()::text)
-           WHERE id = $2::uuid
-             AND (metadata->>'script_played_by_stream' IS NULL OR metadata->>'script_played_by_stream' = '')
-           RETURNING id`,
-          [session.streamSid, session.callSessionDbId]
-        );
-
-        if (lockResult.rows.length === 0) {
-          // Another stream already claimed the script playback
-          session.isPrimaryStream = false;
-          
-          // --- CROSS-LEG ECHO FIX: Time-based STT suppression for secondary streams ---
-          // This stream lost the lock, meaning another stream is playing the campaign script.
-          // We must suppress STT on this stream during script playback to prevent:
-          // 1. Transcribing the bot's own speech from the other stream
-          // 2. Generating LLM responses to that transcribed speech (AI-to-AI loop)
-          //
-          // Calculate suppression window based on script length estimation.
-          if (env.voicebot.outboundCrossLegEchoEnabled && session.campaignId) {
-            try {
-              const scriptRes = await pool.query(
-                "SELECT script_text FROM outbound_campaigns WHERE id = $1",
-                [session.campaignId]
-              );
-              const scriptText = scriptRes.rows[0]?.script_text || "";
-              const estimatedDurationMs = estimateTTSDurationMs(scriptText);
-              const suppressionMs = Math.round(
-                estimatedDurationMs * env.voicebot.outboundSttSuppressionMultiplier +
-                env.voicebot.outboundSttSuppressionBufferMs
-              );
-              session.sttSuppressionUntil = Date.now() + suppressionMs;
-              
-              log?.info(
-                {
-                  stream_sid: session.streamSid,
-                  campaignId: session.campaignId,
-                  estimated_duration_ms: estimatedDurationMs,
-                  suppression_ms: suppressionMs,
-                  suppression_until: new Date(session.sttSuppressionUntil).toISOString(),
-                },
-                "voicebot: lost script lock — enabling time-based STT suppression (cross-leg echo fix)"
-              );
-            } catch (err) {
-              log?.error({ err, campaignId: session.campaignId }, "Failed to calculate STT suppression window");
-              // Fallback: suppress for 30 seconds
-              session.sttSuppressionUntil = Date.now() + 30000;
-            }
-          }
-          
-          log?.info(
-            {
-              stream_sid: session.streamSid,
-              call_session_id: session.callSessionDbId,
-              campaignId: session.campaignId,
-            },
-            "voicebot: campaign script already being played by another stream — skipping duplicate playback"
-          );
-          voiceTrace(log, "campaign.script_skipped_duplicate", {
-            customerId: session.customerId,
-            stream_sid: session.streamSid,
-            campaign_id: session.campaignId,
-          });
-          return;
-        }
-
-        session.isPrimaryStream = true;
-        log?.info(
-          { stream_sid: session.streamSid, campaignId: session.campaignId },
-          "voicebot: acquired lock to play campaign script (dual-leg coordination) — marked as primary stream"
-        );
-      }
-
-      const campaignRes = await pool.query(
-        "SELECT script_text, language_code FROM outbound_campaigns WHERE id = $1",
-        [session.campaignId]
-      );
-
-      if (campaignRes.rows.length > 0 && campaignRes.rows[0].script_text) {
-        const scriptText = campaignRes.rows[0].script_text;
-        const langCode = campaignRes.rows[0].language_code || "en-IN";
-        log?.info({ campaignId: session.campaignId, chars: scriptText.length }, "voicebot: synthesizing realtime TTS for campaign script");
-
-        // Lock the session into the campaign's language for the rest of the call
-        session.currentLanguageCode = langCode;
-        if (session.callSessionDbId) {
-          pool.query(
-            "UPDATE exotel_call_sessions SET current_language_code = $1 WHERE id = $2::uuid",
-            [langCode, session.callSessionDbId]
-          ).catch((e) => log?.error({ err: e }, "failed to update call session language"));
-        }
-        
-        // --- OUTBOUND ECHO SUPPRESSION: Track campaign script playback ---
-        session.playingCampaignScript = true;
-        session.scriptPlaybackComplete = false;
-        
-        // Add script text to echo detection buffer so any STT that captures it will be filtered
-        if (env.voicebot.outboundEchoSuppressionEnabled) {
-          session.recentTTSTexts = addToRecentTTSBuffer(
-            session.recentTTSTexts || [],
-            scriptText,
-            60000 // Keep campaign script in buffer for 60s (longer than typical playback)
-          );
-          log?.info(
-            { campaignId: session.campaignId, buffer_size: session.recentTTSTexts.length },
-            "voicebot: added campaign script to echo detection buffer"
-          );
-          
-          // Also add to shared DB buffer for cross-leg echo detection
-          if (env.voicebot.outboundCrossLegEchoEnabled && session.callSessionDbId) {
-            addToSharedTTSBuffer(
-              pool,
-              session.callSessionDbId,
-              scriptText,
-              session.streamSid,
-              env.voicebot.outboundTtsBufferMaxAgeSecs
-            ).catch((err) => {
-              log?.warn({ err, campaignId: session.campaignId }, "Failed to add campaign script to shared buffer");
-            });
-          }
-        }
-        
-        await speakToExotel(ws, session, scriptText, langCode, log);
-        
-        // Note: playingCampaignScript will be set to false in the mark handler
-        // when playback completes
-
-        // Link to chat session as initial bot message
-        appendAssistantChatLine(session, scriptText, "campaign_script").catch(() => {});
-      } else {
-        log?.warn({ campaignId: session.campaignId }, "voicebot: campaign script not found in db");
-      }
-    } catch (err) {
-      log?.error({ err, campaignId: session.campaignId }, "voicebot: error synthesizing campaign script");
-    }
-    return; // Do NOT proceed to RAG
-  }
 
   if (transcript && transcript.trim().length > 0) {
     appendUserChatLine(session, transcript).catch((err) => {
@@ -3823,7 +3328,7 @@ async function processUtterance(
           ).catch(() => { });
         }
 
-        const targetLabel = LANG_LABEL[chosenTarget] ?? chosenTarget;
+        const targetLabel = LANGUAGE_DISPLAY_NAME[chosenTarget] ?? chosenTarget;
         let ackMsg = `Okay, let's continue in ${targetLabel}. How can I help you?`;
         if (chosenTarget.startsWith("hi")) {
           ackMsg = `ठीक है, अब हम हिंदी में बात करेंगे। मैं आपकी क्या मदद कर सकता हूँ?`;
@@ -3855,7 +3360,7 @@ async function processUtterance(
       }
       if (choice.kind === "no") {
         session.pendingLanguageSwitch = null;
-        const msg = `Okay, we will continue in ${LANG_LABEL[activeBcp] ?? activeBcp}.`;
+        const msg = `Okay, we will continue in ${LANGUAGE_DISPLAY_NAME[activeBcp] ?? activeBcp}.`;
         await appendVoiceTurnToChat(session, transcript, msg, {
           assistantSource: "language_switch_declined",
         });
@@ -3873,7 +3378,7 @@ async function processUtterance(
         return;
       }
       session.pendingLanguageSwitch = null;
-      const msg = `I will continue in ${LANG_LABEL[activeBcp] ?? activeBcp}.`;
+      const msg = `I will continue in ${LANGUAGE_DISPLAY_NAME[activeBcp] ?? activeBcp}.`;
       await appendVoiceTurnToChat(session, transcript, msg, {
         assistantSource: "language_switch_unclear_abort",
       });
@@ -4007,7 +3512,6 @@ async function processUtterance(
             languageProbability,
             sttProvider,
             allowedNorm,
-            log,
           });
           if (decision.action === "offer") {
             session.pendingLanguageSwitch = {
@@ -4163,26 +3667,18 @@ async function runVoicebotAskPipeline(
       getLlmLanguageDetectionPrompt,
     } = await import("../services/llm");
 
-    let customerPrompt: string;
-    let defaultFallbackInstruction: string | null;
-
-    if (session.voiceRagCustomerCache) {
-      customerPrompt = session.voiceRagCustomerCache.systemPrompt;
-      defaultFallbackInstruction = session.voiceRagCustomerCache.defaultNoKb;
-    } else {
-      const customerResult = await pool.query(
-        `SELECT system_prompt, default_no_kb_fallback_instruction FROM customers WHERE id = $1`,
-        [session.customerId]
-      );
-      if (customerResult.rows.length === 0) return null;
-      customerPrompt = customerResult.rows[0].system_prompt;
-      defaultFallbackInstruction =
-        customerResult.rows[0].default_no_kb_fallback_instruction;
-      session.voiceRagCustomerCache = {
-        systemPrompt: customerPrompt,
-        defaultNoKb: defaultFallbackInstruction,
-      };
-    }
+    // Re-fetched fresh every turn - matches ask.ts's runAskPipeline (used by
+    // Vodafone/QA console/production /ask), none of which cache this across
+    // turns either. Was previously cached once per call here; removed so
+    // Exotel's behavior matches the other two carriers exactly.
+    const customerResult = await pool.query(
+      `SELECT system_prompt, default_no_kb_fallback_instruction FROM customers WHERE id = $1`,
+      [session.customerId]
+    );
+    if (customerResult.rows.length === 0) return null;
+    const customerPrompt: string = customerResult.rows[0].system_prompt;
+    const defaultFallbackInstruction: string | null =
+      customerResult.rows[0].default_no_kb_fallback_instruction;
 
     const ragTrace = createRagTrace(log);
     // Overlap: translate+embed || chat history (no dependency between them)
@@ -4222,69 +3718,49 @@ async function runVoicebotAskPipeline(
     await ensureVoicebotChatSessionForUtterance(session, log);
     if (!session.chatSessionId) return null;
 
-    // Parallel: history + agent row (agent is cached after first utterance)
+    // Parallel: history + agent row. Re-fetched fresh every turn (no session-level
+    // cache) - see the customerPrompt fetch above for why.
     const historyP = loadVoicebotChatHistory(session);
-    const agentP = (async () => {
-      if (!session.agentId) return;
-      if (session.voiceRagAgentCache !== undefined) {
-        const c = session.voiceRagAgentCache;
-        if (c) {
-          session.ttsPace = c.ttsPace;
-          session.ttsModel = c.ttsModel;
-          session.ttsSpeaker = c.ttsSpeaker;
-          session.ttsSampleRate = c.ttsSampleRate;
-          await applyAgentVoicePersonaToSession(session, {
-            avatarId: c.avatarId,
-            elevenlabsAvatarId: c.elevenlabsAvatarId,
-            cartesiaAvatarId: c.cartesiaAvatarId,
-          });
-        }
-        return;
-      }
+    const agentP = (async (): Promise<{ systemPrompt: string; fallbackInstruction: string | null } | null> => {
+      if (!session.agentId) return null;
       const agentResult = await pool.query(
         `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
                 avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
          FROM agents WHERE id = $1`,
         [session.agentId]
       );
-      if (agentResult.rows.length > 0) {
-        const row = agentResult.rows[0];
-        session.voiceRagAgentCache = {
-          systemPrompt: row.system_prompt,
-          fallbackInstruction: row.no_kb_fallback_instruction,
-          ttsPace: row.tts_pace != null ? Number(row.tts_pace) : null,
-          ttsModel: row.tts_model,
-          ttsSpeaker: row.tts_speaker,
-          ttsSampleRate: row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null,
-          avatarId: row.avatar_id as string | null,
-          elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
-          cartesiaAvatarId: row.cartesia_avatar_id as string | null,
-        };
-        session.ttsPace = session.voiceRagAgentCache.ttsPace;
-        session.ttsModel = session.voiceRagAgentCache.ttsModel;
-        session.ttsSpeaker = session.voiceRagAgentCache.ttsSpeaker;
-        session.ttsSampleRate = session.voiceRagAgentCache.ttsSampleRate;
-        await applyAgentVoicePersonaToSession(session, {
-          avatarId: row.avatar_id as string | null,
-          elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
-          cartesiaAvatarId: row.cartesia_avatar_id as string | null,
-        });
-      } else {
-        session.voiceRagAgentCache = null;
-      }
+      if (agentResult.rows.length === 0) return null;
+      const row = agentResult.rows[0];
+      session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
+      session.ttsModel = ttsModelMatchesProvider(
+        row.tts_model,
+        session.customerSettingsSnapshot?.tts_provider
+      )
+        ? row.tts_model
+        : null;
+      session.ttsSpeaker = row.tts_speaker;
+      session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
+      await applyAgentVoicePersonaToSession(session, {
+        avatarId: row.avatar_id as string | null,
+        elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
+        cartesiaAvatarId: row.cartesia_avatar_id as string | null,
+      });
+      return {
+        systemPrompt: row.system_prompt as string,
+        fallbackInstruction: row.no_kb_fallback_instruction as string | null,
+      };
     })();
 
     let agentPrompt = customerPrompt;
     let agentFallbackInstruction: string | null = null;
 
-    const [embedBundle, historyRaw] = await Promise.all([embedPipeline, historyP, agentP]);
+    const [embedBundle, historyRaw, agentRow] = await Promise.all([embedPipeline, historyP, agentP]);
 
     if (session.isClosing) return null;
 
-    // Apply agent data after parallel fetch completes
-    if (session.voiceRagAgentCache) {
-      agentPrompt = session.voiceRagAgentCache.systemPrompt;
-      agentFallbackInstruction = session.voiceRagAgentCache.fallbackInstruction;
+    if (agentRow) {
+      agentPrompt = agentRow.systemPrompt;
+      agentFallbackInstruction = agentRow.fallbackInstruction;
     }
     agentPrompt = relaxAgentPrompt(agentPrompt, allowRelatedGeneralAnswersVoice(session));
 
@@ -4393,13 +3869,13 @@ async function runVoicebotAskPipeline(
         session_id: session.chatSessionId || "",
       };
     }
-    const priorUserTurns = history.filter((h) => h.role === "user").length;
     const directTh = ragDirectKbDistanceThreshold(session);
-    // Allow kb-direct on ANY turn: first turn uses the full threshold; subsequent
-    // turns use a tighter threshold (60%) to reduce false positives when context matters.
-    const directThForTurn = priorUserTurns === 0 ? directTh : directTh * 0.6;
+    // Matches ask.ts's runAskPipeline exactly: kb-direct only fires on a session's
+    // very first turn (no history yet) - a later turn always goes through the LLM
+    // so follow-up phrasing/context ("what about that", pronouns, etc.) is handled
+    // correctly instead of returning a raw KB row that ignores the conversation so far.
     const canDirectKb =
-      Number.isFinite(dist) && dist < directThForTurn;
+      history.length === 0 && Number.isFinite(dist) && dist < directTh;
 
     if (canDirectKb) {
       const direct = String(top.answer).trim();
@@ -4441,7 +3917,7 @@ async function runVoicebotAskPipeline(
       );
       const turn = session.effectiveSttLanguageThisTurn;
       if (turn) {
-        const label = LANG_LABEL[turn] ?? turn;
+        const label = LANGUAGE_DISPLAY_NAME[turn] ?? turn;
         languageRule += `\n- This user turn is handled as **${turn}** (${label}) after tenant language policy; prefer that language for your reply when it matches the user's intent and KB.\n`;
         const primary = turn.split("-")[0]?.toLowerCase() ?? "";
         if (primary && primary !== "en") {
@@ -4450,7 +3926,7 @@ async function runVoicebotAskPipeline(
       }
     } else {
       const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
-      const label = LANG_LABEL[def] ?? def;
+      const label = LANGUAGE_DISPLAY_NAME[def] ?? def;
       languageRule = `\n- ALWAYS respond in ${label} (${def}) regardless of the question language.\n- Strictly generate responses ONLY in ${label} (${def}).\n- NEVER generate responses in any other language or a mixture of languages.\n`;
     }
     const elevenLabsTagHint = buildElevenLabsRagAudioTagHintForProvider(
@@ -4487,7 +3963,7 @@ async function runVoicebotAskPipeline(
       kbResult.rows as Array<{ question?: string; answer?: string }>,
       session.effectiveSttLanguageThisTurn ?? null,
       session.effectiveSttLanguageThisTurn
-        ? (LANG_LABEL[session.effectiveSttLanguageThisTurn] ?? session.effectiveSttLanguageThisTurn)
+        ? (LANGUAGE_DISPLAY_NAME[session.effectiveSttLanguageThisTurn] ?? session.effectiveSttLanguageThisTurn)
         : null
     );
     const multilingualGrammarBlock = multilingual ? RAG_MULTILINGUAL_GRAMMAR_RULE : "";
@@ -4496,7 +3972,7 @@ async function runVoicebotAskPipeline(
     const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
     const listHuman = humanizeAllowedList(allowedNorm);
     const listTags = allowedNorm.join(", ");
-    const strictConstraint = `\n- CRITICAL: You MUST strictly generate the response ONLY in one of the allowed languages: ${listHuman} (${listTags}).\n- NEVER generate garbled, non-words, or mixed-language text. Ensure the script matches the selected language perfectly.\n- If the user query is in any disallowed language other than ${listTags}, you MUST ignore it and answer only in ${LANG_LABEL[def] ?? def} asking the user to use an allowed language.`;
+    const strictConstraint = `\n- CRITICAL: You MUST strictly generate the response ONLY in one of the allowed languages: ${listHuman} (${listTags}).\n- NEVER generate garbled, non-words, or mixed-language text. Ensure the script matches the selected language perfectly.\n- If the user query is in any disallowed language other than ${listTags}, you MUST ignore it and answer only in ${LANGUAGE_DISPLAY_NAME[def] ?? def} asking the user to use an allowed language.`;
 
     let strictnessHint = "";
     const s = relatedAnswerStrictnessVoice(session);
@@ -4608,18 +4084,22 @@ async function runVoicebotAskPipeline(
             (lang, confidence) => {
               llmDetectedLanguage = lang;
               llmLanguageConfidence = confidence;
-              // Update session language based on LLM detection
+              // Logging only - deliberately does NOT call persistSessionActiveLanguage
+              // here. The active language must only ever change through the explicit
+              // offer/confirm flow (decideLanguageSwitchAction/pendingLanguageSwitch,
+              // handled earlier in the turn, before the LLM is even called) - this
+              // callback silently flipping the language on its own confidence used to
+              // race against and undermine that flow, which is exactly the bug that
+              // flow was built to fix. See services/voice-language-infer.ts.
               if (confidence === "high" && isLanguageInAllowedList(lang, allowedNorm)) {
-                const normalizedLang = normalizeBcp47Tag(lang);
                 voiceTrace(log, "pipeline.llm_language_detected", {
                   customerId: session.customerId,
                   stream_sid: session.streamSid,
-                  detected_language: normalizedLang,
+                  detected_language: normalizeBcp47Tag(lang),
                   confidence,
-                  previous_language: session.currentLanguageCode,
+                  current_language: session.currentLanguageCode,
+                  note: "logged only - not persisted, see comment above",
                 });
-                // Update session language for TTS and future turns
-                persistSessionActiveLanguage(session, normalizedLang, log);
               }
             },
             currentLangForLlm,
@@ -5071,74 +4551,18 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 }
               }
 
+              // Dual-leg/campaign-script mode removed (2026-09) - outbound calling is not
+              // currently in use, and the campaign-script playback path was itself only
+              // ever dual-leg-coordination code (an atomic DB lock so only one of two
+              // simultaneous WebSocket streams plays the script, cross-leg echo
+              // suppression, single-active-leg STT dropping). With no second leg to
+              // coordinate with, none of that has a purpose - a campaign-linked call now
+              // just gets the normal greeting like any other call. See
+              // docs/VOICE_PLATFORM_ARCHITECTURE_REVIEW_AND_ROADMAP_2026-09-07.md for the
+              // prior design if dual-leg outbound campaigns are ever needed again.
               const campaignId = details.custom_parameters?.campaign_id || outboundMetadata?.campaign_id;
-              if (campaignId) {
-                session.mode = "outbound_campaign";
-                session.campaignId = String(campaignId);
-                session.waitingForFirstSpeech = true;
-                
-                // --- LEG IDENTIFICATION FOR DUAL-LEG OUTBOUND CALLS ---
-                // Exotel's Connect Two Numbers API can create two WebSocket streams:
-                // - Leg 1 (system): connected to the initiating system, receives TTS playback
-                // - Leg 2 (customer): connected to the human callee, receives their voice
-                // However, some setups use a single stream for both directions.
-                //
-                // IMPORTANT: We should NOT aggressively suppress STT based on heuristics alone,
-                // as this can break single-stream setups. Instead, we rely on echo detection
-                // as the primary defense against feedback loops.
-                //
-                // Only suppress STT when we have EXPLICIT leg identification:
-                // - custom_parameters.leg = "1" or "system" (explicitly marked)
-                const legParam = details.custom_parameters?.leg?.trim().toLowerCase();
-                if (legParam === "1" || legParam === "leg1" || legParam === "system") {
-                  session.legType = "leg1_system";
-                  session.suppressSTTProcessing = true;
-                  log.info(
-                    { campaignId, legParam, stream_sid: details.stream_sid },
-                    "voicebot: identified as Leg 1 (system) via custom_parameters — suppressing STT"
-                  );
-                } else if (legParam === "2" || legParam === "leg2" || legParam === "customer") {
-                  session.legType = "leg2_customer";
-                  session.suppressSTTProcessing = false;
-                  log.info(
-                    { campaignId, legParam, stream_sid: details.stream_sid },
-                    "voicebot: identified as Leg 2 (customer) via custom_parameters"
-                  );
-                } else if (details.from && details.to && details.from === details.to) {
-                  // Inverted call pattern: from === to could indicate:
-                  // 1. System leg in a dual-leg setup, OR
-                  // 2. Single-stream setup where both numbers are normalized
-                  // We CANNOT reliably distinguish these cases, so we:
-                  // - Mark as "inverted" for logging purposes
-                  // - Do NOT suppress STT (would break single-stream setups)
-                  // - Rely on echo detection to filter feedback loops
-                  session.legType = "unknown";
-                  session.suppressSTTProcessing = false;
-                  log.info(
-                    { campaignId, from: details.from, to: details.to, stream_sid: details.stream_sid },
-                    "voicebot: from===to pattern detected — using echo detection for feedback prevention (not suppressing STT)"
-                  );
-                } else {
-                  // Default: process normally with echo detection as safety net
-                  session.legType = "unknown";
-                  session.suppressSTTProcessing = false;
-                  log.info(
-                    { campaignId, from: details.from, to: details.to, stream_sid: details.stream_sid },
-                    "voicebot: leg identification inconclusive — using echo detection as fallback"
-                  );
-                }
-
-                // Initialize the TTS buffer for echo detection
-                session.recentTTSTexts = [];
-                
-                log.info({ campaignId }, "voicebot: identified as outbound campaign call");
-              } else if (outboundLinkedId) {
-                session.mode = "outbound";
-                session.legType = "inbound"; // Non-campaign outbound uses single stream
-              } else {
-                session.mode = "inbound";
-                session.legType = "inbound";
-              }
+              session.mode = campaignId || outboundLinkedId ? "outbound" : "inbound";
+              session.legType = "inbound";
 
               log.info({
                 stream_sid: details.stream_sid,
@@ -5214,28 +4638,19 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 notifyCallStartFromSession(session);
                 scheduleMaxCallDurationTimer(session, socket, log);
 
-                if (session.mode === "outbound_campaign") {
-                  log.info({ stream_sid: session.streamSid }, "voicebot: campaign mode — waiting for first customer speech before playing script");
-                  session.greetingPending = false; // Not really "pending" in the traditional sense
-                } else {
-                  await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
-                  voiceTrace(log, "call.session_ready", {
-                    customerId,
-                    chat_session_id: session.chatSessionId,
-                    exotel_call_session_id: session.callSessionDbId,
-                    stream_sid: session.streamSid,
-                    call_sid: session.callSid,
-                  });
-                }
+                await appendAssistantChatLine(session, session.greetingText || GREETING_TEXT, "voice_greeting");
+                voiceTrace(log, "call.session_ready", {
+                  customerId,
+                  chat_session_id: session.chatSessionId,
+                  exotel_call_session_id: session.callSessionDbId,
+                  stream_sid: session.streamSid,
+                  call_sid: session.callSid,
+                });
               } catch (err) {
                 log.error({ err }, "voicebot: failed to bootstrap chat/call session rows");
               }
 
               try {
-                if (session.mode === "outbound_campaign") {
-                  // Skip immediate greeting for campaigns
-                  break;
-                }
                 if (voiceTtsCanRun(session)) {
                   logVoiceStage(log, "greeting.sending", {
                     customerId,
@@ -5373,20 +4788,6 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 }
               }
               
-              // --- OUTBOUND ECHO SUPPRESSION: Skip audio processing for EXPLICITLY identified system leg ---
-              // Only suppress audio when we have EXPLICIT leg identification (via custom_parameters).
-              // Do NOT suppress based on heuristics (from===to) as this breaks single-stream setups.
-              if (
-                env.voicebot.outboundEchoSuppressionEnabled &&
-                session.mode === "outbound_campaign" &&
-                session.suppressSTTProcessing &&
-                session.legType === "leg1_system"
-              ) {
-                // This leg was explicitly marked as system leg via custom_parameters
-                // Don't buffer or process the audio for STT/RAG
-                break;
-              }
-
               // --- Energy-based VAD ---
               // Exotel sends media chunks every 20ms continuously, even during silence.
               // A simple timeout-based VAD would never fire because chunks always arrive.
@@ -5486,60 +4887,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                   
                   // For outbound calls, add a 1.5s grace period after playback finishes
                   // to ignore the telephony tail echo of the bot's own voice.
-                  if (session.mode === "outbound" || session.mode === "outbound_campaign") {
+                  if (session.mode === "outbound") {
                     session.echoCancellationEndTime = Date.now() + 1500;
-                  }
-
-                  // --- OUTBOUND ECHO SUPPRESSION: Track campaign script completion ---
-                  // When the campaign script finishes playing, transition to listening mode.
-                  if (
-                    session.mode === "outbound_campaign" &&
-                    session.playingCampaignScript
-                  ) {
-                    session.playingCampaignScript = false;
-                    session.scriptPlaybackComplete = true;
-                    
-                    // --- SINGLE ACTIVE LEG (SAL) FIX ---
-                    // Set THIS stream as the sole active responder for the call.
-                    // Only this stream will process STT and generate responses.
-                    // This prevents AI-to-AI feedback loops in dual-leg calls.
-                    if (env.voicebot.outboundCrossLegEchoEnabled && session.callSessionDbId) {
-                      const campaignIdForLog = session.campaignId;
-                      const streamSidForLog = session.streamSid;
-                      
-                      // Set active responder (atomic - first writer wins)
-                      setActiveResponder(pool, session.callSessionDbId, session.streamSid)
-                        .then((wasSet) => {
-                          if (wasSet) {
-                            log?.info(
-                              { stream_sid: streamSidForLog, campaign_id: campaignIdForLog },
-                              "voicebot: set as active responder for call (SAL fix)"
-                            );
-                          }
-                        })
-                        .catch((err) => {
-                          log?.warn({ err, campaign_id: campaignIdForLog }, "Failed to set active responder in DB");
-                        });
-                      
-                      // Also mark script complete for backward compatibility
-                      markScriptPlaybackComplete(pool, session.callSessionDbId).catch((err) => {
-                        log?.warn({ err, campaign_id: campaignIdForLog }, "Failed to mark script complete in DB");
-                      });
-                    }
-                    
-                    log?.info(
-                      {
-                        stream_sid: session.streamSid,
-                        campaign_id: session.campaignId,
-                        mark: markName,
-                      },
-                      "voicebot: campaign script playback complete — transitioning to listening mode for customer questions"
-                    );
-                    voiceTrace(log, "campaign.script_complete", {
-                      customerId: session.customerId,
-                      stream_sid: session.streamSid,
-                      campaign_id: session.campaignId,
-                    });
                   }
 
                   log?.info({

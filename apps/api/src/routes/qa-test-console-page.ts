@@ -103,7 +103,12 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
         <label>Cartesia model</label>
         <select id="modelSelect"><option value="">Loading models...</option></select>
       </div>
+      <div class="field hidden" id="normalizationField">
+        <label>Normalization (optional)</label>
+        <input type="text" id="normalizationInput" placeholder="e.g. en-IN, off" />
+      </div>
     </div>
+    <div class="hidden" id="normalizationHint" style="font-size:12px;color:#777;margin-top:-4px;margin-bottom:8px;">Overrides how numbers/dates are read, independent of the voice's own language - e.g. a Hindi voice reading digits the English way ("four eight two one" instead of a Hindi number word). Leave blank for Cartesia's own default. Requires the Sonic 3.6 model above.</div>
 
     <div id="chatPanel" style="margin-top:14px;">
       <label>Message</label>
@@ -137,6 +142,7 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
           <th>#</th>
           <th>Mode</th>
           <th>Branch / source</th>
+          <th>Streaming</th>
           <th>STT ms</th>
           <th>Parallel init ms</th>
           <th>Resolve agent ms</th>
@@ -168,10 +174,13 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
   var voiceField = document.getElementById("voiceField");
   var langField = document.getElementById("langField");
   var modelField = document.getElementById("modelField");
+  var normalizationField = document.getElementById("normalizationField");
+  var normalizationHint = document.getElementById("normalizationHint");
   var voiceSelect = document.getElementById("voiceSelect");
   var agentSelect = document.getElementById("agentSelect");
   var langSelect = document.getElementById("langSelect");
   var modelSelect = document.getElementById("modelSelect");
+  var normalizationInput = document.getElementById("normalizationInput");
 
   var chatInput = document.getElementById("chatInput");
   var sendChatBtn = document.getElementById("sendChatBtn");
@@ -231,6 +240,7 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
       "<td>" + iterationCount + "</td>" +
       "<td>" + row.mode + "</td>" +
       "<td>" + (row.source || pt.branch || "-") + "</td>" +
+      "<td>" + (row.streaming_used ? "yes" : "no") + "</td>" +
       "<td>" + (row.stt_ms != null ? row.stt_ms : "-") + "</td>" +
       "<td>" + (pt.parallel_init_ms != null ? pt.parallel_init_ms : "-") + "</td>" +
       "<td>" + (pt.resolve_agent_ms != null ? pt.resolve_agent_ms : "-") + "</td>" +
@@ -264,6 +274,8 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
     voiceField.classList.toggle("hidden", !needsAudioOut);
     langField.classList.toggle("hidden", !needsAudioOut);
     modelField.classList.toggle("hidden", !needsAudioOut);
+    normalizationField.classList.toggle("hidden", !needsAudioOut);
+    normalizationHint.classList.toggle("hidden", !needsAudioOut);
 
     if (needsAudioOut && voicesLoadedForLanguage !== langSelect.value) {
       loadVoices();
@@ -424,11 +436,12 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
       fd.append("cartesia_voice_id", voiceSelect.value);
       fd.append("cartesia_language", langSelect.value);
       fd.append("cartesia_model_id", modelSelect.value);
+      if (normalizationInput.value.trim()) fd.append("cartesia_normalization", normalizationInput.value.trim());
     }
 
     setTurnStatus(mode === "audio" ? "Transcribing, then running pipeline..." : "Running pipeline...");
 
-    var row = { mode: mode, stt_ms: null, ask_ms: 0, tts_ms: 0, total_ms: 0, source: null, pipeline_timings: null };
+    var row = { mode: mode, stt_ms: null, ask_ms: 0, tts_ms: 0, total_ms: 0, source: null, pipeline_timings: null, streaming_used: false };
 
     try {
       var res = await fetch("/qa/test-console/turn", {
@@ -470,6 +483,7 @@ export const QA_TEST_CONSOLE_PAGE_HTML = `<!doctype html>
             row.ask_ms = parsed.data.ask_ms;
             row.source = parsed.data.source;
             row.pipeline_timings = parsed.data.pipeline_timings;
+            row.streaming_used = !!parsed.data.streaming_used;
             setSession(parsed.data.session_id);
             logStage("Answer ready from RAG / LLM (" + parsed.data.ask_ms + "ms, source=" + parsed.data.source + ")", parsed.data.ask_ms);
           } else if (parsed.event === "first_audio") {

@@ -136,13 +136,20 @@ export async function runSimulatorStt(params: {
     return { status: 503, transcript: "", language_code: null };
   }
   const mode = params.sttMode ?? "transcribe";
+  // Deliberately NOT the `hint` computed above for this one call - `hint` always
+  // falls back to a concrete default (never undefined), which defeats a caller
+  // that explicitly passed no languageHintBcp47 to mean "let Sarvam auto-detect"
+  // (e.g. vodafone-voicebot.ts's open-detect window for a multilingual call's
+  // first couple of turns, mirroring exotel-voicebot.ts's own STT hint logic).
+  // Pass the caller's raw hint through as-is - present or absent - instead.
+  const sarvamLanguageHint = params.languageHintBcp47?.trim() || undefined;
   const stt = await sarvamSpeechToText({
     fileBuffer: params.fileBuffer,
     filename: params.filename,
     mimeType: params.mimeType,
     model: cust?.stt_model?.trim() || "saaras:v3",
     mode,
-    language_code: multilingual ? hint : undefined,
+    language_code: multilingual ? sarvamLanguageHint : undefined,
   });
   if (stt.status !== 200) {
     return { status: stt.status, transcript: "", language_code: null };

@@ -39,6 +39,9 @@ import {
   cartesiaTextToSpeech,
   resolveCartesiaModel,
 } from "../services/cartesia";
+import { getCustomerSettings } from "../services/customer-settings";
+import { SentenceStreamBuffer, looksLikeRawRagMarker } from "../services/voice-reply-stream";
+import { VOICE_SPOKEN_REPLY_STYLE_RULE } from "../services/rag-prompt-utils";
 import { runSimulatorStt } from "./voice-simulator";
 import { runAskPipeline } from "./ask";
 import { QA_TEST_CONSOLE_PAGE_HTML } from "./qa-test-console-page";
@@ -264,7 +267,111 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
           send("stage", { step, elapsed_ms: Date.now() - stageStart, ...sanitizeTraceData(data) });
         };
 
+        const voiceId = fields.cartesia_voice_id?.trim();
+        const modelId = resolveCartesiaModel(fields.cartesia_model_id);
+        const language = fields.cartesia_language?.trim() || "en";
+        // e.g. "en-IN" to make a Hindi/Marathi voice read digits the English way, or "off" -
+        // see docs.cartesia.ai/build-with-cartesia/capability-guides/advanced-capabilities.
+        // Requires sonic-3.6+. Empty/unset = Cartesia's own "auto" default, unchanged behavior.
+        const normalization = fields.cartesia_normalization?.trim() || undefined;
+
+        // Same DB-backed kill switch the Vodafone voicebot route reads
+        // (customer_settings.rag_streaming_enabled) - flipping it off for a
+        // tenant reverts this console's turns to the exact original
+        // wait-for-full-answer-then-synthesize behavior immediately.
+        const custSettings = wantsAudioOut ? await getCustomerSettings(customerId) : null;
+        const streamingEnabled =
+          wantsAudioOut &&
+          custSettings?.rag_streaming_enabled === true &&
+          cartesiaConfigured() &&
+          !!voiceId;
+
+        const limiter = new ConcurrencyLimiter(CARTESIA_TTS_CONCURRENCY_LIMIT);
+        const tTts0 = Date.now();
+        let firstAudioAt: number | null = null;
+        let chunkIndex = 0;
+
+        /** Emits one already-synthesized chunk's SSE events. Callers decide dispatch/ordering. */
+        function emitAudioChunk(text: string, result: Awaited<ReturnType<typeof cartesiaTextToSpeech>>): void {
+          if (firstAudioAt === null) {
+            firstAudioAt = Date.now();
+            send("first_audio", { first_audio_ms: firstAudioAt - tTts0 });
+          }
+          send("audio_chunk", {
+            index: chunkIndex++,
+            text,
+            base64: result.body.toString("base64"),
+            content_type: result.contentType,
+            bytes: result.usage.audio_bytes,
+          });
+        }
+
+        /** Streaming path: sentences arrive one at a time from the LLM, so synthesize+emit strictly in order. */
+        async function speakChunk(text: string): Promise<void> {
+          if (!voiceId) return;
+          // Raw RAG sentinel token (ANSWER_NOT_FOUND/OUT_OF_SCOPE) - never speak it
+          // verbatim; the "nothing spoken yet" fallback below uses the pipeline's
+          // final, already-swapped `answer` instead.
+          if (looksLikeRawRagMarker(text)) return;
+          try {
+            const result = await limiter.run(() =>
+              cartesiaTextToSpeech({
+                transcript: text,
+                modelId,
+                voiceId,
+                language,
+                normalization,
+                outputFormat: { container: "mp3", sample_rate: 44100 },
+              })
+            );
+            emitAudioChunk(text, result);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : "Cartesia TTS failed";
+            send("tts_error", { error: msg });
+          }
+        }
+
+        /**
+         * Non-streaming path: the full answer is already known, so fire all chunks'
+         * synthesis concurrently (up to CARTESIA_TTS_CONCURRENCY_LIMIT at once) for
+         * lower total TTS wall-clock time, but still emit their SSE events in the
+         * original left-to-right order regardless of which finishes first.
+         */
+        async function speakChunksConcurrently(chunks: string[]): Promise<void> {
+          if (!voiceId) return;
+          const jobs = chunks.map((text) => {
+            const p = limiter
+              .run(() =>
+                cartesiaTextToSpeech({
+                  transcript: text,
+                  modelId,
+                  voiceId,
+                  language,
+                  normalization,
+                  outputFormat: { container: "mp3", sample_rate: 44100 },
+                })
+              )
+              .then((result) => ({ text, result }));
+            p.catch(() => {});
+            return p;
+          });
+          try {
+            for (const job of jobs) {
+              const { text, result } = await job;
+              emitAudioChunk(text, result);
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : "Cartesia TTS failed";
+            send("tts_error", { error: msg });
+          }
+        }
+
         const tAsk0 = Date.now();
+        // Sentences are spoken as the LLM streams them (in order - see
+        // SentenceStreamBuffer) rather than waiting for the full answer, when
+        // streaming is enabled. Not used at all when it's off.
+        const sentences = new SentenceStreamBuffer((sentence) => speakChunk(sentence));
+
         let askResult;
         try {
           askResult = await runAskPipeline({
@@ -280,6 +387,11 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
             ragOpenaiOnly: true,
             embeddingLanguageHint: sttLanguageCode,
             trace,
+            // Only for audio/chat_voice - plain chat mode tests the text-only
+            // path (mirrors production /ask), which should not get spoken-style
+            // wording. See services/rag-prompt-utils.ts for why this matters.
+            ...(wantsAudioOut ? { additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE } : {}),
+            ...(streamingEnabled ? { onLlmTextDelta: (delta: string) => sentences.push(delta) } : {}),
           });
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : "RAG pipeline failed";
@@ -299,63 +411,32 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
           agent_id: askResult.agent_id,
           agent_name: askResult.agent_name,
           pipeline_timings: askResult.pipeline_timings ?? null,
+          streaming_used: streamingEnabled,
         });
 
-        let ttsMs = 0;
+        if (streamingEnabled) {
+          await sentences.flush();
+        }
+
         if (wantsAudioOut && answer) {
           if (!cartesiaConfigured()) {
             send("tts_error", { error: "CARTESIA_API_KEY is not configured on this server" });
-          } else {
-            const voiceId = fields.cartesia_voice_id?.trim();
-            if (!voiceId) {
-              send("tts_error", { error: "No Cartesia voice selected" });
-            } else {
-              const modelId = resolveCartesiaModel(fields.cartesia_model_id);
-              const language = fields.cartesia_language?.trim() || "en";
-              const chunks = splitIntoSpeechChunks(answer);
-              const limiter = new ConcurrencyLimiter(CARTESIA_TTS_CONCURRENCY_LIMIT);
-              const tTts0 = Date.now();
-              let firstAudioAt: number | null = null;
-
-              const jobs = chunks.map((text, index) => {
-                const p = limiter
-                  .run(() =>
-                    cartesiaTextToSpeech({
-                      transcript: text,
-                      modelId,
-                      voiceId,
-                      language,
-                      outputFormat: { container: "mp3", sample_rate: 44100 },
-                    })
-                  )
-                  .then((r) => ({ index, text, result: r }));
-                p.catch(() => {});
-                return p;
-              });
-
-              try {
-                for (const job of jobs) {
-                  const { index, text, result } = await job;
-                  if (firstAudioAt === null) {
-                    firstAudioAt = Date.now();
-                    send("first_audio", { first_audio_ms: firstAudioAt - tTts0 });
-                  }
-                  send("audio_chunk", {
-                    index,
-                    text,
-                    base64: result.body.toString("base64"),
-                    content_type: result.contentType,
-                    bytes: result.usage.audio_bytes,
-                  });
-                }
-              } catch (err: unknown) {
-                const msg = err instanceof Error ? err.message : "Cartesia TTS failed";
-                send("tts_error", { error: msg });
-              }
-              ttsMs = Date.now() - tTts0;
-            }
+          } else if (!voiceId) {
+            send("tts_error", { error: "No Cartesia voice selected" });
+          } else if (!streamingEnabled) {
+            // Original batch path: split the complete answer into chunks up front,
+            // synthesize them concurrently, unchanged from before streaming existed.
+            await speakChunksConcurrently(splitIntoSpeechChunks(answer));
+          } else if (chunkIndex === 0) {
+            // Covers two cases: the no_kb/kb_direct/out_of_scope-distance-gate
+            // branches never call the LLM, and the raw-marker guard in speakChunk
+            // can suppress the only sentence that was streamed. Either way, nothing
+            // has actually produced audio yet - speak the resolved (already-swapped)
+            // answer directly.
+            await speakChunk(answer);
           }
         }
+        const ttsMs = chunkIndex > 0 ? Date.now() - tTts0 : 0;
 
         send("done", {
           total_ms: Date.now() - t0,
@@ -367,6 +448,7 @@ export async function qaTestConsoleRoutes(app: FastifyInstance): Promise<void> {
           agent_id: askResult.agent_id,
           agent_name: askResult.agent_name,
           source: askResult.source,
+          streaming_used: streamingEnabled,
         });
         reply.raw.end();
       }
