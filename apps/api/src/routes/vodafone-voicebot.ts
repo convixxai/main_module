@@ -119,6 +119,7 @@ interface VodafoneCallState {
     normalization: string | null;
   };
   processing: boolean;
+  mediaFrameCount: number;
 }
 
 const calls = new Map<string, VodafoneCallState>();
@@ -265,6 +266,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
     customerSettings,
     ttsConfig,
     processing: false,
+    mediaFrameCount: 0,
   };
   calls.set(event.streamId, state);
 
@@ -427,6 +429,10 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
   const combined = Buffer.concat(session.inboundPcm);
   session.inboundPcm = [];
   session.inboundBytes = 0;
+  app.log.info(
+    { streamId, bytes: combined.length, minRequired: MIN_UTTERANCE_BYTES },
+    "vodafone-voicebot: silence timer fired, processing utterance"
+  );
   if (combined.length < MIN_UTTERANCE_BYTES) return;
 
   state.processing = true;
@@ -645,6 +651,13 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
               const state = streamId ? calls.get(streamId) : undefined;
               if (!state || state.session.isClosing) return;
               const energy = pcmRmsEnergy(event.pcm16);
+              state.mediaFrameCount += 1;
+              if (state.mediaFrameCount === 1 || state.mediaFrameCount % 50 === 0) {
+                app.log.info(
+                  { streamId, frame: state.mediaFrameCount, bytes: event.pcm16.length, energy },
+                  "vodafone-voicebot: media frame received"
+                );
+              }
               state.session.inboundPcm.push(event.pcm16);
               state.session.inboundBytes += event.pcm16.length;
               if (state.session.inboundBytes > MAX_UTTERANCE_BYTES) {
