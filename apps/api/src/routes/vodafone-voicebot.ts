@@ -436,9 +436,11 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
   if (combined.length < MIN_UTTERANCE_BYTES) return;
 
   state.processing = true;
+  const turnStartedAt = Date.now();
   try {
     const wav = pcmToWav(combined, session.mediaFormat.sample_rate || 8000);
     const sttLanguageHint = resolveSttLanguageHint(state);
+    const sttStartedAt = Date.now();
     const stt = await runSimulatorStt({
       fileBuffer: wav,
       filename: "utterance.wav",
@@ -446,22 +448,23 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
       customerId: session.customerId,
       languageHintBcp47: sttLanguageHint,
     });
+    const sttMs = Date.now() - sttStartedAt;
     session.customerQueryCount = (session.customerQueryCount ?? 0) + 1;
     if (stt.status !== 200 || !stt.transcript.trim()) {
-      app.log.warn({ streamId, status: stt.status }, "vodafone-voicebot: STT empty/failed for utterance");
+      app.log.warn({ streamId, status: stt.status, sttMs }, "vodafone-voicebot: STT empty/failed for utterance");
       return;
     }
     const transcript = stt.transcript.trim();
-    app.log.info({ streamId, transcript }, "vodafone-voicebot: transcript ready");
+    app.log.info({ streamId, transcript, sttMs }, "vodafone-voicebot: transcript ready");
 
     const languageResult = await handleLanguageSwitchFlow(streamId, state, transcript, stt.language_code);
     if (languageResult.action === "handled") return;
     const finalTranscript = languageResult.transcript;
 
     if (state.customerSettings?.rag_streaming_enabled === true) {
-      await answerUtteranceStreaming(app, streamId, state, finalTranscript, stt.language_code);
+      await answerUtteranceStreaming(app, streamId, state, finalTranscript, stt.language_code, turnStartedAt);
     } else {
-      await answerUtteranceBatch(app, streamId, state, finalTranscript, stt.language_code);
+      await answerUtteranceBatch(app, streamId, state, finalTranscript, stt.language_code, turnStartedAt);
     }
   } catch (err) {
     app.log.error({ err, streamId }, "vodafone-voicebot: turn processing failed");
@@ -483,7 +486,8 @@ async function answerUtteranceBatch(
   streamId: string,
   state: VodafoneCallState,
   transcript: string,
-  sttLanguageCode: string | null
+  sttLanguageCode: string | null,
+  turnStartedAt: number
 ): Promise<void> {
   const { session, adapter, ws } = state;
   const systemPrompt = session.voiceRagCustomerCache?.systemPrompt ?? "You are a helpful assistant.";
@@ -497,14 +501,25 @@ async function answerUtteranceBatch(
     sequentialLlm: true,
     embeddingLanguageHint: sttLanguageCode,
     additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE,
+    includeTimings: true,
     trace,
   });
+  app.log.info(
+    { streamId, askMs: askResult.response_time_ms, pipelineTimings: askResult.pipeline_timings ?? null },
+    "vodafone-voicebot: ask pipeline done (batch)"
+  );
   const answer = askResult.answer.trim();
   if (!answer) return;
 
+  const ttsStartedAt = Date.now();
   const pcm = await synthesizeSpeechToPcm8k(answer, state.ttsConfig);
+  const ttsMs = Date.now() - ttsStartedAt;
   sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
   sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
+  app.log.info(
+    { streamId, ttsMs, totalMsSinceSilence: Date.now() - turnStartedAt },
+    "vodafone-voicebot: answer spoken (batch)"
+  );
 }
 
 /**
@@ -520,7 +535,8 @@ async function answerUtteranceStreaming(
   streamId: string,
   state: VodafoneCallState,
   transcript: string,
-  sttLanguageCode: string | null
+  sttLanguageCode: string | null,
+  turnStartedAt: number
 ): Promise<void> {
   const { session, adapter, ws } = state;
   const systemPrompt = session.voiceRagCustomerCache?.systemPrompt ?? "You are a helpful assistant.";
@@ -534,6 +550,8 @@ async function answerUtteranceStreaming(
     audioPump: null,
   };
   let spoke = false;
+  let firstLlmDeltaAt: number | null = null;
+  let firstSpokenAt: number | null = null;
 
   async function speakSentence(text: string): Promise<void> {
     if (session.isClosing || !text.trim()) return;
@@ -541,6 +559,13 @@ async function answerUtteranceStreaming(
     // verbatim; the pipeline's own final `answer` already has the friendly
     // swapped text, spoken via the "nothing spoken yet" fallback below.
     if (looksLikeRawRagMarker(text)) return;
+    if (firstSpokenAt === null) {
+      firstSpokenAt = Date.now();
+      app.log.info(
+        { streamId, msSinceSilence: firstSpokenAt - turnStartedAt, isCartesia, textPreview: text.slice(0, 40) },
+        "vodafone-voicebot: first sentence synthesis starting"
+      );
+    }
     if (isCartesia) {
       if (!cartesia.reply) {
         const cartesiaTts = getOrCreateCartesiaTtsSession(session, app.log);
@@ -578,9 +603,23 @@ async function answerUtteranceStreaming(
     inputAgentId: session.agentId,
     embeddingLanguageHint: sttLanguageCode,
     additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE,
-    onLlmTextDelta: (delta) => sentences.push(delta),
+    includeTimings: true,
+    onLlmTextDelta: (delta) => {
+      if (firstLlmDeltaAt === null) {
+        firstLlmDeltaAt = Date.now();
+        app.log.info(
+          { streamId, msSinceSilence: firstLlmDeltaAt - turnStartedAt },
+          "vodafone-voicebot: first LLM token"
+        );
+      }
+      sentences.push(delta);
+    },
     trace,
   });
+  app.log.info(
+    { streamId, askMs: askResult.response_time_ms, pipelineTimings: askResult.pipeline_timings ?? null },
+    "vodafone-voicebot: ask pipeline done (streaming)"
+  );
 
   await sentences.flush();
 
@@ -607,6 +646,16 @@ async function answerUtteranceStreaming(
   if (spoke) {
     sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
   }
+  app.log.info(
+    {
+      streamId,
+      isCartesia,
+      firstLlmTokenMs: firstLlmDeltaAt !== null ? firstLlmDeltaAt - turnStartedAt : null,
+      firstSpokenMs: firstSpokenAt !== null ? firstSpokenAt - turnStartedAt : null,
+      totalMsSinceSilence: Date.now() - turnStartedAt,
+    },
+    "vodafone-voicebot: turn complete (streaming)"
+  );
 }
 
 /** Starts the silence timer only if it isn't already running — subsequent silent
