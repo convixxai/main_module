@@ -50,7 +50,7 @@ import {
   type CartesiaTtsSession,
 } from "../services/cartesia-tts-ws";
 import { SentenceStreamBuffer, looksLikeRawRagMarker } from "../services/voice-reply-stream";
-import { VOICE_SPOKEN_REPLY_STYLE_RULE } from "../services/rag-prompt-utils";
+import { VOICE_SPOKEN_REPLY_STYLE_RULE, RAG_MULTILINGUAL_GRAMMAR_RULE } from "../services/rag-prompt-utils";
 import {
   normalizeBcp47Tag,
   normalizeAllowedLangList,
@@ -61,6 +61,7 @@ import {
   parseLanguageChoice,
   persistSessionActiveLanguage,
   languageSwitchAcknowledgement,
+  LANGUAGE_DISPLAY_NAME,
 } from "../services/voice-language-infer";
 import type { CallEvent, OutboundFrame } from "../types/telephony-provider";
 import {
@@ -480,6 +481,33 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
   }
 }
 
+/**
+ * Builds the language directive appended to the LLM system prompt so the reply
+ * language is pinned to the tenant's configured language(s) instead of the LLM
+ * freely mirroring whatever script the caller's transcript happened to use
+ * (e.g. STT romanizing/rendering a filler word in Gujarati/Malayalam script on
+ * one turn shouldn't flip the bot into replying in that language). Mirrors
+ * exotel-voicebot.ts's non-multilingual branch; the multilingual branch here
+ * is a simplified version scoped to what this route already tracks.
+ */
+function buildLanguageRule(session: VoicebotSession, state: VodafoneCallState): string {
+  const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
+  const defLabel = LANGUAGE_DISPLAY_NAME[def] ?? def;
+  const multilingual = state.customerSettings?.voicebot_multilingual === true;
+
+  let rule: string;
+  if (!multilingual) {
+    rule = `\n- ALWAYS respond in ${defLabel} (${def}) regardless of the question language.\n- Strictly generate responses ONLY in ${defLabel} (${def}).\n- NEVER generate responses in any other language or a mixture of languages.\n`;
+  } else {
+    const current = normalizeBcp47Tag(session.currentLanguageCode || def);
+    const label = LANGUAGE_DISPLAY_NAME[current] ?? current;
+    rule = `\n- This call is currently being handled in **${current}** (${label}) per tenant language policy.\n- MANDATORY: Reply ONLY in ${label} using the correct script for that language, regardless of the script the transcript happens to render the caller's words in — do NOT switch language based on a single ambiguous word.\n`;
+  }
+
+  const primary = def.split("-")[0]?.toLowerCase() ?? "";
+  return primary && primary !== "en" ? rule + RAG_MULTILINGUAL_GRAMMAR_RULE : rule;
+}
+
 /** Original batch turn loop: wait for the full answer, then synthesize and send it in one shot. */
 async function answerUtteranceBatch(
   app: FastifyInstance,
@@ -500,7 +528,7 @@ async function answerUtteranceBatch(
     inputAgentId: session.agentId,
     sequentialLlm: true,
     embeddingLanguageHint: sttLanguageCode,
-    additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE,
+    additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE + buildLanguageRule(session, state),
     includeTimings: true,
     trace,
   });
@@ -602,7 +630,7 @@ async function answerUtteranceStreaming(
     inputSessionId: session.chatSessionId,
     inputAgentId: session.agentId,
     embeddingLanguageHint: sttLanguageCode,
-    additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE,
+    additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE + buildLanguageRule(session, state),
     includeTimings: true,
     onLlmTextDelta: (delta) => {
       if (firstLlmDeltaAt === null) {
