@@ -71,7 +71,7 @@ import {
 } from "../services/voicebot-session";
 
 const VAD_ENERGY_THRESHOLD = 200;
-const VAD_SILENCE_MS = 1500;
+const VAD_SILENCE_MS = 800;
 const MIN_UTTERANCE_BYTES = 1600; // ~100ms @ 8kHz 16-bit mono
 const MAX_UTTERANCE_BYTES = 5 * 1024 * 1024;
 
