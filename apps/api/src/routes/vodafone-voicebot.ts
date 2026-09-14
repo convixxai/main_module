@@ -170,7 +170,7 @@ async function resolveTtsConfig(
       }
     } else {
       const row = await pool.query(
-        `SELECT tts_speaker, tts_model FROM avatars av JOIN agents a ON a.avatar_id = av.id WHERE a.id = $1 AND av.tts_provider = 'sarvam'`,
+        `SELECT av.tts_speaker, av.tts_model FROM avatars av JOIN agents a ON a.avatar_id = av.id WHERE a.id = $1 AND av.tts_provider = 'sarvam'`,
         [agentId]
       );
       if (row.rows.length > 0) {
