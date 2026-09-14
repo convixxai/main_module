@@ -609,13 +609,26 @@ async function answerUtteranceStreaming(
   }
 }
 
+/** Starts the silence timer only if it isn't already running — subsequent silent
+ *  frames must NOT push it back out, or it would never elapse on a continuously
+ *  streaming call (see the "media" handler's isSpeech/else-if split below). */
 function armSilenceTimer(app: FastifyInstance, streamId: string): void {
   const state = calls.get(streamId);
-  if (!state) return;
-  if (state.silenceTimer) clearTimeout(state.silenceTimer);
+  if (!state || state.silenceTimer) return;
   state.silenceTimer = setTimeout(() => {
+    const s = calls.get(streamId);
+    if (s) s.silenceTimer = null;
     void processUtterance(app, streamId);
   }, VAD_SILENCE_MS);
+}
+
+/** Cancels a pending silence timer — called when speech resumes, so a brief pause doesn't get cut off. */
+function clearSilenceTimer(streamId: string): void {
+  const state = calls.get(streamId);
+  if (state?.silenceTimer) {
+    clearTimeout(state.silenceTimer);
+    state.silenceTimer = null;
+  }
 }
 
 export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void> {
@@ -658,16 +671,26 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
                   "vodafone-voicebot: media frame received"
                 );
               }
-              state.session.inboundPcm.push(event.pcm16);
-              state.session.inboundBytes += event.pcm16.length;
+              const isSpeech = energy >= VAD_ENERGY_THRESHOLD;
+              if (isSpeech) {
+                // Caller is speaking — buffer this chunk and cancel any pending
+                // silence timer (still talking, don't cut them off).
+                state.session.inboundPcm.push(event.pcm16);
+                state.session.inboundBytes += event.pcm16.length;
+                clearSilenceTimer(streamId!);
+              } else if (state.session.inboundPcm.length > 0) {
+                // Mid-utterance pause — keep buffering (captures natural pauses)
+                // and start the silence timer only if it isn't already running.
+                state.session.inboundPcm.push(event.pcm16);
+                state.session.inboundBytes += event.pcm16.length;
+                armSilenceTimer(app, streamId!);
+              }
+              // else: silence before any speech — caller hasn't started talking yet, ignore.
+
               if (state.session.inboundBytes > MAX_UTTERANCE_BYTES) {
+                clearSilenceTimer(streamId!);
                 await processUtterance(app, streamId!);
                 return;
-              }
-              if (energy >= VAD_ENERGY_THRESHOLD) {
-                armSilenceTimer(app, streamId!);
-              } else if (state.session.inboundPcm.length > 0) {
-                armSilenceTimer(app, streamId!);
               }
               break;
             }
