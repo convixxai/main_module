@@ -123,6 +123,7 @@ interface VodafoneCallState {
     speaker: string | null;
     language: string | null;
     normalization: string | null;
+    voiceGender: "male" | "female" | null;
   };
   processing: boolean;
   mediaFrameCount: number;
@@ -143,6 +144,11 @@ function sendFrames(ws: WebSocket, frames: OutboundFrame | OutboundFrame[]): voi
  * falling back to customer_settings.tts_default_speaker/tts_model. Mirrors
  * (a simplified version of) voice-persona.ts's resolution order.
  */
+function extractVoiceGender(generationConfig: unknown): "male" | "female" | null {
+  const g = (generationConfig as Record<string, unknown> | null | undefined)?.voice_gender;
+  return g === "male" || g === "female" ? g : null;
+}
+
 async function resolveTtsConfig(
   provider: "sarvam" | "elevenlabs" | "cartesia",
   agentId: string | null,
@@ -154,6 +160,7 @@ async function resolveTtsConfig(
   speaker: string | null;
   language: string;
   normalization: string | null;
+  voiceGender: "male" | "female" | null;
 }> {
   // Cartesia-only, customer-level (mirrors cartesia_max_buffer_delay_ms/cartesia_emotion_mode -
   // not per-avatar today). No-op for sarvam/elevenlabs providers.
@@ -161,11 +168,18 @@ async function resolveTtsConfig(
   if (agentId) {
     if (provider === "cartesia") {
       const row = await pool.query(
-        `SELECT ca.voice_id, ca.model_id FROM agents a JOIN cartesia_avatars ca ON ca.id = a.cartesia_avatar_id WHERE a.id = $1`,
+        `SELECT ca.voice_id, ca.model_id, ca.generation_config FROM agents a JOIN cartesia_avatars ca ON ca.id = a.cartesia_avatar_id WHERE a.id = $1`,
         [agentId]
       );
       if (row.rows.length > 0) {
-        return { provider, model: row.rows[0].model_id, speaker: row.rows[0].voice_id, language, normalization };
+        return {
+          provider,
+          model: row.rows[0].model_id,
+          speaker: row.rows[0].voice_id,
+          language,
+          normalization,
+          voiceGender: extractVoiceGender(row.rows[0].generation_config),
+        };
       }
     } else if (provider === "elevenlabs") {
       const row = await pool.query(
@@ -173,7 +187,7 @@ async function resolveTtsConfig(
         [agentId]
       );
       if (row.rows.length > 0) {
-        return { provider, model: row.rows[0].model_id, speaker: row.rows[0].voice_id, language, normalization };
+        return { provider, model: row.rows[0].model_id, speaker: row.rows[0].voice_id, language, normalization, voiceGender: null };
       }
     } else {
       const row = await pool.query(
@@ -181,7 +195,7 @@ async function resolveTtsConfig(
         [agentId]
       );
       if (row.rows.length > 0) {
-        return { provider, model: row.rows[0].tts_model, speaker: row.rows[0].tts_speaker, language, normalization };
+        return { provider, model: row.rows[0].tts_model, speaker: row.rows[0].tts_speaker, language, normalization, voiceGender: null };
       }
     }
   }
@@ -191,6 +205,7 @@ async function resolveTtsConfig(
     speaker: cust?.tts_default_speaker ?? null,
     language,
     normalization,
+    voiceGender: null,
   };
 }
 
@@ -505,6 +520,25 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
 }
 
 /**
+ * Hindi/Marathi/Gujarati/Punjabi/Urdu conjugate verbs (and some adjectives/participles)
+ * to agree with the SPEAKER's grammatical gender in first person — e.g. Marathi "मी
+ * करतो" (male) vs "मी करते" (female), "बोलतो" vs "बोलते". An LLM with no gender signal
+ * defaults to masculine forms, which sounds wrong coming out of a female TTS voice.
+ */
+const GENDERED_FIRST_PERSON_VERB_LANGUAGES = new Set(["hi", "mr", "gu", "pa", "ur"]);
+
+function buildVoiceGenderRule(activeLangPrimary: string, voiceGender: "male" | "female" | null): string {
+  if (!voiceGender || !GENDERED_FIRST_PERSON_VERB_LANGUAGES.has(activeLangPrimary)) return "";
+  const marathiExample =
+    activeLangPrimary === "mr"
+      ? voiceGender === "female"
+        ? ' Example (Marathi): say "मी मदत करते", "मी सांगते", "मी बघते" — NEVER "करतो"/"सांगतो"/"बघतो" (those are masculine).'
+        : ' Example (Marathi): say "मी मदत करतो", "मी सांगतो", "मी बघतो" — NEVER "करते"/"सांगते"/"बघते" (those are feminine).'
+      : "";
+  return `\n- You are voiced by a ${voiceGender} speaker. This language marks the verb for the speaker's gender in first person — every first-person verb, participle, and self-referential adjective MUST use ${voiceGender} grammatical forms, never the other gender.${marathiExample}\n`;
+}
+
+/**
  * Builds the language directive appended to the LLM system prompt so the reply
  * language is pinned to the tenant's configured language(s) instead of the LLM
  * freely mirroring whatever script the caller's transcript happened to use
@@ -519,13 +553,18 @@ function buildLanguageRule(session: VoicebotSession, state: VodafoneCallState): 
   const multilingual = state.customerSettings?.voicebot_multilingual === true;
 
   let rule: string;
+  let activeLang: string;
   if (!multilingual) {
+    activeLang = def;
     rule = `\n- ALWAYS respond in ${defLabel} (${def}) regardless of the question language.\n- Strictly generate responses ONLY in ${defLabel} (${def}).\n- NEVER generate responses in any other language or a mixture of languages.\n`;
   } else {
     const current = normalizeBcp47Tag(session.currentLanguageCode || def);
     const label = LANGUAGE_DISPLAY_NAME[current] ?? current;
+    activeLang = current;
     rule = `\n- This call is currently being handled in **${current}** (${label}) per tenant language policy.\n- MANDATORY: Reply ONLY in ${label} using the correct script for that language, regardless of the script the transcript happens to render the caller's words in — do NOT switch language based on a single ambiguous word.\n`;
   }
+
+  rule += buildVoiceGenderRule(activeLang.split("-")[0]?.toLowerCase() ?? "", state.ttsConfig.voiceGender);
 
   const primary = def.split("-")[0]?.toLowerCase() ?? "";
   return primary && primary !== "en" ? rule + RAG_MULTILINGUAL_GRAMMAR_RULE : rule;
