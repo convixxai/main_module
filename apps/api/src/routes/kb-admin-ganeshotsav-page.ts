@@ -410,7 +410,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
 (function () {
   'use strict';
 
-  var API = '';
+  var API = '/kb-admin/ganeshotsav';
   var state = { entries: [], selected: new Set(), filtered: [], editingId: null, sessionTimer: null };
 
   // ---------- helpers ----------
