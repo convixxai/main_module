@@ -131,7 +131,41 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
   .user-chip { display: flex; align-items: center; gap: 10px; }
   .user-chip .name { font-size: 12.5px; color: var(--text-dim); }
 
+  /* ---------- Nav tabs ---------- */
+  nav.nav-tabs { background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 61px; z-index: 15; }
+  .nav-tabs-inner { max-width: 1180px; margin: 0 auto; padding: 0 20px; display: flex; gap: 4px; }
+  .nav-tab {
+    background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer;
+    padding: 13px 4px; margin-right: 22px; font-size: 13.5px; font-weight: 600; color: var(--text-faint);
+    transition: color .15s, border-color .15s;
+  }
+  .nav-tab:hover { color: var(--text-dim); }
+  .nav-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
   main { flex: 1; padding: 22px 20px 48px; max-width: 1180px; width: 100%; margin: 0 auto; }
+
+  /* ---------- System prompt view ---------- */
+  .banner-warning {
+    display: flex; align-items: flex-start; gap: 12px;
+    background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 18px; font-size: 13.3px; line-height: 1.5;
+  }
+  .banner-warning .banner-icon { font-size: 17px; line-height: 1.4; }
+  .banner-warning strong { display: block; margin-bottom: 2px; font-size: 13.8px; }
+  .prompt-panel-header {
+    padding: 18px 22px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .prompt-agent-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-faint); font-weight: 700; }
+  .prompt-agent-name { font-size: 15px; font-weight: 700; margin-top: 2px; }
+  .prompt-textarea {
+    width: 100%; min-height: 420px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55;
+    resize: vertical; background: var(--surface-2); color: var(--text);
+  }
+  .prompt-textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); background: #fff; }
+  .prompt-textarea:disabled { color: var(--text-faint); }
+  .prompt-save-hint { font-size: 12px; color: var(--text-faint); }
 
   /* Search is the primary way to find an entry among 100+ rows, so it gets its own
      full-width, high-contrast bar above everything else rather than competing for
@@ -153,7 +187,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
   .toolbar {
     display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px;
   }
-  .toolbar .spacer { flex: 1; }
+  .spacer { flex: 1; }
   .stat-chip {
     display: inline-flex; align-items: center; gap: 4px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
@@ -299,41 +333,78 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
     </div>
   </header>
 
+  <nav class="nav-tabs">
+    <div class="nav-tabs-inner">
+      <button class="nav-tab active" id="nav-tab-kb" data-view="kb">Knowledgebase</button>
+      <button class="nav-tab" id="nav-tab-prompt" data-view="prompt">System prompt</button>
+    </div>
+  </nav>
+
   <main>
-    <div class="search-prominent">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input id="search-input" type="text" placeholder="Search questions or answers..." />
+    <div id="view-kb">
+      <div class="search-prominent">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="search-input" type="text" placeholder="Search questions or answers..." />
+      </div>
+
+      <div class="toolbar">
+        <div class="stat-chip"><strong id="stat-total">...</strong> total</div>
+        <div class="stat-chip"><strong id="stat-filtered">...</strong> showing</div>
+        <div class="stat-chip"><strong id="stat-selected">0</strong> selected</div>
+        <div class="spacer"></div>
+        <button class="btn btn-secondary" id="template-btn">Download template</button>
+        <button class="btn btn-secondary" id="bulk-upload-btn">Bulk upload</button>
+        <button class="btn btn-danger" id="bulk-delete-btn" disabled>Delete selected (<span id="bulk-delete-count">0</span>)</button>
+        <button class="btn btn-primary" id="add-entry-btn">+ Add entry</button>
+      </div>
+
+      <div class="panel">
+        <table class="kb-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="select-all" /></th>
+              <th>Question</th>
+              <th>Answer</th>
+              <th>Updated</th>
+              <th class="col-actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="kb-tbody">
+            <tr class="loading-row"><td colspan="5"><span class="spinner dark"></span> Loading entries…</td></tr>
+          </tbody>
+        </table>
+        <div class="empty-state" id="empty-state" hidden>
+          <div class="big">🗒️</div>
+          <div>No entries match your search.</div>
+        </div>
+      </div>
     </div>
 
-    <div class="toolbar">
-      <div class="stat-chip"><strong id="stat-total">...</strong> total</div>
-      <div class="stat-chip"><strong id="stat-filtered">...</strong> showing</div>
-      <div class="stat-chip"><strong id="stat-selected">0</strong> selected</div>
-      <div class="spacer"></div>
-      <button class="btn btn-secondary" id="template-btn">Download template</button>
-      <button class="btn btn-secondary" id="bulk-upload-btn">Bulk upload</button>
-      <button class="btn btn-danger" id="bulk-delete-btn" disabled>Delete selected (<span id="bulk-delete-count">0</span>)</button>
-      <button class="btn btn-primary" id="add-entry-btn">+ Add entry</button>
-    </div>
+    <div id="view-prompt" hidden>
+      <div class="banner-warning">
+        <span class="banner-icon">⚠</span>
+        <div>
+          <strong>Take a backup before making any changes.</strong>
+          Copy the current system prompt below and save it somewhere safe first. Saving here updates the live bot immediately, there is no undo.
+        </div>
+      </div>
 
-    <div class="panel">
-      <table class="kb-table">
-        <thead>
-          <tr>
-            <th class="col-check"><input type="checkbox" id="select-all" /></th>
-            <th>Question</th>
-            <th>Answer</th>
-            <th>Updated</th>
-            <th class="col-actions">Actions</th>
-          </tr>
-        </thead>
-        <tbody id="kb-tbody">
-          <tr class="loading-row"><td colspan="5"><span class="spinner dark"></span> Loading entries…</td></tr>
-        </tbody>
-      </table>
-      <div class="empty-state" id="empty-state" hidden>
-        <div class="big">🗒️</div>
-        <div>No entries match your search.</div>
+      <div class="panel prompt-panel">
+        <div class="prompt-panel-header">
+          <div>
+            <div class="prompt-agent-label">Editing agent</div>
+            <div class="prompt-agent-name" id="prompt-agent-name">Loading...</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="prompt-copy-btn">Copy current text</button>
+        </div>
+        <div class="field" style="margin:18px 22px 0">
+          <textarea id="prompt-textarea" class="prompt-textarea" placeholder="Loading system prompt..." disabled></textarea>
+        </div>
+        <div class="modal-footer" style="border-top:none">
+          <span class="prompt-save-hint" id="prompt-save-hint"></span>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" id="prompt-save-btn" disabled>Save changes</button>
+        </div>
       </div>
     </div>
   </main>
@@ -409,6 +480,26 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
     <div class="modal-footer">
       <button class="btn btn-secondary" data-close-modal="upload-modal-overlay">Close</button>
       <button class="btn btn-primary" id="upload-submit-btn" disabled>Upload</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm save system prompt modal -->
+<div class="modal-overlay" id="prompt-confirm-overlay" hidden>
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Save changes to the live system prompt?</h2>
+      <button class="icon-btn" data-close-modal="prompt-confirm-overlay">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin:0">
+        This updates the bot's behavior immediately for future calls. Make sure you already
+        have a backup copy of the previous text before continuing.
+      </p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" data-close-modal="prompt-confirm-overlay">Cancel</button>
+      <button class="btn btn-primary" id="prompt-confirm-save-btn">Save changes</button>
     </div>
   </div>
 </div>
@@ -778,6 +869,89 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
       $('upload-result').className = 'upload-result err';
       $('upload-result').textContent = 'Upload failed: ' + err.message;
       $('upload-result').hidden = false;
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+  });
+
+  // ---------- nav tabs ----------
+  var promptState = { agentId: null, agentName: '', savedText: '', loaded: false };
+
+  function switchView(view) {
+    $('view-kb').hidden = view !== 'kb';
+    $('view-prompt').hidden = view !== 'prompt';
+    $('nav-tab-kb').classList.toggle('active', view === 'kb');
+    $('nav-tab-prompt').classList.toggle('active', view === 'prompt');
+    if (view === 'prompt' && !promptState.loaded) loadAgentPrompt();
+  }
+  $('nav-tab-kb').addEventListener('click', function () { switchView('kb'); });
+  $('nav-tab-prompt').addEventListener('click', function () { switchView('prompt'); });
+
+  // ---------- system prompt editor ----------
+  async function loadAgentPrompt() {
+    var ta = $('prompt-textarea');
+    ta.value = '';
+    ta.disabled = true;
+    ta.placeholder = 'Loading system prompt...';
+    $('prompt-agent-name').textContent = 'Loading...';
+    $('prompt-save-btn').disabled = true;
+    try {
+      var data = await api('/api/agent');
+      promptState.agentId = data.id;
+      promptState.agentName = data.name;
+      promptState.savedText = data.system_prompt || '';
+      promptState.loaded = true;
+      $('prompt-agent-name').textContent = data.name;
+      ta.value = promptState.savedText;
+      ta.disabled = false;
+      $('prompt-save-hint').textContent = '';
+    } catch (err) {
+      if (err.message !== 'session_expired') {
+        $('prompt-agent-name').textContent = 'Could not load agent';
+        toast('Failed to load system prompt: ' + err.message, 'err');
+      }
+    }
+  }
+
+  $('prompt-textarea').addEventListener('input', function () {
+    var dirty = $('prompt-textarea').value !== promptState.savedText;
+    $('prompt-save-btn').disabled = !dirty;
+    $('prompt-save-hint').textContent = dirty ? 'Unsaved changes' : '';
+  });
+
+  $('prompt-copy-btn').addEventListener('click', async function () {
+    var text = $('prompt-textarea').value;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Current system prompt copied, paste it somewhere safe as a backup', 'ok');
+    } catch (e) {
+      $('prompt-textarea').select();
+      toast('Could not use the clipboard automatically, text is selected, copy it with Ctrl/Cmd+C', 'err');
+    }
+  });
+
+  $('prompt-save-btn').addEventListener('click', function () {
+    if ($('prompt-save-btn').disabled) return;
+    openModal('prompt-confirm-overlay');
+  });
+
+  $('prompt-confirm-save-btn').addEventListener('click', async function () {
+    if (!promptState.agentId) return;
+    var btn = $('prompt-confirm-save-btn');
+    btn.disabled = true;
+    var originalHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner"></span> Saving...';
+    try {
+      var newText = $('prompt-textarea').value;
+      await api('/api/agent', { method: 'PUT', body: JSON.stringify({ system_prompt: newText }) });
+      promptState.savedText = newText;
+      $('prompt-save-btn').disabled = true;
+      $('prompt-save-hint').textContent = '';
+      closeModal('prompt-confirm-overlay');
+      toast('System prompt updated', 'ok');
+    } catch (err) {
+      if (err.message !== 'session_expired') toast('Save failed: ' + err.message, 'err');
     } finally {
       btn.disabled = false;
       btn.innerHTML = originalHtml;

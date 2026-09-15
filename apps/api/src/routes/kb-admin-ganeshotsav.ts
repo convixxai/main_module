@@ -217,6 +217,50 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
     }
   );
 
+  // ---------- system prompt editor (single agent for this customer, text only) ----------
+  // Deliberately narrow: only ever reads/writes agents.system_prompt for the ONE active
+  // agent resolved server-side from CUSTOMER_ID (never a client-supplied agent id) - no
+  // model, provider, temperature, or other agent config is exposed here by design.
+  app.get("/kb-admin/ganeshotsav/api/agent", async (request, reply) => {
+    const user = await requireSession(request, reply);
+    if (!user) return;
+    const r = await pool.query(
+      `SELECT id, name, system_prompt FROM agents
+       WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
+      [CUSTOMER_ID]
+    );
+    if (r.rows.length === 0) {
+      return reply.status(404).send({ error: "No active agent found for this customer" });
+    }
+    return reply.send(r.rows[0]);
+  });
+
+  app.put<{ Body: { system_prompt?: string } }>(
+    "/kb-admin/ganeshotsav/api/agent",
+    async (request, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
+      const systemPrompt = (request.body?.system_prompt || "").trim();
+      if (!systemPrompt) {
+        return reply.status(400).send({ error: "System prompt cannot be empty" });
+      }
+      const existing = await pool.query(
+        `SELECT id FROM agents WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
+        [CUSTOMER_ID]
+      );
+      if (existing.rows.length === 0) {
+        return reply.status(404).send({ error: "No active agent found for this customer" });
+      }
+      const agentId = existing.rows[0].id;
+      const r = await pool.query(
+        `UPDATE agents SET system_prompt = $1 WHERE id = $2 AND customer_id = $3
+         RETURNING id, name, system_prompt`,
+        [systemPrompt, agentId, CUSTOMER_ID]
+      );
+      return reply.send(r.rows[0]);
+    }
+  );
+
   // ---------- bulk delete (also used for single-row delete by the UI) ----------
   app.post<{ Body: { ids?: string[] } }>(
     "/kb-admin/ganeshotsav/api/entries/bulk-delete",
