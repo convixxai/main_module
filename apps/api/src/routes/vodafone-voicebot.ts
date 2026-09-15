@@ -242,15 +242,28 @@ async function resolveInitialAgentAndChatSession(customerId: string): Promise<{
  * Fallback greeting used when the agent has no greeting_text configured.
  * Keyed by the tenant's default_language_code so a Marathi-default tenant
  * doesn't hear an English "Hello" before any agent-specific text exists.
+ * Hindi/Marathi versions are gender-paired (see buildVoiceGenderRule's doc
+ * comment) since this text is spoken verbatim, bypassing the LLM's own
+ * gender-agreement instruction entirely.
  */
-const DEFAULT_GREETING_BY_LANG: Record<string, string> = {
-  "en-IN": "Hello, how can I help you today?",
-  "hi-IN": "नमस्ते, मैं आपकी कैसे मदद कर सकता हूँ?",
-  "mr-IN": "नमस्कार, मी आपली कशी मदत करू शकतो?",
+const DEFAULT_GREETING_BY_LANG: Record<string, { male: string; female: string }> = {
+  "en-IN": {
+    male: "Hello, how can I help you today?",
+    female: "Hello, how can I help you today?",
+  },
+  "hi-IN": {
+    male: "नमस्ते, मैं आपकी कैसे मदद कर सकता हूँ?",
+    female: "नमस्ते, मैं आपकी कैसे मदद कर सकती हूँ?",
+  },
+  "mr-IN": {
+    male: "नमस्कार, मी आपली कशी मदत करू शकतो?",
+    female: "नमस्कार, मी आपली कशी मदत करू शकते?",
+  },
 };
 
-function resolveDefaultGreeting(defaultLanguageCode: string): string {
-  return DEFAULT_GREETING_BY_LANG[defaultLanguageCode] ?? DEFAULT_GREETING_BY_LANG["en-IN"];
+function resolveDefaultGreeting(defaultLanguageCode: string, voiceGender: "male" | "female" | null): string {
+  const pair = DEFAULT_GREETING_BY_LANG[defaultLanguageCode] ?? DEFAULT_GREETING_BY_LANG["en-IN"];
+  return pair[voiceGender === "female" ? "female" : "male"];
 }
 
 async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: string, event: Extract<CallEvent, { type: "start" }>): Promise<void> {
@@ -311,7 +324,8 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
 
   app.log.info({ customerId, streamId: event.streamId, callId: event.callId }, "vodafone-voicebot: call started");
 
-  const greeting = session.greetingText || resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN");
+  const greeting =
+    session.greetingText || resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
     sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
