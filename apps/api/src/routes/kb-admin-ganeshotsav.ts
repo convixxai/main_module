@@ -13,6 +13,7 @@
 // ============================================================
 
 import { FastifyInstance } from "fastify";
+import multipart from "@fastify/multipart";
 import ExcelJS from "exceljs";
 import { pool } from "../config/db";
 import { generateEmbedding } from "../services/llm";
@@ -235,94 +236,105 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
   );
 
   // ---------- bulk upload from .xlsx ----------
-  app.post("/kb-admin/ganeshotsav/api/entries/bulk-upload", async (request: any, reply) => {
-    const user = await requireSession(request, reply);
-    if (!user) return;
-
-    if (!request.isMultipart?.()) {
-      return reply.status(400).send({ error: "Expected a multipart/form-data upload with a 'file' field" });
-    }
-    const filePart = await request.file();
-    if (!filePart) {
-      return reply.status(400).send({ error: "No file uploaded" });
-    }
-    const buffer = await filePart.toBuffer();
-
-    const workbook = new ExcelJS.Workbook();
-    try {
-      await workbook.xlsx.load(buffer);
-    } catch {
-      return reply.status(400).send({ error: "Could not read this file — is it a valid .xlsx file?" });
-    }
-    const worksheet = workbook.worksheets[0];
-    if (!worksheet) {
-      return reply.status(400).send({ error: "The file has no sheets" });
-    }
-
-    const headerRow = worksheet.getRow(1);
-    const headerCells: string[] = [];
-    headerRow.eachCell({ includeEmpty: false }, (cell) => {
-      headerCells.push(normalizeHeaderName(cell.value));
+  // Registered on its own encapsulated sub-scope (mirrors ask.ts/voice.ts/
+  // qa-test-console.ts) - @fastify/multipart's content-type parser can only
+  // be added once per Fastify instance tree, and several other route files
+  // already register it scoped to themselves; registering it on the shared
+  // root `app` in app.ts collided with those and crashed the process on boot.
+  await app.register(async (scoped) => {
+    await scoped.register(multipart, {
+      limits: { fileSize: 10 * 1024 * 1024 },
     });
 
-    const isExactMatch =
-      headerCells.length === REQUIRED_COLUMNS.length &&
-      REQUIRED_COLUMNS.every((col) => headerCells.includes(col));
+    scoped.post("/kb-admin/ganeshotsav/api/entries/bulk-upload", async (request: any, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
 
-    if (!isExactMatch) {
-      return reply.status(400).send({
-        error:
-          `Invalid file format. Expected exactly two columns named "Questions" and "Answers" ` +
-          `(first row = header). Found: ${headerCells.length ? headerCells.join(", ") : "(no header row)"}.`,
-      });
-    }
-
-    const questionColIdx = headerCells.indexOf("questions") + 1;
-    const answerColIdx = headerCells.indexOf("answers") + 1;
-
-    const rowsToInsert: { question: string; answer: string }[] = [];
-    let skippedBlank = 0;
-    for (let r = 2; r <= worksheet.rowCount; r++) {
-      const row = worksheet.getRow(r);
-      const question = String(row.getCell(questionColIdx).value ?? "").trim();
-      const answer = String(row.getCell(answerColIdx).value ?? "").trim();
-      if (!question && !answer) {
-        skippedBlank++;
-        continue;
+      if (!request.isMultipart?.()) {
+        return reply.status(400).send({ error: "Expected a multipart/form-data upload with a 'file' field" });
       }
-      if (!question || !answer) {
+      const filePart = await request.file();
+      if (!filePart) {
+        return reply.status(400).send({ error: "No file uploaded" });
+      }
+      const buffer = await filePart.toBuffer();
+
+      const workbook = new ExcelJS.Workbook();
+      try {
+        await workbook.xlsx.load(buffer);
+      } catch {
+        return reply.status(400).send({ error: "Could not read this file — is it a valid .xlsx file?" });
+      }
+      const worksheet = workbook.worksheets[0];
+      if (!worksheet) {
+        return reply.status(400).send({ error: "The file has no sheets" });
+      }
+
+      const headerRow = worksheet.getRow(1);
+      const headerCells: string[] = [];
+      headerRow.eachCell({ includeEmpty: false }, (cell) => {
+        headerCells.push(normalizeHeaderName(cell.value));
+      });
+
+      const isExactMatch =
+        headerCells.length === REQUIRED_COLUMNS.length &&
+        REQUIRED_COLUMNS.every((col) => headerCells.includes(col));
+
+      if (!isExactMatch) {
         return reply.status(400).send({
-          error: `Row ${r}: both Question and Answer must be filled in (found only one of the two).`,
+          error:
+            `Invalid file format. Expected exactly two columns named "Questions" and "Answers" ` +
+            `(first row = header). Found: ${headerCells.length ? headerCells.join(", ") : "(no header row)"}.`,
         });
       }
-      rowsToInsert.push({ question, answer });
-    }
 
-    if (rowsToInsert.length === 0) {
-      return reply.status(400).send({ error: "No usable rows found in the file" });
-    }
+      const questionColIdx = headerCells.indexOf("questions") + 1;
+      const answerColIdx = headerCells.indexOf("answers") + 1;
 
-    const embeddings = await Promise.all(rowsToInsert.map((row) => generateEmbedding(row.question)));
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      for (let i = 0; i < rowsToInsert.length; i++) {
-        const embeddingStr = `[${embeddings[i].join(",")}]`;
-        await client.query(
-          `INSERT INTO kb_entries (customer_id, question, answer, embedding) VALUES ($1, $2, $3, $4)`,
-          [CUSTOMER_ID, rowsToInsert[i].question, rowsToInsert[i].answer, embeddingStr]
-        );
+      const rowsToInsert: { question: string; answer: string }[] = [];
+      let skippedBlank = 0;
+      for (let r = 2; r <= worksheet.rowCount; r++) {
+        const row = worksheet.getRow(r);
+        const question = String(row.getCell(questionColIdx).value ?? "").trim();
+        const answer = String(row.getCell(answerColIdx).value ?? "").trim();
+        if (!question && !answer) {
+          skippedBlank++;
+          continue;
+        }
+        if (!question || !answer) {
+          return reply.status(400).send({
+            error: `Row ${r}: both Question and Answer must be filled in (found only one of the two).`,
+          });
+        }
+        rowsToInsert.push({ question, answer });
       }
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
 
-    return reply.status(201).send({ inserted: rowsToInsert.length, skipped: skippedBlank });
+      if (rowsToInsert.length === 0) {
+        return reply.status(400).send({ error: "No usable rows found in the file" });
+      }
+
+      const embeddings = await Promise.all(rowsToInsert.map((row) => generateEmbedding(row.question)));
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        for (let i = 0; i < rowsToInsert.length; i++) {
+          const embeddingStr = `[${embeddings[i].join(",")}]`;
+          await client.query(
+            `INSERT INTO kb_entries (customer_id, question, answer, embedding) VALUES ($1, $2, $3, $4)`,
+            [CUSTOMER_ID, rowsToInsert[i].question, rowsToInsert[i].answer, embeddingStr]
+          );
+        }
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      return reply.status(201).send({ inserted: rowsToInsert.length, skipped: skippedBlank });
+    });
   });
 
   // ---------- downloadable template matching the required format exactly ----------
