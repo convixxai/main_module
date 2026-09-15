@@ -159,8 +159,9 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
   .prompt-agent-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-faint); font-weight: 700; }
   .prompt-agent-name { font-size: 15px; font-weight: 700; margin-top: 2px; }
   .prompt-textarea {
-    width: 100%; min-height: 420px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55;
+    display: block; width: 100%; height: 65vh; min-height: 480px; max-height: 900px;
+    padding: 16px 18px; border: 1px solid var(--border); border-radius: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13.5px; line-height: 1.6;
     resize: vertical; background: var(--surface-2); color: var(--text);
   }
   .prompt-textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); background: #fff; }
@@ -397,7 +398,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
           </div>
           <button class="btn btn-secondary btn-sm" id="prompt-copy-btn">Copy current text</button>
         </div>
-        <div class="field" style="margin:18px 22px 0">
+        <div style="margin:18px 22px 0">
           <textarea id="prompt-textarea" class="prompt-textarea" placeholder="Loading system prompt..." disabled></textarea>
         </div>
         <div class="modal-footer" style="border-top:none">
