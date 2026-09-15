@@ -214,6 +214,7 @@ async function resolveInitialAgentAndChatSession(customerId: string): Promise<{
   agentId: string | null;
   systemPrompt: string;
   greetingText: string | null;
+  errorText: string | null;
 }> {
   const chatRes = await pool.query(`INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`, [
     customerId,
@@ -221,20 +222,21 @@ async function resolveInitialAgentAndChatSession(customerId: string): Promise<{
   const chatSessionId = chatRes.rows[0].id as string;
 
   const agentRes = await pool.query(
-    `SELECT id, system_prompt, greeting_text FROM agents WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
+    `SELECT id, system_prompt, greeting_text, error_text FROM agents WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
     [customerId]
   );
   const customerRes = await pool.query(`SELECT system_prompt FROM customers WHERE id = $1`, [customerId]);
   const fallbackPrompt = customerRes.rows[0]?.system_prompt ?? "You are a helpful assistant.";
 
   if (agentRes.rows.length === 0) {
-    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt, greetingText: null };
+    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt, greetingText: null, errorText: null };
   }
   return {
     chatSessionId,
     agentId: agentRes.rows[0].id as string,
     systemPrompt: agentRes.rows[0].system_prompt || fallbackPrompt,
     greetingText: agentRes.rows[0].greeting_text || null,
+    errorText: agentRes.rows[0].error_text || null,
   };
 }
 
@@ -263,6 +265,27 @@ const DEFAULT_GREETING_BY_LANG: Record<string, { male: string; female: string }>
 
 function resolveDefaultGreeting(defaultLanguageCode: string, voiceGender: "male" | "female" | null): string {
   const pair = DEFAULT_GREETING_BY_LANG[defaultLanguageCode] ?? DEFAULT_GREETING_BY_LANG["en-IN"];
+  return pair[voiceGender === "female" ? "female" : "male"];
+}
+
+/** Same gender-pairing approach as DEFAULT_GREETING_BY_LANG, for the pipeline-failure fallback line. */
+const DEFAULT_ERROR_TEXT_BY_LANG: Record<string, { male: string; female: string }> = {
+  "en-IN": {
+    male: "Sorry, I was unable to process that. Please try again.",
+    female: "Sorry, I was unable to process that. Please try again.",
+  },
+  "hi-IN": {
+    male: "माफ़ कीजिए, मैं समझ नहीं पाया। कृपया दोबारा बताएं।",
+    female: "माफ़ कीजिए, मैं समझ नहीं पाई। कृपया दोबारा बताएं।",
+  },
+  "mr-IN": {
+    male: "माफ करा, मला ते समजलं नाही. मी पुन्हा विचारतो, कृपया सांगा.",
+    female: "माफ करा, मला ते समजलं नाही. मी पुन्हा विचारते, कृपया सांगा.",
+  },
+};
+
+function resolveDefaultErrorText(defaultLanguageCode: string, voiceGender: "male" | "female" | null): string {
+  const pair = DEFAULT_ERROR_TEXT_BY_LANG[defaultLanguageCode] ?? DEFAULT_ERROR_TEXT_BY_LANG["en-IN"];
   return pair[voiceGender === "female" ? "female" : "male"];
 }
 
@@ -296,9 +319,10 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   );
   session.currentLanguageCode = session.defaultLanguageCode;
 
-  const { chatSessionId, agentId, systemPrompt, greetingText } = await resolveInitialAgentAndChatSession(customerId);
+  const { chatSessionId, agentId, systemPrompt, greetingText, errorText } = await resolveInitialAgentAndChatSession(customerId);
   session.chatSessionId = chatSessionId;
   session.agentId = agentId;
+  session.errorText = errorText ?? undefined;
   session.greetingText = greetingText ?? undefined;
   session.voiceRagCustomerCache = { systemPrompt, defaultNoKb: null };
 
@@ -522,7 +546,10 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
   } catch (err) {
     app.log.error({ err, streamId }, "vodafone-voicebot: turn processing failed");
     try {
-      const pcm = await synthesizeSpeechToPcm8k("Sorry, I was unable to process that.", state.ttsConfig);
+      const errorMessage =
+        session.errorText ||
+        resolveDefaultErrorText(session.defaultLanguageCode ?? "en-IN", state.ttsConfig.voiceGender);
+      const pcm = await synthesizeSpeechToPcm8k(errorMessage, state.ttsConfig);
       sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
       sendMarkAndTrackPlayback(state, streamId, pcm.length);
     } catch {
