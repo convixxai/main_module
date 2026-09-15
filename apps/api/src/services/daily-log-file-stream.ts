@@ -9,13 +9,15 @@ import { Writable } from "stream";
 export class DailyLogFileStream extends Writable {
   private readonly logDir: string;
   private readonly prefix: string;
+  private readonly retentionDays: number;
   private currentDate: string | null = null;
   private fileStream: fs.WriteStream | null = null;
 
-  constructor(logDir: string, prefix = "convixx") {
+  constructor(logDir: string, prefix = "convixx", retentionDays = 7) {
     super();
     this.logDir = logDir;
     this.prefix = prefix;
+    this.retentionDays = retentionDays;
   }
 
   private dateKey(d = new Date()): string {
@@ -24,6 +26,30 @@ export class DailyLogFileStream extends Writable {
 
   private filePathForDate(date: string): string {
     return path.join(this.logDir, `${this.prefix}-${date}.log`);
+  }
+
+  /**
+   * Deletes rotated log files older than `retentionDays`. Runs once per
+   * calendar-day rotation (see openStreamForDate) rather than on a separate
+   * timer — no extra scheduling infrastructure needed, and it self-corrects
+   * even if the process was down for a few days. Best-effort: failures are
+   * swallowed so a log-cleanup issue never takes down logging itself.
+   */
+  private purgeOldLogs(): void {
+    const re = new RegExp(`^${this.prefix}-(\\d{4}-\\d{2}-\\d{2})\\.log$`);
+    const cutoff = Date.now() - this.retentionDays * 24 * 60 * 60 * 1000;
+    fs.readdir(this.logDir, (err, entries) => {
+      if (err) return;
+      for (const name of entries) {
+        const m = name.match(re);
+        if (!m) continue;
+        const fileDateMs = Date.parse(`${m[1]}T00:00:00Z`);
+        if (Number.isNaN(fileDateMs) || fileDateMs >= cutoff) continue;
+        fs.unlink(path.join(this.logDir, name), () => {
+          /* best-effort */
+        });
+      }
+    });
   }
 
   private openStreamForDate(date: string): void {
@@ -35,6 +61,7 @@ export class DailyLogFileStream extends Writable {
       flags: "a",
     });
     this.fileStream.on("error", (err) => this.emit("error", err));
+    this.purgeOldLogs();
   }
 
   private ensureOpen(): void {

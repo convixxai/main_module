@@ -33,7 +33,7 @@ export function createRootLogger(): pino.Logger {
   if (env.logFileEnabled) {
     try {
       fs.mkdirSync(env.logFileDir, { recursive: true });
-      const fileStream = new DailyLogFileStream(env.logFileDir);
+      const fileStream = new DailyLogFileStream(env.logFileDir, "convixx", env.logRetentionDays);
       fileStream.on("error", (err) => {
         console.error("Daily log file stream error:", err);
       });

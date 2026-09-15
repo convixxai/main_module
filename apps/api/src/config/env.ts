@@ -316,6 +316,12 @@ export const env = {
   /** Set to `false` to disable daily log files (stdout only). */
   logFileEnabled: process.env.LOG_FILE_ENABLED !== "false",
 
+  /** How many days of daily log files (`convixx-YYYY-MM-DD.log`) to keep before auto-deleting. */
+  logRetentionDays: (() => {
+    const n = Number(process.env.LOG_RETENTION_DAYS);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 7;
+  })(),
+
   /** When `true`, log every SQL statement (text + duration). Can be noisy; avoid in prod unless debugging. */
   logDbQueries: process.env.LOG_DB_QUERIES === "true",
 

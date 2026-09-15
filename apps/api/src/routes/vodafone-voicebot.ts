@@ -44,6 +44,7 @@ import { runAskPipeline } from "./ask";
 import { runSimulatorStt } from "./voice-simulator";
 import { createRagTrace } from "../services/rag-trace";
 import { synthesizeSpeechToPcm8k } from "../services/vodafone-tts";
+import { pcmDurationMs } from "../services/pcm-audio";
 import { VodafoneAdapter } from "../services/vodafone-adapter";
 import {
   getOrCreateCartesiaTtsSession,
@@ -75,6 +76,10 @@ const VAD_ENERGY_THRESHOLD = 200;
 const VAD_SILENCE_MS = 800;
 const MIN_UTTERANCE_BYTES = 1600; // ~100ms @ 8kHz 16-bit mono
 const MAX_UTTERANCE_BYTES = 5 * 1024 * 1024;
+/** Grace period added on top of estimated playback duration before we give up
+ *  waiting for VI's mark ack and force caller audio to resume (see
+ *  schedulePlaybackMarkFallback) — mirrors exotel-voicebot.ts's constant. */
+const PLAYBACK_MARK_FALLBACK_SLACK_MS = 2500;
 
 function pcmRmsEnergy(buf: Buffer): number {
   if (buf.length < 2) return 0;
@@ -295,7 +300,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
     sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
-    sendFrames(ws, adapter.buildMarkFrame(event.streamId, nextMarkName(session)));
+    sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
   } catch (err) {
     app.log.error({ err, customerId }, "vodafone-voicebot: greeting synthesis failed");
   }
@@ -490,7 +495,7 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
     try {
       const pcm = await synthesizeSpeechToPcm8k("Sorry, I was unable to process that.", state.ttsConfig);
       sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
-      sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
+      sendMarkAndTrackPlayback(state, streamId, pcm.length);
     } catch {
       /* best-effort fallback only */
     }
@@ -561,7 +566,7 @@ async function answerUtteranceBatch(
   const pcm = await synthesizeSpeechToPcm8k(answer, state.ttsConfig);
   const ttsMs = Date.now() - ttsStartedAt;
   sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
-  sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
+  sendMarkAndTrackPlayback(state, streamId, pcm.length);
   app.log.info(
     { streamId, ttsMs, totalMsSinceSilence: Date.now() - turnStartedAt },
     "vodafone-voicebot: answer spoken (batch)"
@@ -598,6 +603,7 @@ async function answerUtteranceStreaming(
   let spoke = false;
   let firstLlmDeltaAt: number | null = null;
   let firstSpokenAt: number | null = null;
+  let totalOutboundBytes = 0;
 
   async function speakSentence(text: string): Promise<void> {
     if (session.isClosing || !text.trim()) return;
@@ -626,6 +632,7 @@ async function answerUtteranceStreaming(
         cartesia.audioPump = (async () => {
           for await (const chunk of stream.audio) {
             if (session.isClosing) break;
+            totalOutboundBytes += chunk.length;
             sendFrames(ws, adapter.buildAudioFrame(streamId, chunk));
           }
         })();
@@ -634,6 +641,7 @@ async function answerUtteranceStreaming(
       spoke = true;
     } else {
       const pcm = await synthesizeSpeechToPcm8k(text, state.ttsConfig);
+      totalOutboundBytes += pcm.length;
       sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
       spoke = true;
     }
@@ -684,13 +692,14 @@ async function answerUtteranceStreaming(
     const answer = askResult.answer.trim();
     if (answer) {
       const pcm = await synthesizeSpeechToPcm8k(answer, state.ttsConfig);
+      totalOutboundBytes += pcm.length;
       sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
       spoke = true;
     }
   }
 
   if (spoke) {
-    sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
+    sendMarkAndTrackPlayback(state, streamId, totalOutboundBytes);
   }
   app.log.info(
     {
@@ -702,6 +711,61 @@ async function answerUtteranceStreaming(
     },
     "vodafone-voicebot: turn complete (streaming)"
   );
+}
+
+/** Cancels a pending playback-fallback timer (mark ack arrived, or session torn down). */
+function clearPlaybackMarkFallback(session: VoicebotSession): void {
+  if (session.playbackFallbackTimer) {
+    clearTimeout(session.playbackFallbackTimer);
+    session.playbackFallbackTimer = null;
+  }
+}
+
+/**
+ * VI should echo back every `mark` once the matching audio has finished playing
+ * (see types/vodafone-ws.ts). If that ack never arrives (dropped message, VI
+ * bug, etc.), `isSpeaking` would stay true forever and the caller's line would
+ * never be listened to again — so force it clear after the estimated playback
+ * duration plus slack. Mirrors exotel-voicebot.ts's schedulePlaybackMarkFallback.
+ */
+function schedulePlaybackMarkFallback(session: VoicebotSession, outboundPcmBytes: number, sampleRate: number): void {
+  clearPlaybackMarkFallback(session);
+  if (outboundPcmBytes <= 0 || session.pendingMarks.size === 0) return;
+  const waitMs = Math.ceil(pcmDurationMs(outboundPcmBytes, sampleRate) + PLAYBACK_MARK_FALLBACK_SLACK_MS);
+  session.playbackFallbackTimer = setTimeout(() => {
+    session.playbackFallbackTimer = null;
+    if (session.pendingMarks.size === 0) return;
+    session.pendingMarks.clear();
+    markPlaybackDone(session);
+  }, waitMs);
+}
+
+/** Playback of the current turn's audio has fully finished (mark ack, or fallback timeout). */
+function markPlaybackDone(session: VoicebotSession): void {
+  session.isSpeaking = false;
+  clearPlaybackMarkFallback(session);
+  // Discard anything that arrived while the bot was talking — it's the bot's
+  // own audio bleeding back (echo/crosstalk), not real caller speech, since
+  // the "media" handler already refuses to buffer while isSpeaking is true.
+  // This is just a defensive clear for the instant the flag flips.
+  session.inboundPcm = [];
+  session.inboundBytes = 0;
+}
+
+/**
+ * Sends a mark for audio just queued to VI, and marks the session as
+ * "speaking" until VI acks it (or the fallback timer above gives up). While
+ * `isSpeaking` is true, the "media" handler fully discards caller audio — no
+ * barge-in by design (Vodafone customer request 2026-09-15): the bot must not
+ * react to, or accumulate, anything said while it is still talking.
+ */
+function sendMarkAndTrackPlayback(state: VodafoneCallState, streamId: string, outboundPcmBytes: number): void {
+  const { session, adapter, ws } = state;
+  const markName = nextMarkName(session);
+  session.pendingMarks.add(markName);
+  session.isSpeaking = true;
+  sendFrames(ws, adapter.buildMarkFrame(streamId, markName));
+  schedulePlaybackMarkFallback(session, outboundPcmBytes, session.mediaFormat.sample_rate || 8000);
 }
 
 /** Starts the silence timer only if it isn't already running — subsequent silent
@@ -760,11 +824,20 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
               if (!state || state.session.isClosing) return;
               const energy = pcmRmsEnergy(event.pcm16);
               state.mediaFrameCount += 1;
+              const aiSpeaking = state.processing || state.session.isSpeaking;
               if (state.mediaFrameCount === 1 || state.mediaFrameCount % 50 === 0) {
                 app.log.info(
-                  { streamId, frame: state.mediaFrameCount, bytes: event.pcm16.length, energy },
+                  { streamId, frame: state.mediaFrameCount, bytes: event.pcm16.length, energy, aiSpeaking },
                   "vodafone-voicebot: media frame received"
                 );
+              }
+              if (aiSpeaking) {
+                // Bot is generating and/or its reply is still playing out over the
+                // call (isSpeaking stays true until VI's mark ack, or the fallback
+                // timer, confirms playback finished) — fully discard caller audio.
+                // No barge-in by design: don't react to, or accumulate, anything
+                // said while the bot is still talking.
+                return;
               }
               const isSpeech = energy >= VAD_ENERGY_THRESHOLD;
               if (isSpeech) {
@@ -796,7 +869,12 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
 
             case "markAck": {
               const state = streamId ? calls.get(streamId) : undefined;
-              state?.session.pendingMarks.delete(event.name);
+              if (state) {
+                state.session.pendingMarks.delete(event.name);
+                if (state.session.pendingMarks.size === 0) {
+                  markPlaybackDone(state.session);
+                }
+              }
               break;
             }
 
