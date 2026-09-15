@@ -193,6 +193,7 @@ async function resolveInitialAgentAndChatSession(customerId: string): Promise<{
   chatSessionId: string;
   agentId: string | null;
   systemPrompt: string;
+  greetingText: string | null;
 }> {
   const chatRes = await pool.query(`INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`, [
     customerId,
@@ -200,20 +201,36 @@ async function resolveInitialAgentAndChatSession(customerId: string): Promise<{
   const chatSessionId = chatRes.rows[0].id as string;
 
   const agentRes = await pool.query(
-    `SELECT id, system_prompt FROM agents WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
+    `SELECT id, system_prompt, greeting_text FROM agents WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
     [customerId]
   );
   const customerRes = await pool.query(`SELECT system_prompt FROM customers WHERE id = $1`, [customerId]);
   const fallbackPrompt = customerRes.rows[0]?.system_prompt ?? "You are a helpful assistant.";
 
   if (agentRes.rows.length === 0) {
-    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt };
+    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt, greetingText: null };
   }
   return {
     chatSessionId,
     agentId: agentRes.rows[0].id as string,
     systemPrompt: agentRes.rows[0].system_prompt || fallbackPrompt,
+    greetingText: agentRes.rows[0].greeting_text || null,
   };
+}
+
+/**
+ * Fallback greeting used when the agent has no greeting_text configured.
+ * Keyed by the tenant's default_language_code so a Marathi-default tenant
+ * doesn't hear an English "Hello" before any agent-specific text exists.
+ */
+const DEFAULT_GREETING_BY_LANG: Record<string, string> = {
+  "en-IN": "Hello, how can I help you today?",
+  "hi-IN": "नमस्ते, मैं आपकी कैसे मदद कर सकता हूँ?",
+  "mr-IN": "नमस्कार, मी आपली कशी मदत करू शकतो?",
+};
+
+function resolveDefaultGreeting(defaultLanguageCode: string): string {
+  return DEFAULT_GREETING_BY_LANG[defaultLanguageCode] ?? DEFAULT_GREETING_BY_LANG["en-IN"];
 }
 
 async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: string, event: Extract<CallEvent, { type: "start" }>): Promise<void> {
@@ -246,9 +263,10 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   );
   session.currentLanguageCode = session.defaultLanguageCode;
 
-  const { chatSessionId, agentId, systemPrompt } = await resolveInitialAgentAndChatSession(customerId);
+  const { chatSessionId, agentId, systemPrompt, greetingText } = await resolveInitialAgentAndChatSession(customerId);
   session.chatSessionId = chatSessionId;
   session.agentId = agentId;
+  session.greetingText = greetingText ?? undefined;
   session.voiceRagCustomerCache = { systemPrompt, defaultNoKb: null };
 
   const ttsConfig = await resolveTtsConfig(
@@ -273,7 +291,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
 
   app.log.info({ customerId, streamId: event.streamId, callId: event.callId }, "vodafone-voicebot: call started");
 
-  const greeting = "Hello, how can I help you today?";
+  const greeting = session.greetingText || resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN");
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
     sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
