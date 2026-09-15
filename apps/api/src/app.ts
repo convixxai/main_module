@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import formbody from "@fastify/formbody";
+import multipart from "@fastify/multipart";
 import { healthRoutes } from "./routes/health";
 import { customerRoutes } from "./routes/customers";
 import { kbRoutes } from "./routes/kb";
@@ -32,6 +33,7 @@ import { googleTtsSimulatorRoutes } from "./routes/google-tts-simulator";
 import { sarvamTtsSimulatorRoutes } from "./routes/sarvam-tts-simulator";
 import { voiceCartesiaTestConsoleRoutes } from "./routes/voice-cartesia-test-console";
 import { qaTestConsoleRoutes } from "./routes/qa-test-console";
+import { kbAdminGaneshotsavRoutes } from "./routes/kb-admin-ganeshotsav";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -57,6 +59,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, { origin: true }); // Allow all origins (required for Swagger UI Try it out)
   await app.register(websocket);               // Enable WebSocket support for Exotel Voicebot
   await app.register(formbody);                // Parse application/x-www-form-urlencoded (Exotel StatusCallbacks)
+  await app.register(multipart);                // Multipart file uploads (KB bulk upload, etc.)
   await registerSwagger(app);
 
   app.register(healthRoutes);
@@ -89,6 +92,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(exotelStatusCallbackRoutes);      // Exotel HTTP StatusCallback (answered)
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)
   app.register(outboundCampaignRoutes);         // Outbound Campaign management & triggering
+  app.register(kbAdminGaneshotsavRoutes);       // Temporary username/password-protected KB admin page (Ganeshotsav project)
 
   return app;
 }
