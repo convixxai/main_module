@@ -133,25 +133,33 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
 
   main { flex: 1; padding: 22px 20px 48px; max-width: 1180px; width: 100%; margin: 0 auto; }
 
+  /* Search is the primary way to find an entry among 100+ rows, so it gets its own
+     full-width, high-contrast bar above everything else rather than competing for
+     space in the action toolbar. */
+  .search-prominent { position: relative; margin-bottom: 14px; }
+  .search-prominent svg {
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--text-faint);
+    pointer-events: none;
+  }
+  .search-prominent input {
+    width: 100%; padding: 15px 16px 15px 48px; border: 1.5px solid var(--border); border-radius: 12px;
+    font-size: 15.5px; background: var(--surface); box-shadow: var(--shadow-sm);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .search-prominent input:focus {
+    outline: none; border-color: var(--primary); box-shadow: 0 0 0 4px var(--primary-bg);
+  }
+
   .toolbar {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 16px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px;
   }
   .toolbar .spacer { flex: 1; }
-  .search-wrap { position: relative; flex: 1; min-width: 200px; max-width: 340px; }
-  .search-wrap svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--text-faint); }
-  .search-wrap input {
-    width: 100%; padding: 9px 12px 9px 34px; border: 1px solid var(--border); border-radius: 8px;
-    font-size: 13.5px; background: var(--surface);
+  .stat-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+    padding: 6px 13px; font-size: 12.5px; color: var(--text-dim); white-space: nowrap;
   }
-  .search-wrap input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); }
-
-  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
-  .stat-card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 12px 16px; min-width: 120px;
-  }
-  .stat-card .num { font-size: 20px; font-weight: 700; }
-  .stat-card .label { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
+  .stat-chip strong { color: var(--text); font-weight: 700; font-size: 13px; }
 
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
 
@@ -292,17 +300,15 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
   </header>
 
   <main>
-    <div class="stat-row">
-      <div class="stat-card"><div class="num" id="stat-total">.../div><div class="label">Total entries</div></div>
-      <div class="stat-card"><div class="num" id="stat-selected">0</div><div class="label">Selected</div></div>
-      <div class="stat-card"><div class="num" id="stat-filtered">.../div><div class="label">Showing</div></div>
+    <div class="search-prominent">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="search-input" type="text" placeholder="Search questions or answers..." />
     </div>
 
     <div class="toolbar">
-      <div class="search-wrap">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input id="search-input" type="text" placeholder="Search questions or answers…" />
-      </div>
+      <div class="stat-chip"><strong id="stat-total">...</strong> total</div>
+      <div class="stat-chip"><strong id="stat-filtered">...</strong> showing</div>
+      <div class="stat-chip"><strong id="stat-selected">0</strong> selected</div>
       <div class="spacer"></div>
       <button class="btn btn-secondary" id="template-btn">Download template</button>
       <button class="btn btn-secondary" id="bulk-upload-btn">Bulk upload</button>
