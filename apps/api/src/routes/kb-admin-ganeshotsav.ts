@@ -3,7 +3,7 @@
 // (customer_id 97752ef1-eb4f-4ebb-a77f-0613fe3a424b). Username/password
 // protected, single active session per login (a new login anywhere
 // overwrites kb_admin_users.session_token, which immediately invalidates
-// whatever browser/window was using the previous one — enforced by
+// whatever browser/window was using the previous one, enforced by
 // validateKbAdminSession comparing against the CURRENT token on every call,
 // and the page polling /api/session every 8s to notice and log itself out).
 //
@@ -28,7 +28,7 @@ import { KB_ADMIN_GANESHOTSAV_HTML } from "./kb-admin-ganeshotsav-page";
 
 const CUSTOMER_ID = "97752ef1-eb4f-4ebb-a77f-0613fe3a424b";
 const COOKIE_NAME = "kb_admin_ganeshotsav_session";
-const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 12; // 12h — a stale forgotten-open tab shouldn't stay valid forever
+const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 12; // 12h, a stale forgotten-open tab shouldn't stay valid forever
 
 const REQUIRED_COLUMNS = ["questions", "answers"] as const;
 
@@ -60,7 +60,7 @@ function clearFailedLogins(key: string): void {
   loginAttempts.delete(key);
 }
 
-// ---------- cookie helpers (no @fastify/cookie dependency — one cookie, simple needs) ----------
+// ---------- cookie helpers (no @fastify/cookie dependency, one cookie, simple needs) ----------
 function readCookie(cookieHeader: string | undefined, name: string): string | null {
   if (!cookieHeader) return null;
   const parts = cookieHeader.split(";");
@@ -263,7 +263,7 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       try {
         await workbook.xlsx.load(buffer);
       } catch {
-        return reply.status(400).send({ error: "Could not read this file — is it a valid .xlsx file?" });
+        return reply.status(400).send({ error: "Could not read this file, is it a valid .xlsx file?" });
       }
       const worksheet = workbook.worksheets[0];
       if (!worksheet) {

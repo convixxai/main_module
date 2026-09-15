@@ -57,7 +57,7 @@ export async function clearKbAdminSession(userId: string): Promise<void> {
   );
 }
 
-/** Validates a session token against a specific customer's account — the token must be the CURRENT one. */
+/** Validates a session token against a specific customer's account, the token must be the CURRENT one. */
 export async function validateKbAdminSession(
   customerId: string,
   token: string | null
