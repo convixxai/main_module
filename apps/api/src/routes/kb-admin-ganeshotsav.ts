@@ -585,6 +585,60 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
     });
   });
 
+  // ---------- suggested knowledgebase: queries the bot couldn't answer live on calls ----------
+  app.get("/kb-admin/ganeshotsav/api/suggested-entries", async (request, reply) => {
+    const user = await requireSession(request, reply);
+    if (!user) return;
+    const r = await pool.query(
+      `SELECT id, question, question_language_code, answer_given, occurrence_count,
+              first_asked_at, last_asked_at
+       FROM suggested_kb_entries
+       WHERE customer_id = $1 AND status = 'pending'
+       ORDER BY last_asked_at DESC`,
+      [CUSTOMER_ID]
+    );
+    return reply.send({ entries: r.rows });
+  });
+
+  app.post<{ Params: { id: string } }>(
+    "/kb-admin/ganeshotsav/api/suggested-entries/:id/ignore",
+    async (request, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
+      const r = await pool.query(
+        `UPDATE suggested_kb_entries SET status = 'ignored', updated_at = now()
+         WHERE id = $1 AND customer_id = $2 AND status = 'pending' RETURNING id`,
+        [request.params.id, CUSTOMER_ID]
+      );
+      if (r.rows.length === 0) {
+        return reply.status(404).send({ error: "Suggested entry not found (or already handled)" });
+      }
+      return reply.send({ ok: true });
+    }
+  );
+
+  // Marks the suggestion handled and hands back its question/answer so the UI
+  // can prefill the normal Add Entry modal - this endpoint itself only updates
+  // status, it does not create a kb_entries row (an admin still writes/reviews
+  // the real answer text through the existing add-entry flow).
+  app.post<{ Params: { id: string } }>(
+    "/kb-admin/ganeshotsav/api/suggested-entries/:id/add-to-kb",
+    async (request, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
+      const r = await pool.query(
+        `UPDATE suggested_kb_entries SET status = 'added', updated_at = now()
+         WHERE id = $1 AND customer_id = $2 AND status = 'pending'
+         RETURNING id, question, question_language_code, answer_given`,
+        [request.params.id, CUSTOMER_ID]
+      );
+      if (r.rows.length === 0) {
+        return reply.status(404).send({ error: "Suggested entry not found (or already handled)" });
+      }
+      return reply.send({ ok: true, ...r.rows[0] });
+    }
+  );
+
   // ---------- downloadable template matching the required format exactly ----------
   app.get("/kb-admin/ganeshotsav/api/template.xlsx", async (request, reply) => {
     const user = await requireSession(request, reply);
