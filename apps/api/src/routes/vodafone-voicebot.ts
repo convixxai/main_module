@@ -78,7 +78,19 @@ import {
 } from "../services/voicebot-session";
 
 const VAD_ENERGY_THRESHOLD = 200;
-const VAD_SILENCE_MS = 800;
+/**
+ * Default silence gap (ms) treated as "caller has finished speaking". Was
+ * hardcoded at 800ms, which analysis of a real call recording (2026-09-16,
+ * streamId TN_29924018_12_2763408) showed was too short: 8 of 17 turns in
+ * that call had the bot's reply audio starting while the caller was still
+ * audibly speaking (2.5-5.8s of continued caller speech energy after the
+ * bot's first sentence began), consistent with natural mid-sentence pauses
+ * exceeding 800ms and being misread as "done talking". Raised to match
+ * exotel-voicebot.ts's already-proven VAD_SILENCE_TIMEOUT_MS default (1500ms)
+ * - notably, customer_settings.vad_silence_timeout_ms for this very customer
+ * was already set to 1500 in the database; this bot just wasn't reading it.
+ */
+const DEFAULT_VAD_SILENCE_MS = 1500;
 const MIN_UTTERANCE_BYTES = 1600; // ~100ms @ 8kHz 16-bit mono
 const MAX_UTTERANCE_BYTES = 5 * 1024 * 1024;
 /** Grace period added on top of estimated playback duration before we give up
@@ -917,6 +929,15 @@ function sendMarkAndTrackPlayback(state: VodafoneCallState, streamId: string, ou
   schedulePlaybackMarkFallback(session, outboundPcmBytes, session.mediaFormat.sample_rate || 8000);
 }
 
+/** Per-tenant override (customer_settings.vad_silence_timeout_ms, same field
+ *  and same clamp bounds exotel-voicebot.ts already uses) - falls back to
+ *  DEFAULT_VAD_SILENCE_MS when unset or out of range. */
+function resolveVadSilenceMs(state: VodafoneCallState): number {
+  const v = state.customerSettings?.vad_silence_timeout_ms;
+  if (v != null && Number.isFinite(v) && v >= 300 && v <= 30_000) return Math.floor(v);
+  return DEFAULT_VAD_SILENCE_MS;
+}
+
 /** Starts the silence timer only if it isn't already running — subsequent silent
  *  frames must NOT push it back out, or it would never elapse on a continuously
  *  streaming call (see the "media" handler's isSpeech/else-if split below). */
@@ -927,7 +948,7 @@ function armSilenceTimer(app: FastifyInstance, streamId: string): void {
     const s = calls.get(streamId);
     if (s) s.silenceTimer = null;
     void processUtterance(app, streamId);
-  }, VAD_SILENCE_MS);
+  }, resolveVadSilenceMs(state));
 }
 
 /** Cancels a pending silence timer — called when speech resumes, so a brief pause doesn't get cut off. */
