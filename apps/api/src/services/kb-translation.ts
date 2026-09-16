@@ -33,6 +33,39 @@ function toEmbeddingLiteral(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
+/**
+ * Global, serialized pacing for every Sarvam translate call THIS FEATURE
+ * issues (fan-out/cascade/backfill), regardless of how many entries look
+ * "concurrent" from the caller's point of view. Confirmed empirically
+ * 2026-09-16: Sarvam's translate endpoint sustains roughly 1 request/second
+ * before returning 429s (a burst of ~15 concurrent calls tripped it
+ * immediately; a strictly serial run of 15 calls, one at a time, was 100%
+ * clean). sarvamTranslateText's own retry/backoff smooths occasional live-call
+ * bursts but can't compensate for a bulk job that's simply requesting faster
+ * than the account's sustained rate allows - only real pacing fixes that.
+ * Deliberately local to this file (not global to sarvam.ts) so the live
+ * per-call translate path used by ask.ts is untouched by this pacing.
+ */
+const SARVAM_TRANSLATE_MIN_INTERVAL_MS = 1100;
+let sarvamQueueTail: Promise<unknown> = Promise.resolve();
+let sarvamLastCallAt = 0;
+
+function pacedSarvamTranslate(
+  input: string,
+  sourceLanguageCode: string | null,
+  targetLanguageCode: string
+): Promise<{ ok: boolean; text: string }> {
+  const runner = sarvamQueueTail.then(async () => {
+    const wait = Math.max(0, sarvamLastCallAt + SARVAM_TRANSLATE_MIN_INTERVAL_MS - Date.now());
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    sarvamLastCallAt = Date.now();
+    return sarvamTranslateText(input, sourceLanguageCode, targetLanguageCode);
+  });
+  // Keep the queue chain alive even if this particular call rejects.
+  sarvamQueueTail = runner.catch(() => undefined);
+  return runner;
+}
+
 /** Runs `jobs` with at most `concurrency` in flight at once - keeps bulk fan-out from hammering Sarvam/embeddings. */
 async function runWithConcurrency<T>(jobs: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
   const results: T[] = new Array(jobs.length);
@@ -123,8 +156,8 @@ async function translateAndStoreOne(params: {
   answer: string;
 }): Promise<{ languageCode: string; ok: boolean }> {
   const [qResult, aResult] = await Promise.all([
-    sarvamTranslateText(params.question, params.sourceLanguageCode, params.targetLanguageCode),
-    sarvamTranslateText(params.answer, params.sourceLanguageCode, params.targetLanguageCode),
+    pacedSarvamTranslate(params.question, params.sourceLanguageCode, params.targetLanguageCode),
+    pacedSarvamTranslate(params.answer, params.sourceLanguageCode, params.targetLanguageCode),
   ]);
   const ok = qResult.ok && aResult.ok;
   const translatedQuestion = ok ? qResult.text : params.question;
