@@ -36,34 +36,50 @@ function toEmbeddingLiteral(embedding: number[]): string {
 /**
  * Global, serialized pacing for every Sarvam translate call THIS FEATURE
  * issues (fan-out/cascade/backfill), regardless of how many entries look
- * "concurrent" from the caller's point of view. Confirmed empirically
- * 2026-09-16: Sarvam's translate endpoint sustains roughly 1 request/second
- * before returning 429s (a burst of ~15 concurrent calls tripped it
- * immediately; a strictly serial run of 15 calls, one at a time, was 100%
- * clean). sarvamTranslateText's own retry/backoff smooths occasional live-call
- * bursts but can't compensate for a bulk job that's simply requesting faster
- * than the account's sustained rate allows - only real pacing fixes that.
- * Deliberately local to this file (not global to sarvam.ts) so the live
- * per-call translate path used by ask.ts is untouched by this pacing.
+ * "concurrent" from the caller's point of view - AND regardless of which
+ * OS process makes the call. Confirmed empirically 2026-09-16: Sarvam's
+ * translate endpoint sustains roughly 1 request/second before returning
+ * 429s. An in-process-only queue (a plain module-level variable) isn't
+ * enough on its own: when the standalone backfill script
+ * (scripts/backfill-kb-translations.ts, a separate Node process) ran
+ * concurrently with the live API server handling an admin's upload, each
+ * process paced ITS OWN calls independently, so the combined real rate
+ * roughly doubled and tripped the limit again - reproduced live via a test
+ * bulk-upload made while a backfill was in flight (both its non-English
+ * translations came back failed). Fixed with a single-row Postgres table
+ * (migration 016) as the pacing token: every caller atomically reserves the
+ * next available time slot via one UPDATE ... RETURNING (row-level locking
+ * makes concurrent reservations serialize correctly across ANY number of
+ * connections/processes), then sleeps until its own slot before calling
+ * Sarvam. Deliberately local to this file (not global to sarvam.ts) so the
+ * live per-call translate path used by ask.ts is untouched by this pacing.
  */
 const SARVAM_TRANSLATE_MIN_INTERVAL_MS = 1100;
-let sarvamQueueTail: Promise<unknown> = Promise.resolve();
-let sarvamLastCallAt = 0;
 
-function pacedSarvamTranslate(
+async function reserveSarvamSlot(): Promise<Date> {
+  const r = await pool.query<{ slot: string }>(
+    `WITH reserved AS (
+       SELECT next_available_at FROM sarvam_rate_limiter WHERE id = 1 FOR UPDATE
+     )
+     UPDATE sarvam_rate_limiter
+     SET next_available_at = GREATEST((SELECT next_available_at FROM reserved), now())
+       + ($1::numeric || ' milliseconds')::interval
+     WHERE id = 1
+     RETURNING (SELECT next_available_at FROM reserved) AS slot`,
+    [SARVAM_TRANSLATE_MIN_INTERVAL_MS]
+  );
+  return new Date(r.rows[0].slot);
+}
+
+async function pacedSarvamTranslate(
   input: string,
   sourceLanguageCode: string | null,
   targetLanguageCode: string
 ): Promise<{ ok: boolean; text: string }> {
-  const runner = sarvamQueueTail.then(async () => {
-    const wait = Math.max(0, sarvamLastCallAt + SARVAM_TRANSLATE_MIN_INTERVAL_MS - Date.now());
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    sarvamLastCallAt = Date.now();
-    return sarvamTranslateText(input, sourceLanguageCode, targetLanguageCode);
-  });
-  // Keep the queue chain alive even if this particular call rejects.
-  sarvamQueueTail = runner.catch(() => undefined);
-  return runner;
+  const slot = await reserveSarvamSlot();
+  const waitMs = slot.getTime() - Date.now();
+  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  return sarvamTranslateText(input, sourceLanguageCode, targetLanguageCode);
 }
 
 /** Runs `jobs` with at most `concurrency` in flight at once - keeps bulk fan-out from hammering Sarvam/embeddings. */
