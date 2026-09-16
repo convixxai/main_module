@@ -369,6 +369,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
         <div class="stat-chip"><strong id="stat-total">...</strong> total</div>
         <div class="stat-chip"><strong id="stat-filtered">...</strong> showing</div>
         <div class="stat-chip"><strong id="stat-selected">0</strong> selected</div>
+        <div class="stat-chip" id="translation-status-chip" hidden><span class="spinner dark" style="width:11px;height:11px;margin-right:3px;vertical-align:-1px"></span><strong id="stat-translating">0</strong> translating in background&hellip;</div>
         <div class="spacer"></div>
         <button class="btn btn-secondary" id="template-btn">Download template</button>
         <button class="btn btn-secondary" id="bulk-upload-btn">Bulk upload</button>
@@ -649,6 +650,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
       startSessionPolling();
       loadEntries();
       loadLanguages();
+      checkTranslationStatus();
     } catch (err) {
       $('login-error').textContent = err.message || 'Invalid username or password';
       $('login-error').hidden = false;
@@ -670,6 +672,23 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
         if (res.status === 401) handleSessionExpired();
       }).catch(function () {});
     }, 8000);
+  }
+
+  // ---------- background translation status (polls; survives page reloads since it's server-side state) ----------
+  var translationPollTimer = null;
+  async function checkTranslationStatus() {
+    try {
+      var data = await api('/api/entries/translation-status');
+      var chip = $('translation-status-chip');
+      if (data.pendingOrMissing > 0) {
+        chip.hidden = false;
+        $('stat-translating').textContent = data.pendingOrMissing;
+        if (!translationPollTimer) translationPollTimer = setInterval(checkTranslationStatus, 7000);
+      } else {
+        chip.hidden = true;
+        if (translationPollTimer) { clearInterval(translationPollTimer); translationPollTimer = null; }
+      }
+    } catch (err) { /* non-fatal - just skip this poll, try again next interval */ }
   }
 
   // ---------- languages (drives the entry modal's language tabs) ----------
@@ -876,9 +895,10 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
         }
       } else {
         await api('/api/entries', { method: 'POST', body: JSON.stringify({ question: question, answer: answer }) });
-        toast(state.allowedLanguages.length > 1 ? 'Entry added and translated' : 'Entry added', 'ok');
+        toast(state.allowedLanguages.length > 1 ? 'Entry added - translating in background' : 'Entry added', 'ok');
         closeModal('entry-modal-overlay');
         loadEntries();
+        checkTranslationStatus();
       }
     } catch (err) {
       if (err.message !== 'session_expired') toast('Save failed: ' + err.message, 'err');
@@ -1028,10 +1048,14 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
       }
       $('upload-result').className = 'upload-result ok';
       $('upload-result').textContent = data.inserted + ' entries added' +
-        (data.skipped ? ' (' + data.skipped + ' blank rows skipped)' : '') + '.';
+        (data.skipped ? ' (' + data.skipped + ' blank rows skipped)' : '') + '.' +
+        (data.translationsPending
+          ? ' Translating into the other languages in the background now - this continues even if you close this window, and can take a while for a large file.'
+          : '');
       $('upload-result').hidden = false;
-      toast(data.inserted + ' entries added from file', 'ok');
+      toast(data.inserted + ' entries added' + (data.translationsPending ? ' - translating in background' : ''), 'ok');
       loadEntries();
+      checkTranslationStatus();
     } catch (err) {
       $('upload-result').className = 'upload-result err';
       $('upload-result').textContent = 'Upload failed: ' + err.message;
@@ -1137,6 +1161,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
         startSessionPolling();
         loadEntries();
         loadLanguages();
+        checkTranslationStatus();
         return;
       }
     } catch (e) { /* fall through to login */ }

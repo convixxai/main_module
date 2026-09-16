@@ -322,6 +322,56 @@ export async function listKbEntryTranslations(
 }
 
 /**
+ * Real-time progress summary for the admin UI to poll - "how much of the KB
+ * has full translation coverage right now" - independent of which upload or
+ * add triggered the work, and independent of whether that browser tab is
+ * still open (the fan-out itself runs server-side, detached from any one
+ * HTTP request - see kb-admin-ganeshotsav.ts's bulk-upload/add handlers).
+ * An entry counts as "fully translated" once every OTHER allowed language
+ * (not counting its own source language) has a row with translation_status='ok'.
+ */
+export async function getTranslationCoverageSummary(
+  customerId: string,
+  allowedLanguageCodes: string[]
+): Promise<{ totalEntries: number; fullyTranslated: number; pendingOrMissing: number; withFailures: number }> {
+  const targetCount = Math.max(allowedLanguageCodes.length - 1, 0);
+  if (targetCount === 0) {
+    const r = await pool.query<{ count: string }>(`SELECT count(*) FROM kb_entries WHERE customer_id = $1`, [
+      customerId,
+    ]);
+    const total = Number(r.rows[0]?.count ?? 0);
+    return { totalEntries: total, fullyTranslated: total, pendingOrMissing: 0, withFailures: 0 };
+  }
+
+  const r = await pool.query<{ ok_count: string; failed_count: string; total: string }>(
+    `SELECT
+       count(*) FILTER (WHERE t.is_source = false AND t.translation_status = 'ok') AS ok_count,
+       count(*) FILTER (WHERE t.is_source = false AND t.translation_status = 'failed') AS failed_count
+     FROM kb_entries ke
+     LEFT JOIN kb_entry_translations t ON t.kb_entry_id = ke.id
+     WHERE ke.customer_id = $1
+     GROUP BY ke.id`,
+    [customerId]
+  );
+
+  let fullyTranslated = 0;
+  let withFailures = 0;
+  for (const row of r.rows) {
+    const ok = Number(row.ok_count);
+    const failed = Number(row.failed_count);
+    if (ok >= targetCount) fullyTranslated++;
+    else if (failed > 0) withFailures++;
+  }
+  const totalEntries = r.rows.length;
+  return {
+    totalEntries,
+    fullyTranslated,
+    pendingOrMissing: totalEntries - fullyTranslated,
+    withFailures,
+  };
+}
+
+/**
  * One-time/backfill entry point: for every kb_entries row belonging to
  * customerId that doesn't yet have a full set of kb_entry_translations rows
  * for allowedLanguageCodes, fan it out. Idempotent (safe to re-run) -

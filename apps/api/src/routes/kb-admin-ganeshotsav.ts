@@ -25,6 +25,7 @@ import {
   cascadeTranslateKbEntry,
   updateSingleKbEntryTranslation,
   listKbEntryTranslations,
+  getTranslationCoverageSummary,
 } from "../services/kb-translation";
 import {
   verifyKbAdminLogin,
@@ -141,6 +142,22 @@ function normalizeHeaderName(v: unknown): string {
   return String(v ?? "").trim().toLowerCase();
 }
 
+/**
+ * Fires off translation fan-out DETACHED from the triggering HTTP request -
+ * the caller responds to the browser immediately, and this keeps running
+ * server-side regardless of whether that request/tab is still around by the
+ * time it finishes (found 2026-09-16: bulk-upload was awaiting this inline,
+ * so a large file kept the admin's browser waiting for minutes with no
+ * feedback, leading them to retry and race their own in-flight upload - see
+ * chat context for the resulting FK-violation errors). Errors are logged,
+ * never thrown, since there is no request left to fail by the time this runs.
+ */
+function runFanOutInBackground(log: { error: (obj: unknown, msg: string) => void }, msg: string, job: () => Promise<unknown>): void {
+  void job().catch((err) => {
+    log.error({ err }, msg);
+  });
+}
+
 export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<void> {
   // ---------- page shell ----------
   app.get("/kb-admin/ganeshotsav", async (_request, reply) => {
@@ -193,6 +210,15 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
     return reply.send({ allowed, source: SOURCE_LANGUAGE_CODE });
   });
 
+  // ---------- real-time translation progress (survives the admin closing the tab that started an upload/add) ----------
+  app.get("/kb-admin/ganeshotsav/api/entries/translation-status", async (request, reply) => {
+    const user = await requireSession(request, reply);
+    if (!user) return;
+    const allowed = await getAllowedLanguageCodes();
+    const summary = await getTranslationCoverageSummary(CUSTOMER_ID, allowed);
+    return reply.send(summary);
+  });
+
   // ---------- entries: list / add / edit ----------
   app.get("/kb-admin/ganeshotsav/api/entries", async (request, reply) => {
     const user = await requireSession(request, reply);
@@ -226,25 +252,22 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       );
       const entry = r.rows[0];
 
-      // Fan out into every other allowed language (mr-IN/hi-IN today) so this
-      // entry is immediately answerable in all of them - see kb-translation.ts.
-      // Best-effort: the entry itself is already saved either way, and a
-      // translation failure is recorded per-language (translation_status), not
-      // surfaced as a failure of the add itself.
-      let translations: { languageCode: string; ok: boolean }[] = [];
-      try {
-        translations = await fanOutNewKbEntry({
+      // Respond immediately - the entry itself is already saved and
+      // searchable in its own (source) language. Translation into the
+      // tenant's other allowed languages runs detached in the background so
+      // the admin isn't stuck waiting on a Sarvam round-trip per language;
+      // poll /api/entries/translation-status for progress.
+      runFanOutInBackground(app.log, "kb-admin-ganeshotsav: translation fan-out failed on add", () =>
+        fanOutNewKbEntry({
           kbEntryId: entry.id,
           customerId: CUSTOMER_ID,
           sourceLanguageCode,
           question,
           answer,
           allowedLanguageCodes: allowed,
-        });
-      } catch (err) {
-        request.log.error({ err, entryId: entry.id }, "kb-admin-ganeshotsav: translation fan-out failed on add");
-      }
-      return reply.status(201).send({ ...entry, translations });
+        })
+      );
+      return reply.status(201).send({ ...entry, translationsPending: allowed.length > 1 });
     }
   );
 
@@ -514,11 +537,18 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
         client.release();
       }
 
-      // Fan out translations for every uploaded row (best-effort, batched so a
-      // large file doesn't hammer Sarvam/embeddings all at once). The upload
-      // itself already succeeded above regardless of translation outcome.
-      try {
-        const BATCH_SIZE = 2; // Sarvam's translate endpoint rate-limits in short bursts - see sarvamTranslateText
+      // Respond immediately - every row is already saved and searchable in
+      // its own (source) language. Translation into the tenant's other
+      // allowed languages runs detached in the background (batched, paced -
+      // see kb-translation.ts's pacedSarvamTranslate - so it respects
+      // Sarvam's rate limit regardless of file size) and keeps going even if
+      // the admin closes this tab; poll /api/entries/translation-status for
+      // progress. This is the fix for bulk-upload appearing to "hang"/"not
+      // work": it used to await this whole loop before responding, which for
+      // a large file could take minutes with zero feedback - see chat
+      // context 2026-09-16 for the resulting duplicate-upload races.
+      const BATCH_SIZE = 2; // Sarvam's translate endpoint rate-limits in short bursts - see sarvamTranslateText
+      runFanOutInBackground(app.log, "kb-admin-ganeshotsav: translation fan-out failed on bulk-upload", async () => {
         for (let i = 0; i < insertedIds.length; i += BATCH_SIZE) {
           const batchIds = insertedIds.slice(i, i + BATCH_SIZE);
           const batchRows = rowsToInsert.slice(i, i + BATCH_SIZE);
@@ -536,11 +566,13 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
             )
           );
         }
-      } catch (err) {
-        request.log.error({ err }, "kb-admin-ganeshotsav: translation fan-out failed on bulk-upload");
-      }
+      });
 
-      return reply.status(201).send({ inserted: rowsToInsert.length, skipped: skippedBlank });
+      return reply.status(201).send({
+        inserted: rowsToInsert.length,
+        skipped: skippedBlank,
+        translationsPending: allowed.length > 1 ? rowsToInsert.length : 0,
+      });
     });
   });
 
