@@ -1,9 +1,14 @@
 // ============================================================
-// One-time (but safely re-runnable) backfill: fans out every existing
-// kb_entries row for a customer into kb_entry_translations for all of that
-// customer's currently allowed_language_codes. Purely additive - does not
-// touch kb_entries or any live query path. See migration 015 and
-// services/kb-translation.ts.
+// Safely re-runnable backfill: fans out kb_entries rows for a customer into
+// kb_entry_translations for all of that customer's currently
+// allowed_language_codes. Purely additive - does not touch kb_entries or
+// any live query path. See migration 015 and services/kb-translation.ts.
+//
+// Only translates entries that DON'T already have a full, successful set of
+// translations - already-translated entries are skipped entirely (no
+// Sarvam calls, no cost) - so re-running this after adding a few new
+// entries only pays for those new entries, not the whole KB again. Safe to
+// run as often as you like for exactly that reason.
 //
 // Usage (from apps/api): npx ts-node scripts/backfill-kb-translations.ts <customerId>
 // Defaults to the Ganeshotsav customer id if no argument is given.

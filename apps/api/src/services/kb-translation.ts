@@ -402,10 +402,18 @@ export async function getTranslationCoverageSummary(
 
 /**
  * One-time/backfill entry point: for every kb_entries row belonging to
- * customerId that doesn't yet have a full set of kb_entry_translations rows
- * for allowedLanguageCodes, fan it out. Idempotent (safe to re-run) -
- * upserts, and skips entries that already have every language present.
- * Used by scripts/backfill-kb-translations.ts.
+ * customerId that does NOT yet have a full, successful set of
+ * kb_entry_translations rows for allowedLanguageCodes, fan it out.
+ * Idempotent and cheap to re-run - entries that already have a translation
+ * for every other allowed language with translation_status='ok' are SKIPPED
+ * entirely (no Sarvam calls at all for them), so re-running this after
+ * adding a handful of new KB entries only pays for those new entries, not
+ * the whole KB again. (This is a real fix, not just a claim - an earlier
+ * version of this function always re-translated every entry regardless of
+ * existing state, which is why running it a few times in one day burned
+ * through several times what a single full pass should have cost - see
+ * chat context 2026-09-16.) Used by scripts/backfill-kb-translations.ts and
+ * the admin portal's own background fan-out for the same reason.
  */
 export async function backfillCustomerKbTranslations(
   customerId: string,
@@ -416,9 +424,20 @@ export async function backfillCustomerKbTranslations(
   // sarvamTranslateText's retry/backoff comment), and each entry here already
   // fires up to 4 concurrent Sarvam calls of its own (2 languages x Q/A).
   const concurrency = opts.concurrency ?? 2;
+  const targetCount = Math.max(allowedLanguageCodes.length - 1, 0);
+
   const entries = await pool.query<{ id: string; question: string; answer: string; source_language_code: string }>(
-    `SELECT id, question, answer, source_language_code FROM kb_entries WHERE customer_id = $1 ORDER BY created_at ASC`,
-    [customerId]
+    targetCount === 0
+      ? `SELECT id, question, answer, source_language_code FROM kb_entries WHERE customer_id = $1 ORDER BY created_at ASC`
+      : `SELECT ke.id, ke.question, ke.answer, ke.source_language_code
+         FROM kb_entries ke
+         LEFT JOIN kb_entry_translations t
+           ON t.kb_entry_id = ke.id AND t.is_source = false AND t.translation_status = 'ok'
+         WHERE ke.customer_id = $1
+         GROUP BY ke.id, ke.question, ke.answer, ke.source_language_code, ke.created_at
+         HAVING count(t.id) < $2
+         ORDER BY ke.created_at ASC`,
+    targetCount === 0 ? [customerId] : [customerId, targetCount]
   );
 
   const jobs = entries.rows.map((entry) => async () => {
