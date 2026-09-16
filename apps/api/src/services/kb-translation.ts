@@ -52,9 +52,22 @@ function toEmbeddingLiteral(embedding: number[]): string {
  * makes concurrent reservations serialize correctly across ANY number of
  * connections/processes), then sleeps until its own slot before calling
  * Sarvam. Deliberately local to this file (not global to sarvam.ts) so the
- * live per-call translate path used by ask.ts is untouched by this pacing.
+ * live per-call translate path used by ask.ts is untouched by this pacing -
+ * which cuts both ways: a live call's own translate-for-KB-search request
+ * (ask.ts's prepareQuestionForKbEmbedding, active for any multilingual
+ * tenant) shares the SAME account-wide Sarvam limit but is NOT paced by
+ * this queue, so it can land in the same ~1s window as a scheduled KB slot.
+ * Confirmed 2026-09-16: a ~296-entry backfill run overlapped with two real
+ * live calls on this customer's line and came back with 178 failed
+ * translations - notably worse than the earlier clean 244-entry run with no
+ * concurrent call traffic. Both sides degrade gracefully on a 429 (live:
+ * falls back to un-translated-text search for that turn; KB: keeps the
+ * English text with translation_status='failed', safely re-runnable) - nothing
+ * breaks - but wasting a third of a backfill's work is worth avoiding, so
+ * this interval trades some background-job speed for headroom against
+ * occasional live-call interference sharing the same budget.
  */
-const SARVAM_TRANSLATE_MIN_INTERVAL_MS = 1100;
+const SARVAM_TRANSLATE_MIN_INTERVAL_MS = 2200;
 
 async function reserveSarvamSlot(): Promise<Date> {
   const r = await pool.query<{ slot: string }>(
