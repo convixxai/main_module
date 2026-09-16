@@ -551,15 +551,31 @@ export async function sarvamTranslateText(
     body.model = "mayura:v1";
   }
 
-  const res = await fetch(`${SARVAM_BASE}/translate`, {
-    method: "POST",
-    headers: {
-      "api-subscription-key": key,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8000),
-  });
+  // Sarvam's translate endpoint rate-limits in short bursts (HTTP 429,
+  // code "rate_limit_exceeded_error") - confirmed 2026-09-16 while backfilling
+  // KB translations, where ~15 concurrent calls tripped it within seconds. A
+  // single live call rarely bursts like that, but bulk/background translation
+  // (KB fan-out, backfills) routinely does, so retry with backoff here instead
+  // of every caller having to know about this.
+  const MAX_RETRIES = 3;
+  let res: Response | null = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    res = await fetch(`${SARVAM_BASE}/translate`, {
+      method: "POST",
+      headers: {
+        "api-subscription-key": key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status !== 429 || attempt === MAX_RETRIES) break;
+    const delayMs = 350 * Math.pow(2, attempt) + Math.floor(Math.random() * 150);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  if (!res) {
+    return { ok: false, text: input.trim() };
+  }
 
   const raw = await readJsonBody(res);
   if (!res.ok) {

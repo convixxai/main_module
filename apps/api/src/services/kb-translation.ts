@@ -277,7 +277,10 @@ export async function backfillCustomerKbTranslations(
   allowedLanguageCodes: string[],
   opts: { concurrency?: number; onProgress?: (done: number, total: number) => void } = {}
 ): Promise<{ entryId: string; question: string; results: { languageCode: string; ok: boolean }[] }[]> {
-  const concurrency = opts.concurrency ?? 4;
+  // Kept low - Sarvam's translate endpoint rate-limits in short bursts (see
+  // sarvamTranslateText's retry/backoff comment), and each entry here already
+  // fires up to 4 concurrent Sarvam calls of its own (2 languages x Q/A).
+  const concurrency = opts.concurrency ?? 2;
   const entries = await pool.query<{ id: string; question: string; answer: string; source_language_code: string }>(
     `SELECT id, question, answer, source_language_code FROM kb_entries WHERE customer_id = $1 ORDER BY created_at ASC`,
     [customerId]

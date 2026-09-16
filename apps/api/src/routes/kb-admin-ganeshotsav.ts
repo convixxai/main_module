@@ -502,7 +502,7 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       // itself already succeeded above regardless of translation outcome.
       try {
         const allowed = await getAllowedLanguageCodes();
-        const BATCH_SIZE = 5;
+        const BATCH_SIZE = 2; // Sarvam's translate endpoint rate-limits in short bursts - see sarvamTranslateText
         for (let i = 0; i < insertedIds.length; i += BATCH_SIZE) {
           const batchIds = insertedIds.slice(i, i + BATCH_SIZE);
           const batchRows = rowsToInsert.slice(i, i + BATCH_SIZE);
