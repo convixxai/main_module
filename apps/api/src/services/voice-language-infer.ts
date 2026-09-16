@@ -305,14 +305,103 @@ export function decideLanguageSwitchAction(
   return { action: "offer", target: normalizeBcp47Tag(clampedDetected), confidence: conf };
 }
 
-/** Builds the "which language would you like?" prompt from the tenant's configured template. */
+// Native-language self-names, so "hindi mein" / "मराठीत" etc. are recognized
+// even though LANGUAGE_DISPLAY_NAME's values are English names. Shared between
+// parseLanguageChoice (answering a pending offer) and
+// detectExplicitLanguageSwitchRequest (an unprompted "speak in X" ask).
+const LANGUAGE_NATIVE_NAMES: Record<string, string[]> = {
+  "hi-IN": ["hindi", "हिंदी", "हिन्दी"],
+  "mr-IN": ["marathi", "मराठी"],
+  "en-IN": ["english", "इंग्लिश", "इंग्रजी"],
+  "gu-IN": ["gujarati", "ગુજરાતી", "गुजराती"],
+  "bn-IN": ["bengali", "বাংলা"],
+  "kn-IN": ["kannada", "ಕನ್ನಡ"],
+  "ml-IN": ["malayalam", "മലയാളം"],
+  "od-IN": ["odia", "ଓଡ଼ିଆ"],
+  "pa-IN": ["punjabi", "ਪੰਜਾਬੀ"],
+  "ta-IN": ["tamil", "தமிழ்"],
+  "te-IN": ["telugu", "తెలుగు"],
+};
+
+// Endonyms - each language's own name for itself. Used to announce the
+// language OPTIONS inside a switch-prompt sentence regardless of which
+// language that carrier sentence is spoken in - e.g. a Marathi sentence
+// naming "हिंदी, मराठी, English" (mixing scripts to name each option by its
+// own native name) is completely natural in Indian multilingual speech and
+// avoids needing an error-prone N x N cross-translation matrix of every
+// language's name into every other language.
+const LANGUAGE_SELF_NAME: Record<string, string> = {
+  "en-IN": "English",
+  "hi-IN": "हिंदी",
+  "mr-IN": "मराठी",
+  "gu-IN": "ગુજરાતી",
+  "bn-IN": "বাংলা",
+  "kn-IN": "ಕನ್ನಡ",
+  "ml-IN": "മലയാളം",
+  "od-IN": "ଓଡ଼ିଆ",
+  "pa-IN": "ਪੰਜਾਬੀ",
+  "ta-IN": "தமிழ்",
+  "te-IN": "తెలుగు",
+};
+
+function localizedLanguageName(tag: string): string {
+  return LANGUAGE_SELF_NAME[tag] ?? LANGUAGE_DISPLAY_NAME[tag] ?? tag;
+}
+
+/**
+ * Same as humanizeAllowedList, but uses each language's own native name
+ * instead of its English name - EXCEPT when the active language is English
+ * itself, where English names read more naturally in an all-English sentence
+ * ("English, Hindi, Marathi" rather than "English, हिंदी, मराठी").
+ */
+export function humanizeAllowedListForActive(allowed: string[], activeBcp47: string): string {
+  const activePrimary = normalizeBcp47Tag(activeBcp47).split("-")[0] ?? "en";
+  if (activePrimary === "en") return humanizeAllowedList(allowed);
+  return allowed.map((c) => localizedLanguageName(c)).join(", ");
+}
+
+// Carrier-sentence templates for "which language would you like?", one per
+// active call language. Covers English plus the ten scheduled Indian
+// languages this platform supports as allowed_language_codes values
+// (Hindi, Marathi, Gujarati, Bengali, Punjabi, Tamil, Telugu, Kannada,
+// Malayalam, Odia) - only the four with heaviest current tenant traffic
+// (en/hi/mr/gu) have been spoken on live calls and proofread against real
+// call audio; the rest are best-effort standard phrasing and worth a native
+// speaker's once-over before heavy use.
+const LANGUAGE_SWITCH_PROMPT_TEMPLATE_BY_ACTIVE: Record<string, string> = {
+  en: "Which language would you like me to continue in - {LANGUAGE_LIST}?",
+  hi: "आप किस भाषा में बात करना पसंद करेंगे - {LANGUAGE_LIST}?",
+  mr: "तुम्हाला कोणत्या भाषेत बोलायला आवडेल - {LANGUAGE_LIST}?",
+  gu: "તમે કઈ ભાષામાં વાત કરવા માંગો છો - {LANGUAGE_LIST}?",
+  bn: "আপনি কোন ভাষায় কথা বলতে চান - {LANGUAGE_LIST}?",
+  pa: "ਤੁਸੀਂ ਕਿਹੜੀ ਭਾਸ਼ਾ ਵਿੱਚ ਗੱਲ ਕਰਨਾ ਚਾਹੋਗੇ - {LANGUAGE_LIST}?",
+  ta: "நீங்கள் எந்த மொழியில் பேச விரும்புகிறீர்கள் - {LANGUAGE_LIST}?",
+  te: "మీరు ఏ భాషలో మాట్లాడాలనుకుంటున్నారు - {LANGUAGE_LIST}?",
+  kn: "ನೀವು ಯಾವ ಭಾಷೆಯಲ್ಲಿ ಮಾತನಾಡಲು ಬಯಸುತ್ತೀರಿ - {LANGUAGE_LIST}?",
+  ml: "നിങ്ങൾ ഏത് ഭാഷയിൽ സംസാരിക്കാൻ ആഗ്രഹിക്കുന്നു - {LANGUAGE_LIST}?",
+  od: "ଆପଣ କେଉଁ ଭାଷାରେ କଥା ହେବାକୁ ଚାହୁଁଛନ୍ତି - {LANGUAGE_LIST}?",
+};
+
+/**
+ * Builds the "which language would you like?" prompt, spoken as a proper
+ * sentence in the language the call is CURRENTLY running in (not always
+ * English) - a caller mid-call in Marathi should be asked in Marathi, not
+ * handed a bare "Please say one of: Hindi, Marathi, English." in English.
+ * A tenant-configured template (customer_settings.language_switch_options_prompt)
+ * is still honored verbatim if set, only the {LANGUAGE_LIST} names are localized.
+ */
 export function languageSwitchOptionsPrompt(
   cust: CustomerSettings | null | undefined,
-  allowedNorm: string[]
+  allowedNorm: string[],
+  activeBcp47: string
 ): string {
+  const activePrimary = normalizeBcp47Tag(activeBcp47).split("-")[0] ?? "en";
+  const list = humanizeAllowedListForActive(allowedNorm, activeBcp47);
   const template =
-    cust?.language_switch_options_prompt?.trim() || "Please say one of: {LANGUAGE_LIST}.";
-  return template.replace("{LANGUAGE_LIST}", humanizeAllowedList(allowedNorm));
+    cust?.language_switch_options_prompt?.trim() ||
+    LANGUAGE_SWITCH_PROMPT_TEMPLATE_BY_ACTIVE[activePrimary] ||
+    LANGUAGE_SWITCH_PROMPT_TEMPLATE_BY_ACTIVE.en;
+  return template.replace("{LANGUAGE_LIST}", list);
 }
 
 /**
@@ -329,23 +418,8 @@ export function parseLanguageChoice(
   const t = transcript.trim().toLowerCase();
   if (!t) return { kind: "unclear" };
 
-  // Native-language self-names, so "hindi mein" / "मराठीत" etc. are recognized
-  // even though LANGUAGE_DISPLAY_NAME's values are English names.
-  const NATIVE_NAMES: Record<string, string[]> = {
-    "hi-IN": ["hindi", "हिंदी", "हिन्दी"],
-    "mr-IN": ["marathi", "मराठी"],
-    "en-IN": ["english", "इंग्लिश"],
-    "gu-IN": ["gujarati", "ગુજરાતી"],
-    "bn-IN": ["bengali", "বাংলা"],
-    "kn-IN": ["kannada", "ಕನ್ನಡ"],
-    "ml-IN": ["malayalam", "മലയാളം"],
-    "od-IN": ["odia", "ଓଡ଼ିଆ"],
-    "pa-IN": ["punjabi", "ਪੰਜਾਬੀ"],
-    "ta-IN": ["tamil", "தமிழ்"],
-    "te-IN": ["telugu", "తెలుగు"],
-  };
   for (const tag of allowedNorm) {
-    const names = NATIVE_NAMES[tag] ?? [LANGUAGE_DISPLAY_NAME[tag]?.toLowerCase() ?? ""];
+    const names = LANGUAGE_NATIVE_NAMES[tag] ?? [LANGUAGE_DISPLAY_NAME[tag]?.toLowerCase() ?? ""];
     if (names.some((n) => n && t.includes(n.toLowerCase()))) {
       return { kind: "language", target: tag };
     }
@@ -358,14 +432,137 @@ export function parseLanguageChoice(
   return { kind: "unclear" };
 }
 
+// Verbs/nouns that signal the caller is actually asking to change language,
+// as opposed to merely saying a language's name in passing (e.g. answering
+// "Marathi" to a pending offer, which parseLanguageChoice handles separately,
+// or mentioning a language name inside an unrelated sentence).
+const EXPLICIT_SWITCH_INTENT_RE =
+  /\b(speak|talk|reply|answer|continue|switch|change)\b|\blanguage\b|बोल|भाषा|बदल|બોલ|ભાષા|બદલ|বল|ভাষা|ਬੋਲ|ਭਾਸ਼ਾ|பேசு|மொழி|మాట్లాడ|భాష|ಮಾತನಾಡ|ಭಾಷೆ|സംസാരി|ഭാഷ|କୁହ|ଭାଷା/iu;
+
+const NEGATION_NEAR_RE = /\b(don't|do not|dont|no|not|nahi|nahin|नहीं|नको|नाही)\b/iu;
+
+/**
+ * Detects an UNPROMPTED, explicit ask to change the conversation language,
+ * e.g. "Can you speak in English" or "मराठीत बोला" - on ANY turn, not just
+ * as an answer to a pending offer. Unlike the passive two-consecutive-
+ * detections path, this fires immediately on a single turn once the caller
+ * clearly states what they want, per the tenant's allowed language list.
+ * Returns null if no clear ask is found (a bare mention of a language name
+ * without an accompanying "speak/talk/language/बोल/भाषा" cue does not count,
+ * to avoid misfiring on incidental mentions).
+ */
+export function detectExplicitLanguageSwitchRequest(
+  transcript: string,
+  allowedNorm: string[]
+): string | null {
+  const raw = transcript.trim();
+  if (!raw) return null;
+  const t = raw.toLowerCase();
+  if (!EXPLICIT_SWITCH_INTENT_RE.test(t)) return null;
+
+  for (const tag of allowedNorm) {
+    const names = LANGUAGE_NATIVE_NAMES[tag] ?? [LANGUAGE_DISPLAY_NAME[tag]?.toLowerCase() ?? ""];
+    for (const rawName of names) {
+      const name = rawName.toLowerCase();
+      if (!name) continue;
+      const idx = t.indexOf(name);
+      if (idx === -1) continue;
+      const before = t.slice(Math.max(0, idx - 25), idx);
+      if (NEGATION_NEAR_RE.test(before)) continue;
+      return tag;
+    }
+  }
+  return null;
+}
+
+/**
+ * Strips the "speak in X" / "X मध्ये बोला" phrasing (and the language name
+ * itself) out of a transcript that triggered detectExplicitLanguageSwitchRequest,
+ * so a packed utterance like "Speak in English, what's my balance" can still
+ * have its real question answered on the same turn instead of being discarded.
+ */
+export function stripLanguageSwitchPhrase(transcript: string, targetTag: string): string {
+  const names = (LANGUAGE_NATIVE_NAMES[targetTag] ?? [LANGUAGE_DISPLAY_NAME[targetTag] ?? targetTag]).map((n) =>
+    n.toLowerCase()
+  );
+  let t = transcript.toLowerCase();
+  for (const name of names) {
+    if (name) t = t.split(name).join(" ");
+  }
+  t = t.replace(
+    /\b(please|can|could|you|speak|talk|reply|answer|switch|change|continue|in|to|language|mein|mai|madhe|मध्ये|में)\b/giu,
+    " "
+  );
+  return t.replace(/\s+/g, " ").trim();
+}
+
+// Spoken right after a confirmed switch, in the NEW target language, before
+// the (optional) held-back question is answered. Female-voiced first-person
+// forms where the target language marks verb gender (Hindi/Marathi/Punjabi),
+// matching this platform's female Cartesia/Sarvam voices - see
+// buildVoiceGenderRule in vodafone-voicebot.ts for the same convention.
+const LANGUAGE_SWITCH_ACK_BY_TARGET: Record<string, string> = {
+  en: "Okay, let's continue in English. How can I help you?",
+  hi: "ठीक है, अब हम हिंदी में बात करेंगे। मैं आपकी क्या मदद कर सकती हूँ?",
+  mr: "ठीक आहे, आता आपण मराठीत बोलूया. मी तुम्हाला कशी मदत करू?",
+  gu: "ભલે, હવે આપણે ગુજરાતીમાં વાત કરીશું. હું તમારી કેવી રીતે મદદ કરી શકું?",
+  bn: "ঠিক আছে, এখন আমরা বাংলায় কথা বলব। আমি আপনাকে কীভাবে সাহায্য করতে পারি?",
+  pa: "ਠੀਕ ਹੈ, ਹੁਣ ਅਸੀਂ ਪੰਜਾਬੀ ਵਿੱਚ ਗੱਲ ਕਰਾਂਗੇ। ਮੈਂ ਤੁਹਾਡੀ ਕਿਵੇਂ ਮਦਦ ਕਰ ਸਕਦੀ ਹਾਂ?",
+  ta: "சரி, இப்போது நாம் தமிழில் பேசுவோம். நான் உங்களுக்கு எப்படி உதவலாம்?",
+  te: "సరే, ఇప్పుడు మనం తెలుగులో మాట్లాడుకుందాం. నేను మీకు ఎలా సహాయం చేయగలను?",
+  kn: "ಸರಿ, ಈಗ ನಾವು ಕನ್ನಡದಲ್ಲಿ ಮಾತನಾಡೋಣ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?",
+  ml: "ശരി, ഇനി നമുക്ക് മലയാളത്തിൽ സംസാരിക്കാം. ഞാൻ എങ്ങനെ സഹായിക്കാം?",
+  od: "ଠିକ୍ ଅଛି, ବର୍ତ୍ତମାନ ଆମେ ଓଡ଼ିଆରେ କଥା ହେବା. ମୁଁ ଆପଣଙ୍କୁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
+};
+
 /** Default acknowledgement spoken right after a confirmed switch, before the (optional) held-back question is answered. */
 export function languageSwitchAcknowledgement(targetBcp47: string): string {
-  if (targetBcp47.startsWith("hi")) {
-    return "ठीक है, अब हम हिंदी में बात करेंगे। मैं आपकी क्या मदद कर सकता हूँ?";
-  }
-  if (targetBcp47.startsWith("mr")) {
-    return "ठीक आहे, आता आपण मराठीत बोलूया. मी तुम्हाला कशी मदत करू?";
-  }
-  const label = LANGUAGE_DISPLAY_NAME[targetBcp47] ?? targetBcp47;
-  return `Okay, let's continue in ${label}. How can I help you?`;
+  const primary = normalizeBcp47Tag(targetBcp47).split("-")[0] ?? "en";
+  return LANGUAGE_SWITCH_ACK_BY_TARGET[primary] ?? LANGUAGE_SWITCH_ACK_BY_TARGET.en;
+}
+
+const LANGUAGE_SWITCH_DECLINE_BY_ACTIVE: Record<string, (label: string) => string> = {
+  en: (l) => `Okay, we'll continue in ${l}.`,
+  hi: (l) => `ठीक है, हम ${l} में बात करना जारी रखेंगे।`,
+  mr: (l) => `ठीक आहे, आपण ${l} भाषेत बोलणे सुरू ठेवू.`,
+  gu: (l) => `ભલે, આપણે ${l} માં વાત ચાલુ રાખીશું.`,
+  bn: (l) => `ঠিক আছে, আমরা ${l} তে কথা চালিয়ে যাব।`,
+  pa: (l) => `ਠੀਕ ਹੈ, ਅਸੀਂ ${l} ਵਿੱਚ ਗੱਲ ਜਾਰੀ ਰੱਖਾਂਗੇ।`,
+  ta: (l) => `சரி, நாம் ${l} இல் தொடர்வோம்.`,
+  te: (l) => `సరే, మేము ${l} లో కొనసాగిస్తాము.`,
+  kn: (l) => `ಸರಿ, ನಾವು ${l} ನಲ್ಲಿ ಮುಂದುವರಿಸೋಣ.`,
+  ml: (l) => `ശരി, നമുക്ക് ${l} ൽ തുടരാം.`,
+  od: (l) => `ଠିକ୍ ଅଛି, ଆମେ ${l} ରେ ଜାରି ରଖିବା.`,
+};
+
+/** Spoken when the caller declines a pending switch offer ("no") - stays in the CURRENT language, properly localized. */
+export function languageSwitchDeclineAcknowledgement(activeBcp47: string): string {
+  const n = normalizeBcp47Tag(activeBcp47);
+  const primary = n.split("-")[0] ?? "en";
+  const label = localizedLanguageName(n);
+  const fn = LANGUAGE_SWITCH_DECLINE_BY_ACTIVE[primary] ?? LANGUAGE_SWITCH_DECLINE_BY_ACTIVE.en;
+  return fn(label);
+}
+
+const LANGUAGE_SWITCH_GIVEUP_BY_ACTIVE: Record<string, (label: string) => string> = {
+  en: (l) => `Okay, I'll continue in ${l}.`,
+  hi: (l) => `ठीक है, मैं ${l} में ही बात जारी रखती हूँ।`,
+  mr: (l) => `ठीक आहे, मी ${l} भाषेतच बोलणे सुरू ठेवते.`,
+  gu: (l) => `ભલે, હું ${l} માં જ વાત ચાલુ રાખીશ.`,
+  bn: (l) => `ঠিক আছে, আমি ${l} তেই কথা চালিয়ে যাব।`,
+  pa: (l) => `ਠੀਕ ਹੈ, ਮੈਂ ${l} ਵਿੱਚ ਹੀ ਗੱਲ ਜਾਰੀ ਰੱਖਾਂਗੀ।`,
+  ta: (l) => `சரி, நான் ${l} இல் தொடர்கிறேன்.`,
+  te: (l) => `సరే, నేను ${l} లోనే కొనసాగిస్తాను.`,
+  kn: (l) => `ಸರಿ, ನಾನು ${l} ನಲ್ಲಿಯೇ ಮುಂದುವರಿಸುತ್ತೇನೆ.`,
+  ml: (l) => `ശരി, ഞാൻ ${l} ൽ തന്നെ തുടരും.`,
+  od: (l) => `ଠିକ୍ ଅଛି, ମୁଁ ${l} ରେ ହିଁ ଜାରି ରଖିବି.`,
+};
+
+/** Spoken after max reprompt attempts are exhausted with no clear answer - falls back to the CURRENT language, properly localized. */
+export function languageSwitchGiveUpAcknowledgement(activeBcp47: string): string {
+  const n = normalizeBcp47Tag(activeBcp47);
+  const primary = n.split("-")[0] ?? "en";
+  const label = localizedLanguageName(n);
+  const fn = LANGUAGE_SWITCH_GIVEUP_BY_ACTIVE[primary] ?? LANGUAGE_SWITCH_GIVEUP_BY_ACTIVE.en;
+  return fn(label);
 }

@@ -1,8 +1,10 @@
 // ============================================================
-// Standalone verification for the language-switch rewrite in
-// exotel-voicebot.ts (decideLanguageSwitchAction, parseLanguageChoice,
-// languageSwitchOptionsPrompt) — pure-function checks, since a real phone
-// call can't be placed from here. Does NOT touch the DB or any live route.
+// Standalone verification for the shared language-switch logic in
+// services/voice-language-infer.ts (decideLanguageSwitchAction,
+// parseLanguageChoice, languageSwitchOptionsPrompt,
+// detectExplicitLanguageSwitchRequest), used by both exotel-voicebot.ts and
+// vodafone-voicebot.ts — pure-function checks, since a real phone call can't
+// be placed from here. Does NOT touch the DB or any live route.
 //
 // Usage (from apps/api): npx ts-node scripts/verify-language-switch.ts
 // ============================================================
@@ -13,7 +15,8 @@ import {
   decideLanguageSwitchAction,
   parseLanguageChoice,
   languageSwitchOptionsPrompt,
-} from "../src/routes/exotel-voicebot";
+  detectExplicitLanguageSwitchRequest,
+} from "../src/services/voice-language-infer";
 import type { CustomerSettings } from "../src/services/customer-settings";
 
 let failures = 0;
@@ -158,21 +161,70 @@ section("parseLanguageChoice");
   );
 }
 
-section("languageSwitchOptionsPrompt");
+section("languageSwitchOptionsPrompt — tenant template still honored, {LANGUAGE_LIST} localized");
 {
   const custWithTemplate = { language_switch_options_prompt: "Please say one of: {LANGUAGE_LIST}." } as unknown as CustomerSettings;
-  const prompt = languageSwitchOptionsPrompt(custWithTemplate, allowedNorm);
+  const prompt = languageSwitchOptionsPrompt(custWithTemplate, allowedNorm, "en-IN");
   check(
     "fills {LANGUAGE_LIST} with humanized allowed languages",
     prompt === "Please say one of: English, Hindi, Marathi.",
     prompt
   );
   const custNoTemplate = {} as unknown as CustomerSettings;
-  const fallbackPrompt = languageSwitchOptionsPrompt(custNoTemplate, allowedNorm);
+  const fallbackPromptEn = languageSwitchOptionsPrompt(custNoTemplate, allowedNorm, "en-IN");
   check(
-    "falls back to a sensible default when customer_settings has no template",
-    fallbackPrompt.includes("English") && fallbackPrompt.includes("Hindi") && fallbackPrompt.includes("Marathi"),
-    fallbackPrompt
+    "no template, active=English -> sensible default with all names",
+    fallbackPromptEn.includes("English") && fallbackPromptEn.includes("Hindi") && fallbackPromptEn.includes("Marathi"),
+    fallbackPromptEn
+  );
+}
+
+section("languageSwitchOptionsPrompt — asks in the CURRENTLY ACTIVE language, not always English");
+{
+  const custNoTemplate = {} as unknown as CustomerSettings;
+  const promptMr = languageSwitchOptionsPrompt(custNoTemplate, allowedNorm, "mr-IN");
+  check(
+    "active=Marathi -> prompt sentence itself is in Devanagari/Marathi, not 'Please say one of'",
+    /[ऀ-ॿ]/.test(promptMr) && !promptMr.startsWith("Please say"),
+    promptMr
+  );
+  const promptHi = languageSwitchOptionsPrompt(custNoTemplate, allowedNorm, "hi-IN");
+  check(
+    "active=Hindi -> prompt sentence itself is in Devanagari/Hindi",
+    /[ऀ-ॿ]/.test(promptHi) && !promptHi.startsWith("Please say"),
+    promptHi
+  );
+}
+
+section("detectExplicitLanguageSwitchRequest — unprompted ask on any turn");
+{
+  check(
+    "'Can you speak in English' -> en-IN",
+    detectExplicitLanguageSwitchRequest("Can you speak in English", allowedNorm) === "en-IN"
+  );
+  check(
+    "'मराठीत बोला' -> mr-IN",
+    detectExplicitLanguageSwitchRequest("मराठीत बोला", allowedNorm) === "mr-IN"
+  );
+  check(
+    "'please switch to hindi' -> hi-IN",
+    detectExplicitLanguageSwitchRequest("please switch to hindi", allowedNorm) === "hi-IN"
+  );
+  check(
+    "bare mention with no switch-intent cue ('my name is Hindi') -> null (no misfire)",
+    detectExplicitLanguageSwitchRequest("my name is hindi kumar", allowedNorm) === null
+  );
+  check(
+    "negated ('I don't want to speak hindi') -> null",
+    detectExplicitLanguageSwitchRequest("I don't want to speak hindi", allowedNorm) === null
+  );
+  check(
+    "language not in tenant's allowed list -> null even with clear intent",
+    detectExplicitLanguageSwitchRequest("can you speak in tamil", allowedNorm) === null
+  );
+  check(
+    "no language named at all -> null",
+    detectExplicitLanguageSwitchRequest("can you help me with my recharge", allowedNorm) === null
   );
 }
 

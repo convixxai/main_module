@@ -57,11 +57,16 @@ import {
   normalizeAllowedLangList,
   clampLanguageToAllowed,
   languagesLooselyEqual,
+  isLanguageInAllowedList,
   decideLanguageSwitchAction,
   languageSwitchOptionsPrompt,
   parseLanguageChoice,
   persistSessionActiveLanguage,
   languageSwitchAcknowledgement,
+  languageSwitchDeclineAcknowledgement,
+  languageSwitchGiveUpAcknowledgement,
+  detectExplicitLanguageSwitchRequest,
+  stripLanguageSwitchPhrase,
   LANGUAGE_DISPLAY_NAME,
 } from "../services/voice-language-infer";
 import type { CallEvent, OutboundFrame } from "../types/telephony-provider";
@@ -409,6 +414,7 @@ type LanguageSwitchOutcome =
  * a (possibly trimmed) transcript otherwise.
  */
 async function handleLanguageSwitchFlow(
+  app: FastifyInstance,
   streamId: string,
   state: VodafoneCallState,
   transcript: string,
@@ -416,6 +422,8 @@ async function handleLanguageSwitchFlow(
 ): Promise<LanguageSwitchOutcome> {
   const { session, adapter, ws } = state;
   if (state.customerSettings?.voicebot_multilingual !== true) {
+    // Logged at "vodafone-voicebot: transcript ready" (has multilingual/allow_language_switch
+    // flags) — nothing further to add here without spamming every single turn.
     return { action: "continue", transcript };
   }
 
@@ -426,6 +434,41 @@ async function handleLanguageSwitchFlow(
     const pcm = await synthesizeSpeechToPcm8k(text, state.ttsConfig);
     sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
     sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
+  }
+
+  app.log.info(
+    {
+      streamId,
+      activeBcp,
+      allowedNorm,
+      sttLanguageCode,
+      allowLanguageSwitch: state.customerSettings?.allow_language_switch === true,
+      hasPendingSwitch: !!session.pendingLanguageSwitch,
+    },
+    "vodafone-voicebot: language switch flow turn"
+  );
+
+  // Unprompted, explicit ask ("Can you speak in English" / "मराठीत बोला"),
+  // checked on EVERY turn - first turn or any later turn - independent of
+  // the two-consecutive-detections gate below and even if an offer is
+  // already pending for a different language. Switches immediately, no
+  // confirmation round-trip, as long as the named language is one this
+  // tenant actually allows.
+  if (state.customerSettings?.allow_language_switch === true) {
+    const explicitTarget = detectExplicitLanguageSwitchRequest(transcript, allowedNorm);
+    if (explicitTarget && explicitTarget !== activeBcp) {
+      const n = persistSessionActiveLanguage(session, explicitTarget);
+      session.pendingLanguageSwitch = null;
+      session.discrepantLanguageCount = 0;
+      session.discrepantLanguageTarget = null;
+      app.log.info({ streamId, from: activeBcp, to: n }, "vodafone-voicebot: explicit language switch request honored");
+      const cleaned = stripLanguageSwitchPhrase(transcript, n);
+      if (cleaned.length > 3) {
+        return { action: "continue", transcript: cleaned };
+      }
+      await speak(languageSwitchAcknowledgement(n));
+      return { action: "handled" };
+    }
   }
 
   if (session.pendingLanguageSwitch) {
@@ -442,6 +485,7 @@ async function handleLanguageSwitchFlow(
     if (chosenTarget) {
       const n = persistSessionActiveLanguage(session, chosenTarget);
       session.pendingLanguageSwitch = null;
+      app.log.info({ streamId, from: activeBcp, to: n, via: choice.kind }, "vodafone-voicebot: pending language switch confirmed");
       // If the caller packed a real question in with the confirmation
       // ("yes, and also what are your hours"), strip the confirmation words
       // and answer the rest now, in the newly-confirmed language, instead
@@ -458,17 +502,22 @@ async function handleLanguageSwitchFlow(
     }
     if (choice.kind === "no") {
       session.pendingLanguageSwitch = null;
-      await speak(`Okay, we will continue in ${activeBcp}.`);
+      app.log.info({ streamId, stayingIn: activeBcp }, "vodafone-voicebot: pending language switch declined");
+      await speak(languageSwitchDeclineAcknowledgement(activeBcp));
       return { action: "handled" };
     }
     pending.unclearRetries += 1;
     const maxAttempts = state.customerSettings?.language_switch_max_attempts ?? 2;
+    app.log.info(
+      { streamId, unclearRetries: pending.unclearRetries, maxAttempts },
+      "vodafone-voicebot: pending language switch reply unclear"
+    );
     if (pending.unclearRetries <= maxAttempts) {
-      await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm));
+      await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm, activeBcp));
       return { action: "handled" };
     }
     session.pendingLanguageSwitch = null;
-    await speak(`I will continue in ${activeBcp}.`);
+    await speak(languageSwitchGiveUpAcknowledgement(activeBcp));
     return { action: "handled" };
   }
 
@@ -483,6 +532,22 @@ async function handleLanguageSwitchFlow(
     sttProvider: state.customerSettings?.stt_provider ?? "sarvam",
     allowedNorm,
   });
+  if (decision.action === "offer" || (clamped !== activeBcp && isLanguageInAllowedList(clamped, allowedNorm))) {
+    app.log.info(
+      {
+        streamId,
+        sttDetected: sttLanguageCode,
+        clamped,
+        activeBcp,
+        decision: decision.action,
+        discrepantLanguageCount: session.discrepantLanguageCount,
+        discrepantLanguageTarget: session.discrepantLanguageTarget,
+        allowLanguageSwitchFlag: state.customerSettings?.allow_language_switch === true,
+        languageSwitchOfferedThisCall: !!session.languageSwitchOfferedThisCall,
+      },
+      "vodafone-voicebot: passive language mismatch detected"
+    );
+  }
   if (decision.action === "offer") {
     session.pendingLanguageSwitch = {
       targetLanguage: decision.target,
@@ -492,7 +557,8 @@ async function handleLanguageSwitchFlow(
       unclearRetries: 0,
     };
     session.languageSwitchOfferedThisCall = true;
-    await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm));
+    app.log.info({ streamId, target: decision.target }, "vodafone-voicebot: language switch offer spoken");
+    await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm, activeBcp));
     return { action: "handled" };
   }
   return { action: "continue", transcript };
@@ -532,9 +598,12 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
       return;
     }
     const transcript = stt.transcript.trim();
-    app.log.info({ streamId, transcript, sttMs }, "vodafone-voicebot: transcript ready");
+    app.log.info(
+      { streamId, transcript, sttMs, sttLanguageCode: stt.language_code, sttLanguageHint },
+      "vodafone-voicebot: transcript ready"
+    );
 
-    const languageResult = await handleLanguageSwitchFlow(streamId, state, transcript, stt.language_code);
+    const languageResult = await handleLanguageSwitchFlow(app, streamId, state, transcript, stt.language_code);
     if (languageResult.action === "handled") return;
     const finalTranscript = languageResult.transcript;
 

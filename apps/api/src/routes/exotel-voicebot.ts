@@ -2536,7 +2536,7 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
       stream_sid: session.streamSid,
       transcript_preview: transcript.slice(0, 200),
     });
-    const prompt = languageSwitchOptionsPrompt(csTurn, allowedNormTurn);
+    const prompt = languageSwitchOptionsPrompt(csTurn, allowedNormTurn, activeBcpTurn);
     await appendVoiceTurnToChat(session, transcript, prompt, {
       assistantSource: "language_switch_offered_explicit",
     });
@@ -3370,7 +3370,7 @@ async function processUtterance(
       pending.unclearRetries += 1;
       const maxAttempts = csUtterance?.language_switch_max_attempts ?? 2;
       if (pending.unclearRetries <= maxAttempts) {
-        const prompt = languageSwitchOptionsPrompt(csUtterance, allowedNorm);
+        const prompt = languageSwitchOptionsPrompt(csUtterance, allowedNorm, activeBcp);
         await appendVoiceTurnToChat(session, transcript, prompt, {
           assistantSource: "language_switch_reprompt",
         });
@@ -3525,7 +3525,7 @@ async function processUtterance(
             session.discrepantLanguageCount = 0;
             session.discrepantLanguageTarget = null;
 
-            const prompt = languageSwitchOptionsPrompt(csUtterance, allowedNorm);
+            const prompt = languageSwitchOptionsPrompt(csUtterance, allowedNorm, activeBcp);
             await appendVoiceTurnToChat(session, transcript, prompt, {
               assistantSource: "language_switch_offered",
             });
