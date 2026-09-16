@@ -894,8 +894,8 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
           openModal('cascade-confirm-overlay');
         }
       } else {
-        await api('/api/entries', { method: 'POST', body: JSON.stringify({ question: question, answer: answer }) });
-        toast(state.allowedLanguages.length > 1 ? 'Entry added - translating in background' : 'Entry added', 'ok');
+        var addResult = await api('/api/entries', { method: 'POST', body: JSON.stringify({ question: question, answer: answer }) });
+        toast(addResult.translationsPending ? 'Entry added - translating in background' : 'Entry added', 'ok');
         closeModal('entry-modal-overlay');
         loadEntries();
         checkTranslationStatus();
