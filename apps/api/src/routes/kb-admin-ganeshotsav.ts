@@ -18,6 +18,7 @@ import ExcelJS from "exceljs";
 import { pool } from "../config/db";
 import { generateEmbedding } from "../services/llm";
 import { getCustomerSettings } from "../services/customer-settings";
+import { inferLanguageFromTranscript } from "../services/voice-language-infer";
 import {
   fanOutNewKbEntry,
   upsertSourceKbEntryTranslation,
@@ -37,7 +38,20 @@ import { KB_ADMIN_GANESHOTSAV_HTML } from "./kb-admin-ganeshotsav-page";
 const CUSTOMER_ID = "97752ef1-eb4f-4ebb-a77f-0613fe3a424b";
 const COOKIE_NAME = "kb_admin_ganeshotsav_session";
 const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 12; // 12h, a stale forgotten-open tab shouldn't stay valid forever
-const SOURCE_LANGUAGE_CODE = "en-IN"; // this KB has always been authored in English
+const SOURCE_LANGUAGE_CODE = "en-IN"; // fallback when an entry's language can't be detected from its own text
+
+/**
+ * Detects which of this tenant's allowed languages an entry was actually
+ * authored in (script-based, via the same inferLanguageFromTranscript used
+ * on live calls) instead of always assuming English. Found 2026-09-16: a
+ * batch of KB entries typed directly in Marathi had been silently tagged
+ * source_language_code='en-IN' by the old hardcoded default, which would
+ * have had the translation fan-out "translate" already-Marathi text as if
+ * it were English source - wrong direction, real risk of mangled output.
+ */
+function detectSourceLanguage(text: string, allowedLanguageCodes: string[]): string {
+  return inferLanguageFromTranscript(text, allowedLanguageCodes, SOURCE_LANGUAGE_CODE) ?? SOURCE_LANGUAGE_CODE;
+}
 
 /** This customer's currently allowed languages (mr-IN/hi-IN/en-IN today) - same field the voicebot's language-switch flow reads. */
 async function getAllowedLanguageCodes(): Promise<string[]> {
@@ -201,12 +215,14 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       if (!question || !answer) {
         return reply.status(400).send({ error: "Question and answer are both required" });
       }
+      const allowed = await getAllowedLanguageCodes();
+      const sourceLanguageCode = detectSourceLanguage(question, allowed);
       const embedding = await generateEmbedding(question);
       const embeddingStr = `[${embedding.join(",")}]`;
       const r = await pool.query(
         `INSERT INTO kb_entries (customer_id, question, answer, embedding, source_language_code)
          VALUES ($1, $2, $3, $4, $5) RETURNING id, question, answer, created_at`,
-        [CUSTOMER_ID, question, answer, embeddingStr, SOURCE_LANGUAGE_CODE]
+        [CUSTOMER_ID, question, answer, embeddingStr, sourceLanguageCode]
       );
       const entry = r.rows[0];
 
@@ -217,11 +233,10 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       // surfaced as a failure of the add itself.
       let translations: { languageCode: string; ok: boolean }[] = [];
       try {
-        const allowed = await getAllowedLanguageCodes();
         translations = await fanOutNewKbEntry({
           kbEntryId: entry.id,
           customerId: CUSTOMER_ID,
-          sourceLanguageCode: SOURCE_LANGUAGE_CODE,
+          sourceLanguageCode,
           question,
           answer,
           allowedLanguageCodes: allowed,
@@ -474,6 +489,8 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
         return reply.status(400).send({ error: "No usable rows found in the file" });
       }
 
+      const allowed = await getAllowedLanguageCodes();
+      const sourceLanguages = rowsToInsert.map((row) => detectSourceLanguage(row.question, allowed));
       const embeddings = await Promise.all(rowsToInsert.map((row) => generateEmbedding(row.question)));
 
       const insertedIds: string[] = [];
@@ -485,7 +502,7 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
           const ins = await client.query(
             `INSERT INTO kb_entries (customer_id, question, answer, embedding, source_language_code)
              VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-            [CUSTOMER_ID, rowsToInsert[i].question, rowsToInsert[i].answer, embeddingStr, SOURCE_LANGUAGE_CODE]
+            [CUSTOMER_ID, rowsToInsert[i].question, rowsToInsert[i].answer, embeddingStr, sourceLanguages[i]]
           );
           insertedIds.push(ins.rows[0].id);
         }
@@ -501,17 +518,17 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       // large file doesn't hammer Sarvam/embeddings all at once). The upload
       // itself already succeeded above regardless of translation outcome.
       try {
-        const allowed = await getAllowedLanguageCodes();
         const BATCH_SIZE = 2; // Sarvam's translate endpoint rate-limits in short bursts - see sarvamTranslateText
         for (let i = 0; i < insertedIds.length; i += BATCH_SIZE) {
           const batchIds = insertedIds.slice(i, i + BATCH_SIZE);
           const batchRows = rowsToInsert.slice(i, i + BATCH_SIZE);
+          const batchLangs = sourceLanguages.slice(i, i + BATCH_SIZE);
           await Promise.all(
             batchIds.map((entryId, j) =>
               fanOutNewKbEntry({
                 kbEntryId: entryId,
                 customerId: CUSTOMER_ID,
-                sourceLanguageCode: SOURCE_LANGUAGE_CODE,
+                sourceLanguageCode: batchLangs[j],
                 question: batchRows[j].question,
                 answer: batchRows[j].answer,
                 allowedLanguageCodes: allowed,

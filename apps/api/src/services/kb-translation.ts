@@ -81,6 +81,24 @@ async function runWithConcurrency<T>(jobs: Array<() => Promise<T>>, concurrency:
   return results;
 }
 
+/**
+ * Writes are best-effort against a parent kb_entries row that may have been
+ * deleted while this translation call was still in flight - the KB-fan-out
+ * queue is now paced at ~1.1s/call (see pacedSarvamTranslate below), so a
+ * large add/edit/upload can still be translating for a while after the HTTP
+ * response returns. If an admin deletes that entry in the meantime, the FK
+ * violation here is expected and harmless (there's nothing left to attach
+ * the translation to) - swallow it instead of logging it as an error.
+ */
+function isMissingParentEntryError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "23503"
+  );
+}
+
 async function upsertTranslationRow(params: {
   kbEntryId: string;
   customerId: string;
@@ -93,30 +111,35 @@ async function upsertTranslationRow(params: {
   status: "ok" | "failed";
 }): Promise<void> {
   const embeddingStr = toEmbeddingLiteral(params.embedding);
-  await pool.query(
-    `INSERT INTO kb_entry_translations
-       (kb_entry_id, customer_id, language_code, question, answer, embedding, is_source, manually_edited, translation_status, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
-     ON CONFLICT (kb_entry_id, language_code) DO UPDATE
-       SET question = EXCLUDED.question,
-           answer = EXCLUDED.answer,
-           embedding = EXCLUDED.embedding,
-           is_source = EXCLUDED.is_source,
-           manually_edited = EXCLUDED.manually_edited,
-           translation_status = EXCLUDED.translation_status,
-           updated_at = now()`,
-    [
-      params.kbEntryId,
-      params.customerId,
-      params.languageCode,
-      params.question,
-      params.answer,
-      embeddingStr,
-      params.isSource,
-      params.manuallyEdited,
-      params.status,
-    ]
-  );
+  try {
+    await pool.query(
+      `INSERT INTO kb_entry_translations
+         (kb_entry_id, customer_id, language_code, question, answer, embedding, is_source, manually_edited, translation_status, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+       ON CONFLICT (kb_entry_id, language_code) DO UPDATE
+         SET question = EXCLUDED.question,
+             answer = EXCLUDED.answer,
+             embedding = EXCLUDED.embedding,
+             is_source = EXCLUDED.is_source,
+             manually_edited = EXCLUDED.manually_edited,
+             translation_status = EXCLUDED.translation_status,
+             updated_at = now()`,
+      [
+        params.kbEntryId,
+        params.customerId,
+        params.languageCode,
+        params.question,
+        params.answer,
+        embeddingStr,
+        params.isSource,
+        params.manuallyEdited,
+        params.status,
+      ]
+    );
+  } catch (err) {
+    if (isMissingParentEntryError(err)) return;
+    throw err;
+  }
 }
 
 /** Writes/refreshes just the mirrored SOURCE-language row (no translation call - text is already in that language). */

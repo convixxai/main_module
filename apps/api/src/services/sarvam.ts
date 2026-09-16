@@ -550,6 +550,11 @@ export async function sarvamTranslateText(
     body.source_language_code = "auto";
     body.model = "mayura:v1";
   }
+  // "formal" mode favors complete, grammatically standard sentences over
+  // clipped colloquial phrasing - appropriate for a public helpline, and the
+  // only mode sarvam-translate:v1 supports anyway (so this is always safe to
+  // set regardless of which model got picked above).
+  body.mode = "formal";
 
   // Sarvam's translate endpoint rate-limits in short bursts (HTTP 429,
   // code "rate_limit_exceeded_error") - confirmed 2026-09-16 while backfilling
