@@ -502,12 +502,21 @@ function normalizeBcp47ForSarvam(tag: string): string {
 }
 
 /**
- * Indic (or auto-detected) → English for KB vector search. Same API key as STT/TTS; low-latency path.
- * Returns the original `input` on failure (caller may still use it for embedding).
+ * General-purpose Sarvam translation, any supported source → any supported
+ * target (not just → English). Same API key as STT/TTS. Returns the original
+ * `input` on failure (caller may still use it for embedding/display, per the
+ * `ok` flag).
+ *
+ * Model selection mirrors what Sarvam's own docs recommend: `sarvam-translate:v1`
+ * needs an explicit, known non-English source code; anything else (including
+ * English sources, or an unrecognized/auto-detected source) falls back to
+ * `mayura:v1` with source_language_code="auto", which Sarvam's docs describe
+ * as bidirectional across English + the 10 supported Indian languages.
  */
-export async function sarvamTranslateToEnglishForSearch(
+export async function sarvamTranslateText(
   input: string,
-  sourceLanguageBcp47: string | null
+  sourceLanguageBcp47: string | null,
+  targetLanguageBcp47: string
 ): Promise<{ ok: boolean; text: string }> {
   const key = (env.sarvam.apiKey || "").trim();
   if (!key) {
@@ -530,14 +539,14 @@ export async function sarvamTranslateToEnglishForSearch(
 
   const body: Record<string, string> = {
     input: payloadText,
-    target_language_code: "en-IN",
+    target_language_code: normalizeBcp47ForSarvam(targetLanguageBcp47),
   };
 
   if (useSarvamTranslateV1 && normalized) {
     body.source_language_code = normalized;
     body.model = "sarvam-translate:v1";
   } else {
-    // Unknown or unlisted: Mayura `auto` → English
+    // English source, or unknown/unlisted: Mayura `auto` handles both directions.
     body.source_language_code = "auto";
     body.model = "mayura:v1";
   }
@@ -549,7 +558,7 @@ export async function sarvamTranslateToEnglishForSearch(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(8000),
   });
 
   const raw = await readJsonBody(res);
@@ -571,4 +580,15 @@ export async function sarvamTranslateToEnglishForSearch(
     return { ok: false, text: input.trim() };
   }
   return { ok: true, text: out };
+}
+
+/**
+ * Indic (or auto-detected) → English for KB vector search. Same API key as STT/TTS; low-latency path.
+ * Returns the original `input` on failure (caller may still use it for embedding).
+ */
+export async function sarvamTranslateToEnglishForSearch(
+  input: string,
+  sourceLanguageBcp47: string | null
+): Promise<{ ok: boolean; text: string }> {
+  return sarvamTranslateText(input, sourceLanguageBcp47, "en-IN");
 }

@@ -17,6 +17,14 @@ import multipart from "@fastify/multipart";
 import ExcelJS from "exceljs";
 import { pool } from "../config/db";
 import { generateEmbedding } from "../services/llm";
+import { getCustomerSettings } from "../services/customer-settings";
+import {
+  fanOutNewKbEntry,
+  upsertSourceKbEntryTranslation,
+  cascadeTranslateKbEntry,
+  updateSingleKbEntryTranslation,
+  listKbEntryTranslations,
+} from "../services/kb-translation";
 import {
   verifyKbAdminLogin,
   createKbAdminSession,
@@ -29,6 +37,14 @@ import { KB_ADMIN_GANESHOTSAV_HTML } from "./kb-admin-ganeshotsav-page";
 const CUSTOMER_ID = "97752ef1-eb4f-4ebb-a77f-0613fe3a424b";
 const COOKIE_NAME = "kb_admin_ganeshotsav_session";
 const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 12; // 12h, a stale forgotten-open tab shouldn't stay valid forever
+const SOURCE_LANGUAGE_CODE = "en-IN"; // this KB has always been authored in English
+
+/** This customer's currently allowed languages (mr-IN/hi-IN/en-IN today) - same field the voicebot's language-switch flow reads. */
+async function getAllowedLanguageCodes(): Promise<string[]> {
+  const settings = await getCustomerSettings(CUSTOMER_ID);
+  const codes = settings?.allowed_language_codes;
+  return codes && codes.length > 0 ? codes : [SOURCE_LANGUAGE_CODE];
+}
 
 const REQUIRED_COLUMNS = ["questions", "answers"] as const;
 
@@ -155,6 +171,14 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
     return reply.send({ username: user.username });
   });
 
+  // ---------- this customer's allowed languages (drives the entry modal's language tabs) ----------
+  app.get("/kb-admin/ganeshotsav/api/languages", async (request, reply) => {
+    const user = await requireSession(request, reply);
+    if (!user) return;
+    const allowed = await getAllowedLanguageCodes();
+    return reply.send({ allowed, source: SOURCE_LANGUAGE_CODE });
+  });
+
   // ---------- entries: list / add / edit ----------
   app.get("/kb-admin/ganeshotsav/api/entries", async (request, reply) => {
     const user = await requireSession(request, reply);
@@ -180,15 +204,36 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       const embedding = await generateEmbedding(question);
       const embeddingStr = `[${embedding.join(",")}]`;
       const r = await pool.query(
-        `INSERT INTO kb_entries (customer_id, question, answer, embedding)
-         VALUES ($1, $2, $3, $4) RETURNING id, question, answer, created_at`,
-        [CUSTOMER_ID, question, answer, embeddingStr]
+        `INSERT INTO kb_entries (customer_id, question, answer, embedding, source_language_code)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, question, answer, created_at`,
+        [CUSTOMER_ID, question, answer, embeddingStr, SOURCE_LANGUAGE_CODE]
       );
-      return reply.status(201).send(r.rows[0]);
+      const entry = r.rows[0];
+
+      // Fan out into every other allowed language (mr-IN/hi-IN today) so this
+      // entry is immediately answerable in all of them - see kb-translation.ts.
+      // Best-effort: the entry itself is already saved either way, and a
+      // translation failure is recorded per-language (translation_status), not
+      // surfaced as a failure of the add itself.
+      let translations: { languageCode: string; ok: boolean }[] = [];
+      try {
+        const allowed = await getAllowedLanguageCodes();
+        translations = await fanOutNewKbEntry({
+          kbEntryId: entry.id,
+          customerId: CUSTOMER_ID,
+          sourceLanguageCode: SOURCE_LANGUAGE_CODE,
+          question,
+          answer,
+          allowedLanguageCodes: allowed,
+        });
+      } catch (err) {
+        request.log.error({ err, entryId: entry.id }, "kb-admin-ganeshotsav: translation fan-out failed on add");
+      }
+      return reply.status(201).send({ ...entry, translations });
     }
   );
 
-  app.put<{ Params: { id: string }; Body: { question?: string; answer?: string } }>(
+  app.put<{ Params: { id: string }; Body: { question?: string; answer?: string; languageCode?: string } }>(
     "/kb-admin/ganeshotsav/api/entries/:id",
     async (request, reply) => {
       const user = await requireSession(request, reply);
@@ -200,20 +245,92 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
         return reply.status(400).send({ error: "Question and answer are both required" });
       }
       const existing = await pool.query(
-        `SELECT id FROM kb_entries WHERE id = $1 AND customer_id = $2`,
+        `SELECT id, source_language_code FROM kb_entries WHERE id = $1 AND customer_id = $2`,
         [id, CUSTOMER_ID]
       );
       if (existing.rows.length === 0) {
         return reply.status(404).send({ error: "Entry not found" });
       }
-      const embedding = await generateEmbedding(question);
-      const embeddingStr = `[${embedding.join(",")}]`;
-      const r = await pool.query(
-        `UPDATE kb_entries SET question = $1, answer = $2, embedding = $3
-         WHERE id = $4 AND customer_id = $5 RETURNING id, question, answer, created_at`,
-        [question, answer, embeddingStr, id, CUSTOMER_ID]
+      const sourceLanguageCode: string = existing.rows[0].source_language_code || SOURCE_LANGUAGE_CODE;
+      // Omitted languageCode = today's existing UI, which only ever edits the
+      // source-language text - keep that exact behavior.
+      const languageCode = (request.body?.languageCode || sourceLanguageCode).trim();
+
+      if (languageCode === sourceLanguageCode) {
+        const embedding = await generateEmbedding(question);
+        const embeddingStr = `[${embedding.join(",")}]`;
+        const r = await pool.query(
+          `UPDATE kb_entries SET question = $1, answer = $2, embedding = $3
+           WHERE id = $4 AND customer_id = $5 RETURNING id, question, answer, created_at`,
+          [question, answer, embeddingStr, id, CUSTOMER_ID]
+        );
+        let otherLanguages: string[] = [];
+        try {
+          await upsertSourceKbEntryTranslation({
+            kbEntryId: id,
+            customerId: CUSTOMER_ID,
+            sourceLanguageCode,
+            question,
+            answer,
+          });
+          const allowed = await getAllowedLanguageCodes();
+          otherLanguages = allowed.filter((l) => l !== sourceLanguageCode);
+        } catch (err) {
+          request.log.error({ err, entryId: id }, "kb-admin-ganeshotsav: source translation mirror failed on edit");
+        }
+        return reply.send({ ...r.rows[0], otherLanguages });
+      }
+
+      // Editing a non-source language directly: only that one row changes.
+      await updateSingleKbEntryTranslation({
+        kbEntryId: id,
+        customerId: CUSTOMER_ID,
+        languageCode,
+        question,
+        answer,
+      });
+      return reply.send({ id, question, answer, languageCode });
+    }
+  );
+
+  // ---------- per-entry language versions (admin edit modal's language tabs) ----------
+  app.get<{ Params: { id: string } }>(
+    "/kb-admin/ganeshotsav/api/entries/:id/translations",
+    async (request, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
+      const { id } = request.params;
+      const rows = await listKbEntryTranslations(id, CUSTOMER_ID);
+      return reply.send({ translations: rows });
+    }
+  );
+
+  // ---------- confirmed cascade: re-translate/re-embed the OTHER languages from the current source text ----------
+  app.post<{ Params: { id: string }; Body: { overwriteManuallyEdited?: boolean } }>(
+    "/kb-admin/ganeshotsav/api/entries/:id/cascade-translate",
+    async (request, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
+      const { id } = request.params;
+      const existing = await pool.query(
+        `SELECT id, question, answer, source_language_code FROM kb_entries WHERE id = $1 AND customer_id = $2`,
+        [id, CUSTOMER_ID]
       );
-      return reply.send(r.rows[0]);
+      if (existing.rows.length === 0) {
+        return reply.status(404).send({ error: "Entry not found" });
+      }
+      const row = existing.rows[0];
+      const allowed = await getAllowedLanguageCodes();
+      const results = await cascadeTranslateKbEntry({
+        kbEntryId: id,
+        customerId: CUSTOMER_ID,
+        sourceLanguageCode: row.source_language_code || SOURCE_LANGUAGE_CODE,
+        question: row.question,
+        answer: row.answer,
+        allowedLanguageCodes: allowed,
+        overwriteManuallyEdited: request.body?.overwriteManuallyEdited === true,
+      });
+      return reply.send({ results });
     }
   );
 
@@ -359,15 +476,18 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
 
       const embeddings = await Promise.all(rowsToInsert.map((row) => generateEmbedding(row.question)));
 
+      const insertedIds: string[] = [];
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
         for (let i = 0; i < rowsToInsert.length; i++) {
           const embeddingStr = `[${embeddings[i].join(",")}]`;
-          await client.query(
-            `INSERT INTO kb_entries (customer_id, question, answer, embedding) VALUES ($1, $2, $3, $4)`,
-            [CUSTOMER_ID, rowsToInsert[i].question, rowsToInsert[i].answer, embeddingStr]
+          const ins = await client.query(
+            `INSERT INTO kb_entries (customer_id, question, answer, embedding, source_language_code)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+            [CUSTOMER_ID, rowsToInsert[i].question, rowsToInsert[i].answer, embeddingStr, SOURCE_LANGUAGE_CODE]
           );
+          insertedIds.push(ins.rows[0].id);
         }
         await client.query("COMMIT");
       } catch (err) {
@@ -375,6 +495,32 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
         throw err;
       } finally {
         client.release();
+      }
+
+      // Fan out translations for every uploaded row (best-effort, batched so a
+      // large file doesn't hammer Sarvam/embeddings all at once). The upload
+      // itself already succeeded above regardless of translation outcome.
+      try {
+        const allowed = await getAllowedLanguageCodes();
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < insertedIds.length; i += BATCH_SIZE) {
+          const batchIds = insertedIds.slice(i, i + BATCH_SIZE);
+          const batchRows = rowsToInsert.slice(i, i + BATCH_SIZE);
+          await Promise.all(
+            batchIds.map((entryId, j) =>
+              fanOutNewKbEntry({
+                kbEntryId: entryId,
+                customerId: CUSTOMER_ID,
+                sourceLanguageCode: SOURCE_LANGUAGE_CODE,
+                question: batchRows[j].question,
+                answer: batchRows[j].answer,
+                allowedLanguageCodes: allowed,
+              })
+            )
+          );
+        }
+      } catch (err) {
+        request.log.error({ err }, "kb-admin-ganeshotsav: translation fan-out failed on bulk-upload");
       }
 
       return reply.status(201).send({ inserted: rowsToInsert.length, skipped: skippedBlank });

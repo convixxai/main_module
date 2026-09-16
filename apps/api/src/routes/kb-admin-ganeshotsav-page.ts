@@ -144,6 +144,23 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
 
   main { flex: 1; padding: 22px 20px 48px; max-width: 1180px; width: 100%; margin: 0 auto; }
 
+  /* ---------- Entry modal language tabs ---------- */
+  .lang-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .lang-tab {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+    padding: 6px 13px; font-size: 12.5px; font-weight: 600; color: var(--text-dim);
+    transition: background .15s, border-color .15s, color .15s; display: flex; align-items: center; gap: 5px;
+  }
+  .lang-tab:hover { border-color: var(--primary); }
+  .lang-tab.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .lang-tab .lang-tab-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex: none;
+  }
+  .lang-tab.active .lang-tab-dot { background: rgba(255,255,255,.85); }
+  .lang-tab[data-status="pending"] .lang-tab-dot { background: #f59e0b; }
+  .lang-tab[data-status="failed"] .lang-tab-dot { background: #ef4444; }
+  .lang-tab-hint { font-size: 12px; color: var(--text-faint); margin: -8px 0 14px; }
+
   /* ---------- System prompt view ---------- */
   .banner-warning {
     display: flex; align-items: flex-start; gap: 12px;
@@ -419,6 +436,8 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
       <button class="icon-btn" data-close-modal="entry-modal-overlay">✕</button>
     </div>
     <div class="modal-body">
+      <div class="lang-tabs" id="entry-lang-tabs" hidden></div>
+      <p class="lang-tab-hint" id="entry-lang-hint" hidden></p>
       <div class="field">
         <label for="entry-question">Question</label>
         <textarea id="entry-question" placeholder="e.g. Where can I park near Dagdusheth Ganpati?"></textarea>
@@ -431,6 +450,25 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
     <div class="modal-footer">
       <button class="btn btn-secondary" data-close-modal="entry-modal-overlay">Cancel</button>
       <button class="btn btn-primary" id="entry-save-btn">Save entry</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm cascade-retranslate modal (shown after saving the ORIGINAL-language text of an entry that has other language versions) -->
+<div class="modal-overlay" id="cascade-confirm-overlay" hidden>
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Update the other language versions too?</h2>
+      <button class="icon-btn" data-close-modal="cascade-confirm-overlay">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin:0" id="cascade-confirm-text">
+        This entry also has other language versions. Re-translate them to match this change, or leave them as they are?
+      </p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cascade-skip-btn">Just this one</button>
+      <button class="btn btn-primary" id="cascade-update-btn">Update them too</button>
     </div>
   </div>
 </div>
@@ -512,7 +550,19 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
   'use strict';
 
   var API = '/kb-admin/ganeshotsav';
-  var state = { entries: [], selected: new Set(), filtered: [], editingId: null, sessionTimer: null };
+  var state = {
+    entries: [], selected: new Set(), filtered: [], editingId: null, sessionTimer: null,
+    allowedLanguages: [], sourceLanguage: 'en-IN',
+    // Populated when the edit modal opens: language_code -> {question, answer, is_source, manually_edited, translation_status}
+    entryTranslations: {}, activeLanguage: 'en-IN'
+  };
+
+  var LANG_LABELS = {
+    'en-IN': 'English', 'hi-IN': 'हिंदी', 'mr-IN': 'मराठी', 'gu-IN': 'ગુજરાતી',
+    'bn-IN': 'বাংলা', 'pa-IN': 'ਪੰਜਾਬੀ', 'ta-IN': 'தமிழ்', 'te-IN': 'తెలుగు',
+    'kn-IN': 'ಕನ್ನಡ', 'ml-IN': 'മലയാളം', 'od-IN': 'ଓଡ଼ିଆ'
+  };
+  function langLabel(code) { return LANG_LABELS[code] || code; }
 
   // ---------- helpers ----------
   function $(id) { return document.getElementById(id); }
@@ -598,6 +648,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
       $('whoami').textContent = data.username || username;
       startSessionPolling();
       loadEntries();
+      loadLanguages();
     } catch (err) {
       $('login-error').textContent = err.message || 'Invalid username or password';
       $('login-error').hidden = false;
@@ -619,6 +670,18 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
         if (res.status === 401) handleSessionExpired();
       }).catch(function () {});
     }, 8000);
+  }
+
+  // ---------- languages (drives the entry modal's language tabs) ----------
+  async function loadLanguages() {
+    try {
+      var data = await api('/api/languages');
+      state.allowedLanguages = data.allowed || ['en-IN'];
+      state.sourceLanguage = data.source || 'en-IN';
+    } catch (err) {
+      state.allowedLanguages = ['en-IN'];
+      state.sourceLanguage = 'en-IN';
+    }
   }
 
   // ---------- entries: load + render ----------
@@ -707,27 +770,85 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
     render();
   });
 
-  // ---------- add / edit ----------
+  // ---------- add / edit, with per-language tabs when more than one language is allowed ----------
+  function renderLangTabs() {
+    var tabsEl = $('entry-lang-tabs');
+    var hintEl = $('entry-lang-hint');
+    if (!state.editingId || state.allowedLanguages.length <= 1) {
+      tabsEl.hidden = true;
+      hintEl.hidden = true;
+      return;
+    }
+    tabsEl.hidden = false;
+    hintEl.hidden = false;
+    tabsEl.innerHTML = '';
+    state.allowedLanguages.forEach(function (code) {
+      var t = state.entryTranslations[code];
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'lang-tab' + (code === state.activeLanguage ? ' active' : '');
+      btn.setAttribute('data-status', t ? t.translation_status : 'pending');
+      var label = langLabel(code) + (code === state.sourceLanguage ? ' (original)' : '');
+      btn.innerHTML = '<span class="lang-tab-dot"></span>' + esc(label);
+      btn.addEventListener('click', function () { switchLangTab(code); });
+      tabsEl.appendChild(btn);
+    });
+    hintEl.textContent = state.activeLanguage === state.sourceLanguage
+      ? 'This is the original text. Saving it can also update the other language versions.'
+      : (state.entryTranslations[state.activeLanguage] && state.entryTranslations[state.activeLanguage].manually_edited
+          ? 'Hand-edited - future changes to the original text won’t overwrite this unless you choose to.'
+          : 'Auto-translated from the original. You can edit it directly; that edit stays put after this.');
+  }
+
+  function switchLangTab(code) {
+    // Stash whatever's currently typed for the tab being left, so quick tab-hopping before saving doesn't lose it.
+    state.entryTranslations[state.activeLanguage] = Object.assign({}, state.entryTranslations[state.activeLanguage], {
+      question: $('entry-question').value, answer: $('entry-answer').value
+    });
+    state.activeLanguage = code;
+    var t = state.entryTranslations[code];
+    $('entry-question').value = t ? t.question : '';
+    $('entry-answer').value = t ? t.answer : '';
+    renderLangTabs();
+  }
+
   $('add-entry-btn').addEventListener('click', function () {
     state.editingId = null;
+    state.entryTranslations = {};
+    state.activeLanguage = state.sourceLanguage;
     $('entry-modal-title').textContent = 'Add entry';
     $('entry-question').value = '';
     $('entry-answer').value = '';
+    renderLangTabs();
     openModal('entry-modal-overlay');
     $('entry-question').focus();
   });
 
-  function openEditModal(id) {
+  async function openEditModal(id) {
     var e = state.entries.find(function (x) { return x.id === id; });
     if (!e) return;
     state.editingId = id;
+    state.activeLanguage = state.sourceLanguage;
     $('entry-modal-title').textContent = 'Edit entry';
     $('entry-question').value = e.question;
     $('entry-answer').value = e.answer;
+    state.entryTranslations = {};
+    state.entryTranslations[state.sourceLanguage] = { question: e.question, answer: e.answer, is_source: true, translation_status: 'ok' };
+    renderLangTabs();
     openModal('entry-modal-overlay');
+
+    if (state.allowedLanguages.length > 1) {
+      try {
+        var data = await api('/api/entries/' + encodeURIComponent(id) + '/translations');
+        (data.translations || []).forEach(function (t) {
+          state.entryTranslations[t.language_code] = t;
+        });
+        if (state.editingId === id) renderLangTabs();
+      } catch (err) { /* tabs just show as pending; not fatal */ }
+    }
   }
 
-  $('entry-save-btn').addEventListener('click', async function () {
+  async function saveEntry() {
     var question = $('entry-question').value.trim();
     var answer = $('entry-answer').value.trim();
     if (!question || !answer) { toast('Question and answer are both required', 'err'); return; }
@@ -737,21 +858,66 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
     btn.innerHTML = '<span class="spinner"></span> Saving…';
     try {
       if (state.editingId) {
-        await api('/api/entries/' + encodeURIComponent(state.editingId), {
-          method: 'PUT', body: JSON.stringify({ question: question, answer: answer })
+        var isSourceTab = state.activeLanguage === state.sourceLanguage;
+        var result = await api('/api/entries/' + encodeURIComponent(state.editingId), {
+          method: 'PUT',
+          body: JSON.stringify({ question: question, answer: answer, languageCode: state.activeLanguage })
         });
-        toast('Entry updated', 'ok');
+        toast(isSourceTab ? 'Original entry updated' : (langLabel(state.activeLanguage) + ' version updated'), 'ok');
+        closeModal('entry-modal-overlay');
+        loadEntries();
+        var others = (result && result.otherLanguages) || [];
+        if (isSourceTab && others.length > 0) {
+          $('cascade-confirm-text').textContent =
+            'This entry also has a ' + others.map(langLabel).join(', ') +
+            ' version. Re-translate them to match this change, or leave them as they are?';
+          pendingCascadeEntryId = state.editingId;
+          openModal('cascade-confirm-overlay');
+        }
       } else {
         await api('/api/entries', { method: 'POST', body: JSON.stringify({ question: question, answer: answer }) });
-        toast('Entry added', 'ok');
+        toast(state.allowedLanguages.length > 1 ? 'Entry added and translated' : 'Entry added', 'ok');
+        closeModal('entry-modal-overlay');
+        loadEntries();
       }
-      closeModal('entry-modal-overlay');
-      loadEntries();
     } catch (err) {
       if (err.message !== 'session_expired') toast('Save failed: ' + err.message, 'err');
     } finally {
       btn.disabled = false;
       btn.innerHTML = originalHtml;
+    }
+  }
+  $('entry-save-btn').addEventListener('click', saveEntry);
+
+  // ---------- cascade-retranslate confirmation (after editing the ORIGINAL-language text) ----------
+  var pendingCascadeEntryId = null;
+  $('cascade-skip-btn').addEventListener('click', function () {
+    pendingCascadeEntryId = null;
+    closeModal('cascade-confirm-overlay');
+  });
+  $('cascade-update-btn').addEventListener('click', async function () {
+    if (!pendingCascadeEntryId) { closeModal('cascade-confirm-overlay'); return; }
+    var id = pendingCascadeEntryId;
+    var btn = $('cascade-update-btn');
+    btn.disabled = true;
+    var originalHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner"></span> Updating…';
+    try {
+      var data = await api('/api/entries/' + encodeURIComponent(id) + '/cascade-translate', { method: 'POST', body: JSON.stringify({}) });
+      var results = data.results || [];
+      var skipped = results.filter(function (r) { return r.skipped; }).length;
+      var failed = results.filter(function (r) { return !r.ok && !r.skipped; }).length;
+      var msg = 'Other language versions updated';
+      if (skipped) msg += ' (' + skipped + ' hand-edited version' + (skipped > 1 ? 's' : '') + ' left as-is)';
+      if (failed) msg += ' - ' + failed + ' failed, kept the previous text';
+      toast(msg, failed ? 'err' : 'ok');
+    } catch (err) {
+      if (err.message !== 'session_expired') toast('Update failed: ' + err.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+      pendingCascadeEntryId = null;
+      closeModal('cascade-confirm-overlay');
     }
   });
 
@@ -970,6 +1136,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
         $('whoami').textContent = data.username || '';
         startSessionPolling();
         loadEntries();
+        loadLanguages();
         return;
       }
     } catch (e) { /* fall through to login */ }
