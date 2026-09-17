@@ -228,6 +228,14 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
   app.get("/kb-admin/ganeshotsav/api/entries/translation-status", async (request, reply) => {
     const user = await requireSession(request, reply);
     if (!user) return;
+    // AUTO_TRANSLATE_ON_ADD is paused - no fan-out job is ever queued right
+    // now, so pendingOrMissing (entries lacking full coverage) would just
+    // grow forever and the UI's "translating in background..." chip would
+    // sit there permanently, falsely implying something is in progress.
+    // Report zero while paused instead of a real, never-progressing count.
+    if (!AUTO_TRANSLATE_ON_ADD) {
+      return reply.send({ totalEntries: 0, fullyTranslated: 0, pendingOrMissing: 0, withFailures: 0 });
+    }
     const allowed = await getAllowedLanguageCodes();
     const summary = await getTranslationCoverageSummary(CUSTOMER_ID, allowed);
     return reply.send(summary);
