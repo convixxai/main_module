@@ -156,6 +156,47 @@ function sendFrames(ws: WebSocket, frames: OutboundFrame | OutboundFrame[]): voi
   }
 }
 
+/** Each Vodafone media frame is a fixed VODAFONE_MEDIA_CHUNK_MIN_BYTES (1600 bytes) = 100ms of 8kHz 16-bit PCM. */
+const VODAFONE_FRAME_DURATION_MS = 100;
+
+/**
+ * Sends audio frames paced at roughly real-time instead of dumping them all
+ * in one synchronous burst. Mirrors exotel-voicebot.ts's sendAudioPaced,
+ * whose own comment says exactly why this exists: "Prevents blowing up
+ * [the carrier's] WebSocket ingress buffer which causes immediate
+ * disconnects." Vodafone's route never had this - found 2026-09-17 via
+ * calls 29924298/29924305/29924311/29924430: every outbound audio send
+ * (greeting or answer) was firing ~100+ WebSocket sends back-to-back with
+ * zero delay, and the telephony bridge (ptSIPMix) reliably disconnected and
+ * reconnected within seconds of receiving one, repeating the same audio on
+ * each new connection - the earlier Cartesia-timeout fix addressed a real
+ * but separate risk (an unbounded hang) and did not touch this, which is
+ * why the repeating-greeting symptom persisted even with healthy, fast
+ * Cartesia responses. Sleeping ~50% of each frame's real-time duration
+ * keeps Vodafone's ingress buffer topped up without overflowing it - the
+ * same ratio Exotel already uses successfully.
+ */
+async function sendFramesPaced(
+  ws: WebSocket,
+  frames: OutboundFrame | OutboundFrame[],
+  isStale?: () => boolean
+): Promise<void> {
+  const list = Array.isArray(frames) ? frames : [frames];
+  const sleepMs = Math.floor(VODAFONE_FRAME_DURATION_MS * 0.5);
+  for (let i = 0; i < list.length; i++) {
+    // Pacing a long buffer (a full greeting is ~100 frames, ~5s of real
+    // wall-clock time here) means a reconnect can now land mid-send, not
+    // just before it starts - re-checking staleness every frame (not only
+    // once up front) stops a superseded attempt from finishing the rest of
+    // its greeting into a connection/session that's already moved on.
+    if (ws.readyState !== ws.OPEN || isStale?.()) return;
+    ws.send(list[i].raw);
+    if (i < list.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, sleepMs));
+    }
+  }
+}
+
 /**
  * Resolves the actual voice to speak with: agent-level avatar first
  * (cartesia_avatars/elevenlabs_avatars/avatars via the agent's *_avatar_id),
@@ -397,7 +438,8 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
       return;
     }
     app.log.info({ streamId: event.streamId, synthMs, bytes: pcm.length }, "vodafone-voicebot: greeting synthesis done");
-    sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
+    await sendFramesPaced(ws, adapter.buildAudioFrame(event.streamId, pcm), () => calls.get(event.streamId) !== state);
+    if (calls.get(event.streamId) !== state) return;
     sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
   } catch (err) {
     const synthMs = Date.now() - greetingStartedAt;
@@ -408,7 +450,8 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
         session.errorText || resolveDefaultErrorText(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
       const pcm = await synthesizeSpeechToPcm8k(fallbackText, state.ttsConfig);
       if (calls.get(event.streamId) !== state) return;
-      sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
+      await sendFramesPaced(ws, adapter.buildAudioFrame(event.streamId, pcm), () => calls.get(event.streamId) !== state);
+      if (calls.get(event.streamId) !== state) return;
       sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
     } catch (fallbackErr) {
       app.log.error(
@@ -487,7 +530,7 @@ async function handleLanguageSwitchFlow(
 
   async function speak(text: string): Promise<void> {
     const pcm = await synthesizeSpeechToPcm8k(text, state.ttsConfig);
-    sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
+    await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
     sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
   }
 
@@ -687,7 +730,7 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
         session.errorText ||
         resolveDefaultErrorText(session.defaultLanguageCode ?? "en-IN", state.ttsConfig.voiceGender);
       const pcm = await synthesizeSpeechToPcm8k(errorMessage, state.ttsConfig);
-      sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
+      await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
       sendMarkAndTrackPlayback(state, streamId, pcm.length);
     } catch {
       /* best-effort fallback only */
@@ -790,7 +833,7 @@ async function answerUtteranceBatch(
   const ttsStartedAt = Date.now();
   const pcm = await synthesizeSpeechToPcm8k(answer, state.ttsConfig);
   const ttsMs = Date.now() - ttsStartedAt;
-  sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
+  await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
   sendMarkAndTrackPlayback(state, streamId, pcm.length);
   app.log.info(
     { streamId, ttsMs, totalMsSinceSilence: Date.now() - turnStartedAt },
@@ -858,7 +901,7 @@ async function answerUtteranceStreaming(
           for await (const chunk of stream.audio) {
             if (session.isClosing) break;
             totalOutboundBytes += chunk.length;
-            sendFrames(ws, adapter.buildAudioFrame(streamId, chunk));
+            await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, chunk));
           }
         })();
       }
@@ -867,7 +910,7 @@ async function answerUtteranceStreaming(
     } else {
       const pcm = await synthesizeSpeechToPcm8k(text, state.ttsConfig);
       totalOutboundBytes += pcm.length;
-      sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
+      await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
       spoke = true;
     }
   }
@@ -926,7 +969,7 @@ async function answerUtteranceStreaming(
     if (answer) {
       const pcm = await synthesizeSpeechToPcm8k(answer, state.ttsConfig);
       totalOutboundBytes += pcm.length;
-      sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
+      await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
       spoke = true;
     }
   }
