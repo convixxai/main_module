@@ -1092,8 +1092,29 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
 
       socket.on("message", (raw: Buffer) => {
         void (async () => {
-          const event = adapterForParsing.parseInboundMessage(raw.toString("utf8"));
-          if (!event) return;
+          // Found 2026-09-17: a real connection (nginx access log shows it
+          // held open ~60s then closed having sent zero bytes) never logged
+          // "call started" or anything else at all. The IIFE below already
+          // has a .catch() that logs any thrown error - so that's not the
+          // gap. The actual gap: parseInboundMessage returns null (not a
+          // throw) for any message it doesn't recognize - malformed JSON, or
+          // valid JSON missing/renaming a field our types assume is always
+          // there (e.g. VI sending "start" without a nested "start" object,
+          // or a shape variant we haven't seen). `if (!event) return` then
+          // drops it completely silently. That's almost certainly what
+          // happened to that connection: some message arrived, wasn't
+          // recognized, and vanished with zero trace. Logging the raw
+          // payload here means the exact shape is visible next time instead
+          // of another untraceable "call went blank".
+          const rawText = raw.toString("utf8");
+          const event = adapterForParsing.parseInboundMessage(rawText);
+          if (!event) {
+            app.log.warn(
+              { streamId, rawPreview: rawText.slice(0, 1000) },
+              "vodafone-voicebot: inbound message not recognized (parseInboundMessage returned null) - raw payload logged for diagnosis"
+            );
+            return;
+          }
 
           switch (event.type) {
             case "connected":
