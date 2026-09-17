@@ -368,12 +368,54 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
 
   const greeting =
     session.greetingText || resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
+
+  // Found 2026-09-17 (calls 29924298/29924305): with no timing/outcome log on
+  // this step, a slow-or-hung Cartesia greeting call was invisible - the only
+  // trace was the telephony bridge (ptSIPMix) reconnecting several times with
+  // nothing else logged in between. cartesia.ts now bounds the underlying
+  // fetch to 12s; these logs make the actual duration/outcome visible on the
+  // next occurrence instead of having to infer it from reconnect timestamps.
+  const greetingStartedAt = Date.now();
+  app.log.info(
+    { streamId: event.streamId, provider: ttsConfig.provider, textLen: greeting.length },
+    "vodafone-voicebot: greeting synthesis starting"
+  );
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
+    const synthMs = Date.now() - greetingStartedAt;
+    // A later "start" event for the same stream_sid (a reconnect from the
+    // telephony bridge, e.g. because THIS attempt was already running late)
+    // replaces this streamId's map entry with a fresh state. If that already
+    // happened by the time this slow synthesis finally resolves, this audio
+    // belongs to an abandoned attempt - sending it now would land as an
+    // unexpected extra/repeated greeting on whichever attempt is current.
+    if (calls.get(event.streamId) !== state) {
+      app.log.info(
+        { streamId: event.streamId, synthMs },
+        "vodafone-voicebot: greeting synthesis finished but a newer call attempt already took over this streamId - discarding"
+      );
+      return;
+    }
+    app.log.info({ streamId: event.streamId, synthMs, bytes: pcm.length }, "vodafone-voicebot: greeting synthesis done");
     sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
     sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
   } catch (err) {
-    app.log.error({ err, customerId }, "vodafone-voicebot: greeting synthesis failed");
+    const synthMs = Date.now() - greetingStartedAt;
+    app.log.error({ err, customerId, streamId: event.streamId, synthMs }, "vodafone-voicebot: greeting synthesis failed");
+    if (calls.get(event.streamId) !== state) return;
+    try {
+      const fallbackText =
+        session.errorText || resolveDefaultErrorText(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
+      const pcm = await synthesizeSpeechToPcm8k(fallbackText, state.ttsConfig);
+      if (calls.get(event.streamId) !== state) return;
+      sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
+      sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
+    } catch (fallbackErr) {
+      app.log.error(
+        { err: fallbackErr, customerId, streamId: event.streamId },
+        "vodafone-voicebot: greeting fallback synthesis also failed - caller heard silence"
+      );
+    }
   }
 }
 
