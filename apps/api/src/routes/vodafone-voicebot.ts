@@ -156,61 +156,6 @@ function sendFrames(ws: WebSocket, frames: OutboundFrame | OutboundFrame[]): voi
   }
 }
 
-/** Each Vodafone media frame is a fixed VODAFONE_MEDIA_CHUNK_MIN_BYTES (1600 bytes) = 100ms of 8kHz 16-bit PCM. */
-const VODAFONE_FRAME_DURATION_MS = 100;
-
-/**
- * Sends audio frames paced at roughly real-time instead of dumping them all
- * in one synchronous burst. Mirrors exotel-voicebot.ts's sendAudioPaced,
- * whose own comment says exactly why this exists: "Prevents blowing up
- * [the carrier's] WebSocket ingress buffer which causes immediate
- * disconnects." Vodafone's route never had this - found 2026-09-17 via
- * calls 29924298/29924305/29924311/29924430: every outbound audio send
- * (greeting or answer) was firing ~100+ WebSocket sends back-to-back with
- * zero delay, and the telephony bridge (ptSIPMix) reliably disconnected and
- * reconnected within seconds of receiving one, repeating the same audio on
- * each new connection - the earlier Cartesia-timeout fix addressed a real
- * but separate risk (an unbounded hang) and did not touch this, which is
- * why the repeating-greeting symptom persisted even with healthy, fast
- * Cartesia responses.
- *
- * Ratio note (revised 2026-09-17, same day): initially copied Exotel's
- * "sleep 50% of the frame duration" (2x real-time delivery) verbatim, since
- * that's the exact ratio its own comment credits with fixing the identical
- * ingress-overflow problem there. But Exotel's chunks are 400ms/6400 bytes -
- * 4x bigger than Vodafone's fixed 100ms/1600-byte frames - so the same ratio
- * pushes audio at Vodafone twice as fast per wall-clock second as it does at
- * Exotel. Real calls after deploying the 50% version kept ending in near-
- * total silence with no reconnect and no error - consistent with VI's own
- * playback buffer (whatever its size) being fed faster than it drains and
- * silently dropping the overflow, which a same-process ingest-byte-count
- * check on our end can never detect since VI still acknowledges receiving
- * every byte. Sleeping the FULL frame duration (ratio 1.0, true real-time)
- * removes that ambiguity entirely: VI is never sent audio faster than it
- * should be playing it, so nothing downstream of us can be asked to buffer
- * ahead of real-time.
- */
-async function sendFramesPaced(
-  ws: WebSocket,
-  frames: OutboundFrame | OutboundFrame[],
-  isStale?: () => boolean
-): Promise<void> {
-  const list = Array.isArray(frames) ? frames : [frames];
-  const sleepMs = VODAFONE_FRAME_DURATION_MS;
-  for (let i = 0; i < list.length; i++) {
-    // Pacing a long buffer (a full greeting is ~100 frames, ~5s of real
-    // wall-clock time here) means a reconnect can now land mid-send, not
-    // just before it starts - re-checking staleness every frame (not only
-    // once up front) stops a superseded attempt from finishing the rest of
-    // its greeting into a connection/session that's already moved on.
-    if (ws.readyState !== ws.OPEN || isStale?.()) return;
-    ws.send(list[i].raw);
-    if (i < list.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, sleepMs));
-    }
-  }
-}
-
 /**
  * Resolves the actual voice to speak with: agent-level avatar first
  * (cartesia_avatars/elevenlabs_avatars/avatars via the agent's *_avatar_id),
@@ -423,56 +368,12 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
 
   const greeting =
     session.greetingText || resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
-
-  // Found 2026-09-17 (calls 29924298/29924305): with no timing/outcome log on
-  // this step, a slow-or-hung Cartesia greeting call was invisible - the only
-  // trace was the telephony bridge (ptSIPMix) reconnecting several times with
-  // nothing else logged in between. cartesia.ts now bounds the underlying
-  // fetch to 12s; these logs make the actual duration/outcome visible on the
-  // next occurrence instead of having to infer it from reconnect timestamps.
-  const greetingStartedAt = Date.now();
-  app.log.info(
-    { streamId: event.streamId, provider: ttsConfig.provider, textLen: greeting.length },
-    "vodafone-voicebot: greeting synthesis starting"
-  );
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
-    const synthMs = Date.now() - greetingStartedAt;
-    // A later "start" event for the same stream_sid (a reconnect from the
-    // telephony bridge, e.g. because THIS attempt was already running late)
-    // replaces this streamId's map entry with a fresh state. If that already
-    // happened by the time this slow synthesis finally resolves, this audio
-    // belongs to an abandoned attempt - sending it now would land as an
-    // unexpected extra/repeated greeting on whichever attempt is current.
-    if (calls.get(event.streamId) !== state) {
-      app.log.info(
-        { streamId: event.streamId, synthMs },
-        "vodafone-voicebot: greeting synthesis finished but a newer call attempt already took over this streamId - discarding"
-      );
-      return;
-    }
-    app.log.info({ streamId: event.streamId, synthMs, bytes: pcm.length }, "vodafone-voicebot: greeting synthesis done");
-    await sendFramesPaced(ws, adapter.buildAudioFrame(event.streamId, pcm), () => calls.get(event.streamId) !== state);
-    if (calls.get(event.streamId) !== state) return;
+    sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
     sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
   } catch (err) {
-    const synthMs = Date.now() - greetingStartedAt;
-    app.log.error({ err, customerId, streamId: event.streamId, synthMs }, "vodafone-voicebot: greeting synthesis failed");
-    if (calls.get(event.streamId) !== state) return;
-    try {
-      const fallbackText =
-        session.errorText || resolveDefaultErrorText(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
-      const pcm = await synthesizeSpeechToPcm8k(fallbackText, state.ttsConfig);
-      if (calls.get(event.streamId) !== state) return;
-      await sendFramesPaced(ws, adapter.buildAudioFrame(event.streamId, pcm), () => calls.get(event.streamId) !== state);
-      if (calls.get(event.streamId) !== state) return;
-      sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
-    } catch (fallbackErr) {
-      app.log.error(
-        { err: fallbackErr, customerId, streamId: event.streamId },
-        "vodafone-voicebot: greeting fallback synthesis also failed - caller heard silence"
-      );
-    }
+    app.log.error({ err, customerId }, "vodafone-voicebot: greeting synthesis failed");
   }
 }
 
@@ -544,7 +445,7 @@ async function handleLanguageSwitchFlow(
 
   async function speak(text: string): Promise<void> {
     const pcm = await synthesizeSpeechToPcm8k(text, state.ttsConfig);
-    await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
+    sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
     sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
   }
 
@@ -634,19 +535,6 @@ async function handleLanguageSwitchFlow(
   }
 
   if (!sttLanguageCode) {
-    return { action: "continue", transcript };
-  }
-  // A single short utterance ("Hello", "Sir", "Hi") is not a reliable signal
-  // of which language the caller wants to continue in - these are
-  // near-universal filler/loanwords in Indian English regardless of the
-  // caller's actual language. Mirrors exotel-voicebot.ts's isShortAmbiguous
-  // guard, which this route never carried over. Found 2026-09-17: a caller
-  // saying "Hello" then "Sir" (nothing else) was enough to cross the
-  // 2-consecutive-detections threshold below and falsely trigger a spoken
-  // "switch to English?" offer, derailing several turns before the caller
-  // even asked their real question.
-  const isShortAmbiguous = transcript.trim().length <= 8;
-  if (isShortAmbiguous) {
     return { action: "continue", transcript };
   }
   const clamped = clampLanguageToAllowed(sttLanguageCode, allowedNorm, activeBcp);
@@ -744,7 +632,7 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
         session.errorText ||
         resolveDefaultErrorText(session.defaultLanguageCode ?? "en-IN", state.ttsConfig.voiceGender);
       const pcm = await synthesizeSpeechToPcm8k(errorMessage, state.ttsConfig);
-      await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
+      sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
       sendMarkAndTrackPlayback(state, streamId, pcm.length);
     } catch {
       /* best-effort fallback only */
@@ -847,7 +735,7 @@ async function answerUtteranceBatch(
   const ttsStartedAt = Date.now();
   const pcm = await synthesizeSpeechToPcm8k(answer, state.ttsConfig);
   const ttsMs = Date.now() - ttsStartedAt;
-  await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
+  sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
   sendMarkAndTrackPlayback(state, streamId, pcm.length);
   app.log.info(
     { streamId, ttsMs, totalMsSinceSilence: Date.now() - turnStartedAt },
@@ -915,7 +803,7 @@ async function answerUtteranceStreaming(
           for await (const chunk of stream.audio) {
             if (session.isClosing) break;
             totalOutboundBytes += chunk.length;
-            await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, chunk));
+            sendFrames(ws, adapter.buildAudioFrame(streamId, chunk));
           }
         })();
       }
@@ -924,7 +812,7 @@ async function answerUtteranceStreaming(
     } else {
       const pcm = await synthesizeSpeechToPcm8k(text, state.ttsConfig);
       totalOutboundBytes += pcm.length;
-      await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
+      sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
       spoke = true;
     }
   }
@@ -983,7 +871,7 @@ async function answerUtteranceStreaming(
     if (answer) {
       const pcm = await synthesizeSpeechToPcm8k(answer, state.ttsConfig);
       totalOutboundBytes += pcm.length;
-      await sendFramesPaced(ws, adapter.buildAudioFrame(streamId, pcm));
+      sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
       spoke = true;
     }
   }
@@ -1106,29 +994,8 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
 
       socket.on("message", (raw: Buffer) => {
         void (async () => {
-          // Found 2026-09-17: a real connection (nginx access log shows it
-          // held open ~60s then closed having sent zero bytes) never logged
-          // "call started" or anything else at all. The IIFE below already
-          // has a .catch() that logs any thrown error - so that's not the
-          // gap. The actual gap: parseInboundMessage returns null (not a
-          // throw) for any message it doesn't recognize - malformed JSON, or
-          // valid JSON missing/renaming a field our types assume is always
-          // there (e.g. VI sending "start" without a nested "start" object,
-          // or a shape variant we haven't seen). `if (!event) return` then
-          // drops it completely silently. That's almost certainly what
-          // happened to that connection: some message arrived, wasn't
-          // recognized, and vanished with zero trace. Logging the raw
-          // payload here means the exact shape is visible next time instead
-          // of another untraceable "call went blank".
-          const rawText = raw.toString("utf8");
-          const event = adapterForParsing.parseInboundMessage(rawText);
-          if (!event) {
-            app.log.warn(
-              { streamId, rawPreview: rawText.slice(0, 1000) },
-              "vodafone-voicebot: inbound message not recognized (parseInboundMessage returned null) - raw payload logged for diagnosis"
-            );
-            return;
-          }
+          const event = adapterForParsing.parseInboundMessage(raw.toString("utf8"));
+          if (!event) return;
 
           switch (event.type) {
             case "connected":

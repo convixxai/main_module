@@ -784,31 +784,11 @@ export async function cartesiaTextToSpeech(
   }
 
   const t0 = Date.now();
-  let res: Response;
-  try {
-    // Unlike sarvam.ts (8s) and elevenlabs.ts (60s), this call had NO timeout
-    // at all - found 2026-09-17: a live Vodafone call's greeting synthesis
-    // hung on this exact fetch with no bound, the caller heard dead air, the
-    // upstream telephony bridge (ptSIPMix) gave up and reconnected several
-    // times (each retry re-triggering its own greeting synthesis), and any
-    // straggler response that eventually did land got sent into a
-    // long-abandoned connection - which is what produced the reported
-    // "repeats a sentence, then a long pause" audio. Bounding this turns an
-    // unbounded hang into a fast, logged failure instead.
-    res = await fetch(`${CARTESIA_BASE}/tts/bytes`, {
-      method: "POST",
-      headers: cartesiaHeaders(),
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(12_000),
-    });
-  } catch (err) {
-    const isTimeout = err instanceof Error && err.name === "TimeoutError";
-    throw new Error(
-      isTimeout
-        ? `Cartesia TTS timed out after ${Date.now() - t0}ms`
-        : `Cartesia TTS request failed: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
+  const res = await fetch(`${CARTESIA_BASE}/tts/bytes`, {
+    method: "POST",
+    headers: cartesiaHeaders(),
+    body: JSON.stringify(body),
+  });
   const ttfbMs = Date.now() - t0;
 
   if (!res.ok) {
