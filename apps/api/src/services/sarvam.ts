@@ -502,12 +502,21 @@ function normalizeBcp47ForSarvam(tag: string): string {
 }
 
 /**
- * Indic (or auto-detected) → English for KB vector search. Same API key as STT/TTS; low-latency path.
- * Returns the original `input` on failure (caller may still use it for embedding).
+ * General-purpose Sarvam translation, any supported source → any supported
+ * target (not just → English). Same API key as STT/TTS. Returns the original
+ * `input` on failure (caller may still use it for embedding/display, per the
+ * `ok` flag).
+ *
+ * Model selection mirrors what Sarvam's own docs recommend: `sarvam-translate:v1`
+ * needs an explicit, known non-English source code; anything else (including
+ * English sources, or an unrecognized/auto-detected source) falls back to
+ * `mayura:v1` with source_language_code="auto", which Sarvam's docs describe
+ * as bidirectional across English + the 10 supported Indian languages.
  */
-export async function sarvamTranslateToEnglishForSearch(
+export async function sarvamTranslateText(
   input: string,
-  sourceLanguageBcp47: string | null
+  sourceLanguageBcp47: string | null,
+  targetLanguageBcp47: string
 ): Promise<{ ok: boolean; text: string }> {
   const key = (env.sarvam.apiKey || "").trim();
   if (!key) {
@@ -530,81 +539,6 @@ export async function sarvamTranslateToEnglishForSearch(
 
   const body: Record<string, string> = {
     input: payloadText,
-    target_language_code: "en-IN",
-  };
-
-  if (useSarvamTranslateV1 && normalized) {
-    body.source_language_code = normalized;
-    body.model = "sarvam-translate:v1";
-  } else {
-    // Unknown or unlisted: Mayura `auto` → English
-    body.source_language_code = "auto";
-    body.model = "mayura:v1";
-  }
-
-  const res = await fetch(`${SARVAM_BASE}/translate`, {
-    method: "POST",
-    headers: {
-      "api-subscription-key": key,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
-  });
-
-  const raw = await readJsonBody(res);
-  if (!res.ok) {
-    return { ok: false, text: input.trim() };
-  }
-  if (!raw || typeof raw !== "object") {
-    return { ok: false, text: input.trim() };
-  }
-  const o = raw as Record<string, unknown>;
-  const translated =
-    typeof o.translated_text === "string"
-      ? o.translated_text
-      : typeof o.translatedText === "string"
-        ? o.translatedText
-        : "";
-  const out = translated.trim();
-  if (!out) {
-    return { ok: false, text: input.trim() };
-  }
-  return { ok: true, text: out };
-}
-
-/**
- * Kept as a pure addition (not part of the 2026-09-15 rollback of this file):
- * kb-translation.ts (a 2026-09-16 feature, not part of this rollback since it
- * isn't in the live-call path) still imports this general source→target
- * translate helper. Re-added unmodified from HEAD so that file keeps
- * compiling; nothing in the reverted Vodafone/RAG call path uses it.
- */
-export async function sarvamTranslateText(
-  input: string,
-  sourceLanguageBcp47: string | null,
-  targetLanguageBcp47: string
-): Promise<{ ok: boolean; text: string }> {
-  const key = (env.sarvam.apiKey || "").trim();
-  if (!key) {
-    return { ok: false, text: input.trim() };
-  }
-  const text = input.trim();
-  if (!text) {
-    return { ok: true, text };
-  }
-  const payloadText = text.length > 2000 ? text.slice(0, 2000) : text;
-
-  const normalized = sourceLanguageBcp47
-    ? normalizeBcp47ForSarvam(sourceLanguageBcp47)
-    : null;
-  const n = normalized ? normalized.toLowerCase() : "";
-  const isEnglish = n === "en" || n.startsWith("en-");
-  const useSarvamTranslateV1 =
-    Boolean(normalized) && !isEnglish && SARVAM_TRANSLATE_V1_SOURCE_CODES.has(n);
-
-  const body: Record<string, string> = {
-    input: payloadText,
     target_language_code: normalizeBcp47ForSarvam(targetLanguageBcp47),
   };
 
@@ -612,11 +546,22 @@ export async function sarvamTranslateText(
     body.source_language_code = normalized;
     body.model = "sarvam-translate:v1";
   } else {
+    // English source, or unknown/unlisted: Mayura `auto` handles both directions.
     body.source_language_code = "auto";
     body.model = "mayura:v1";
   }
+  // "formal" mode favors complete, grammatically standard sentences over
+  // clipped colloquial phrasing - appropriate for a public helpline, and the
+  // only mode sarvam-translate:v1 supports anyway (so this is always safe to
+  // set regardless of which model got picked above).
   body.mode = "formal";
 
+  // Sarvam's translate endpoint rate-limits in short bursts (HTTP 429,
+  // code "rate_limit_exceeded_error") - confirmed 2026-09-16 while backfilling
+  // KB translations, where ~15 concurrent calls tripped it within seconds. A
+  // single live call rarely bursts like that, but bulk/background translation
+  // (KB fan-out, backfills) routinely does, so retry with backoff here instead
+  // of every caller having to know about this.
   const MAX_RETRIES = 3;
   let res: Response | null = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -645,15 +590,26 @@ export async function sarvamTranslateText(
     return { ok: false, text: input.trim() };
   }
   const o = raw as Record<string, unknown>;
-  const translated2 =
+  const translated =
     typeof o.translated_text === "string"
       ? o.translated_text
       : typeof o.translatedText === "string"
         ? o.translatedText
         : "";
-  const out2 = translated2.trim();
-  if (!out2) {
+  const out = translated.trim();
+  if (!out) {
     return { ok: false, text: input.trim() };
   }
-  return { ok: true, text: out2 };
+  return { ok: true, text: out };
+}
+
+/**
+ * Indic (or auto-detected) → English for KB vector search. Same API key as STT/TTS; low-latency path.
+ * Returns the original `input` on failure (caller may still use it for embedding).
+ */
+export async function sarvamTranslateToEnglishForSearch(
+  input: string,
+  sourceLanguageBcp47: string | null
+): Promise<{ ok: boolean; text: string }> {
+  return sarvamTranslateText(input, sourceLanguageBcp47, "en-IN");
 }

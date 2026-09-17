@@ -57,11 +57,16 @@ import {
   normalizeAllowedLangList,
   clampLanguageToAllowed,
   languagesLooselyEqual,
+  isLanguageInAllowedList,
   decideLanguageSwitchAction,
   languageSwitchOptionsPrompt,
   parseLanguageChoice,
   persistSessionActiveLanguage,
   languageSwitchAcknowledgement,
+  languageSwitchDeclineAcknowledgement,
+  languageSwitchGiveUpAcknowledgement,
+  detectExplicitLanguageSwitchRequest,
+  stripLanguageSwitchPhrase,
   LANGUAGE_DISPLAY_NAME,
 } from "../services/voice-language-infer";
 import type { CallEvent, OutboundFrame } from "../types/telephony-provider";
@@ -73,7 +78,19 @@ import {
 } from "../services/voicebot-session";
 
 const VAD_ENERGY_THRESHOLD = 200;
-const VAD_SILENCE_MS = 800;
+/**
+ * Default silence gap (ms) treated as "caller has finished speaking". Was
+ * hardcoded at 800ms, which analysis of a real call recording (2026-09-16,
+ * streamId TN_29924018_12_2763408) showed was too short: 8 of 17 turns in
+ * that call had the bot's reply audio starting while the caller was still
+ * audibly speaking (2.5-5.8s of continued caller speech energy after the
+ * bot's first sentence began), consistent with natural mid-sentence pauses
+ * exceeding 800ms and being misread as "done talking". Raised to match
+ * exotel-voicebot.ts's already-proven VAD_SILENCE_TIMEOUT_MS default (1500ms)
+ * - notably, customer_settings.vad_silence_timeout_ms for this very customer
+ * was already set to 1500 in the database; this bot just wasn't reading it.
+ */
+const DEFAULT_VAD_SILENCE_MS = 1500;
 const MIN_UTTERANCE_BYTES = 1600; // ~100ms @ 8kHz 16-bit mono
 const MAX_UTTERANCE_BYTES = 5 * 1024 * 1024;
 /** Grace period added on top of estimated playback duration before we give up
@@ -409,6 +426,7 @@ type LanguageSwitchOutcome =
  * a (possibly trimmed) transcript otherwise.
  */
 async function handleLanguageSwitchFlow(
+  app: FastifyInstance,
   streamId: string,
   state: VodafoneCallState,
   transcript: string,
@@ -416,6 +434,8 @@ async function handleLanguageSwitchFlow(
 ): Promise<LanguageSwitchOutcome> {
   const { session, adapter, ws } = state;
   if (state.customerSettings?.voicebot_multilingual !== true) {
+    // Logged at "vodafone-voicebot: transcript ready" (has multilingual/allow_language_switch
+    // flags) — nothing further to add here without spamming every single turn.
     return { action: "continue", transcript };
   }
 
@@ -426,6 +446,41 @@ async function handleLanguageSwitchFlow(
     const pcm = await synthesizeSpeechToPcm8k(text, state.ttsConfig);
     sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
     sendFrames(ws, adapter.buildMarkFrame(streamId, nextMarkName(session)));
+  }
+
+  app.log.info(
+    {
+      streamId,
+      activeBcp,
+      allowedNorm,
+      sttLanguageCode,
+      allowLanguageSwitch: state.customerSettings?.allow_language_switch === true,
+      hasPendingSwitch: !!session.pendingLanguageSwitch,
+    },
+    "vodafone-voicebot: language switch flow turn"
+  );
+
+  // Unprompted, explicit ask ("Can you speak in English" / "मराठीत बोला"),
+  // checked on EVERY turn - first turn or any later turn - independent of
+  // the two-consecutive-detections gate below and even if an offer is
+  // already pending for a different language. Switches immediately, no
+  // confirmation round-trip, as long as the named language is one this
+  // tenant actually allows.
+  if (state.customerSettings?.allow_language_switch === true) {
+    const explicitTarget = detectExplicitLanguageSwitchRequest(transcript, allowedNorm);
+    if (explicitTarget && explicitTarget !== activeBcp) {
+      const n = persistSessionActiveLanguage(session, explicitTarget);
+      session.pendingLanguageSwitch = null;
+      session.discrepantLanguageCount = 0;
+      session.discrepantLanguageTarget = null;
+      app.log.info({ streamId, from: activeBcp, to: n }, "vodafone-voicebot: explicit language switch request honored");
+      const cleaned = stripLanguageSwitchPhrase(transcript, n);
+      if (cleaned.length > 3) {
+        return { action: "continue", transcript: cleaned };
+      }
+      await speak(languageSwitchAcknowledgement(n));
+      return { action: "handled" };
+    }
   }
 
   if (session.pendingLanguageSwitch) {
@@ -442,6 +497,7 @@ async function handleLanguageSwitchFlow(
     if (chosenTarget) {
       const n = persistSessionActiveLanguage(session, chosenTarget);
       session.pendingLanguageSwitch = null;
+      app.log.info({ streamId, from: activeBcp, to: n, via: choice.kind }, "vodafone-voicebot: pending language switch confirmed");
       // If the caller packed a real question in with the confirmation
       // ("yes, and also what are your hours"), strip the confirmation words
       // and answer the rest now, in the newly-confirmed language, instead
@@ -458,17 +514,22 @@ async function handleLanguageSwitchFlow(
     }
     if (choice.kind === "no") {
       session.pendingLanguageSwitch = null;
-      await speak(`Okay, we will continue in ${activeBcp}.`);
+      app.log.info({ streamId, stayingIn: activeBcp }, "vodafone-voicebot: pending language switch declined");
+      await speak(languageSwitchDeclineAcknowledgement(activeBcp));
       return { action: "handled" };
     }
     pending.unclearRetries += 1;
     const maxAttempts = state.customerSettings?.language_switch_max_attempts ?? 2;
+    app.log.info(
+      { streamId, unclearRetries: pending.unclearRetries, maxAttempts },
+      "vodafone-voicebot: pending language switch reply unclear"
+    );
     if (pending.unclearRetries <= maxAttempts) {
-      await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm));
+      await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm, activeBcp));
       return { action: "handled" };
     }
     session.pendingLanguageSwitch = null;
-    await speak(`I will continue in ${activeBcp}.`);
+    await speak(languageSwitchGiveUpAcknowledgement(activeBcp));
     return { action: "handled" };
   }
 
@@ -483,6 +544,22 @@ async function handleLanguageSwitchFlow(
     sttProvider: state.customerSettings?.stt_provider ?? "sarvam",
     allowedNorm,
   });
+  if (decision.action === "offer" || (clamped !== activeBcp && isLanguageInAllowedList(clamped, allowedNorm))) {
+    app.log.info(
+      {
+        streamId,
+        sttDetected: sttLanguageCode,
+        clamped,
+        activeBcp,
+        decision: decision.action,
+        discrepantLanguageCount: session.discrepantLanguageCount,
+        discrepantLanguageTarget: session.discrepantLanguageTarget,
+        allowLanguageSwitchFlag: state.customerSettings?.allow_language_switch === true,
+        languageSwitchOfferedThisCall: !!session.languageSwitchOfferedThisCall,
+      },
+      "vodafone-voicebot: passive language mismatch detected"
+    );
+  }
   if (decision.action === "offer") {
     session.pendingLanguageSwitch = {
       targetLanguage: decision.target,
@@ -492,7 +569,8 @@ async function handleLanguageSwitchFlow(
       unclearRetries: 0,
     };
     session.languageSwitchOfferedThisCall = true;
-    await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm));
+    app.log.info({ streamId, target: decision.target }, "vodafone-voicebot: language switch offer spoken");
+    await speak(languageSwitchOptionsPrompt(state.customerSettings, allowedNorm, activeBcp));
     return { action: "handled" };
   }
   return { action: "continue", transcript };
@@ -532,9 +610,12 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
       return;
     }
     const transcript = stt.transcript.trim();
-    app.log.info({ streamId, transcript, sttMs }, "vodafone-voicebot: transcript ready");
+    app.log.info(
+      { streamId, transcript, sttMs, sttLanguageCode: stt.language_code, sttLanguageHint },
+      "vodafone-voicebot: transcript ready"
+    );
 
-    const languageResult = await handleLanguageSwitchFlow(streamId, state, transcript, stt.language_code);
+    const languageResult = await handleLanguageSwitchFlow(app, streamId, state, transcript, stt.language_code);
     if (languageResult.action === "handled") return;
     const finalTranscript = languageResult.transcript;
 
@@ -848,6 +929,15 @@ function sendMarkAndTrackPlayback(state: VodafoneCallState, streamId: string, ou
   schedulePlaybackMarkFallback(session, outboundPcmBytes, session.mediaFormat.sample_rate || 8000);
 }
 
+/** Per-tenant override (customer_settings.vad_silence_timeout_ms, same field
+ *  and same clamp bounds exotel-voicebot.ts already uses) - falls back to
+ *  DEFAULT_VAD_SILENCE_MS when unset or out of range. */
+function resolveVadSilenceMs(state: VodafoneCallState): number {
+  const v = state.customerSettings?.vad_silence_timeout_ms;
+  if (v != null && Number.isFinite(v) && v >= 300 && v <= 30_000) return Math.floor(v);
+  return DEFAULT_VAD_SILENCE_MS;
+}
+
 /** Starts the silence timer only if it isn't already running — subsequent silent
  *  frames must NOT push it back out, or it would never elapse on a continuously
  *  streaming call (see the "media" handler's isSpeech/else-if split below). */
@@ -858,7 +948,7 @@ function armSilenceTimer(app: FastifyInstance, streamId: string): void {
     const s = calls.get(streamId);
     if (s) s.silenceTimer = null;
     void processUtterance(app, streamId);
-  }, VAD_SILENCE_MS);
+  }, resolveVadSilenceMs(state));
 }
 
 /** Cancels a pending silence timer — called when speech resumes, so a brief pause doesn't get cut off. */
@@ -885,31 +975,9 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
       const adapterForParsing = new VodafoneAdapter();
       let streamId: string | null = null;
 
-      // Diagnostic-only additions (2026-09-17, kept across the 2026-09-15
-      // behavioral rollback below): this route had ZERO visibility into how
-      // a connection actually ends - socket.on("close") logged nothing at
-      // all, there was no socket.on("error") handler, and VI's own "stop"
-      // event (which carries a `reason` string) had not fired once across
-      // every real call logged that day. These are pure logging, no
-      // behavior change, and are needed for THIS test to actually show
-      // what's happening instead of leaving us blind again.
-      socket.on("close", (code: number, reasonBuf: Buffer) => {
-        app.log.info(
-          { streamId, code, reason: reasonBuf?.toString("utf8") || null },
-          "vodafone-voicebot: raw socket closed"
-        );
-      });
-      socket.on("error", (err: Error) => {
-        app.log.error({ streamId, err: err.message }, "vodafone-voicebot: raw socket error");
-      });
-
       socket.on("message", (raw: Buffer) => {
         void (async () => {
-          const rawText = raw.toString("utf8");
-          if (!rawText.includes('"event":"media"')) {
-            app.log.info({ streamId, raw: rawText.slice(0, 2000) }, "vodafone-voicebot: raw inbound message");
-          }
-          const event = adapterForParsing.parseInboundMessage(rawText);
+          const event = adapterForParsing.parseInboundMessage(raw.toString("utf8"));
           if (!event) return;
 
           switch (event.type) {

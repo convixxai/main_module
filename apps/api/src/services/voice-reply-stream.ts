@@ -12,8 +12,17 @@
 // two more copies of the same ~15 lines.
 // ============================================================
 
-const FORCE_CUT_LEN = 220;
-const FORCE_CUT_SPACE_FLOOR = 72;
+// Raised from 220/72 (2026-09-16): a real call recording review found Marathi
+// replies getting cut off mid-sentence, and reading the code showed why - a
+// natural, conversational Marathi sentence (especially multi-clause direction-
+// giving or listing several details, which this bot does constantly) routinely
+// runs past 220 characters before its first "."/"।", so the old force-cut was
+// firing well before a genuine sentence boundary and chopping speech mid-
+// thought. Devanagari text also needs more raw character budget than English
+// for the same amount of spoken content (matras/combining marks count as
+// separate characters), so 220 was tighter for Marathi/Hindi than it looked.
+const FORCE_CUT_LEN = 320;
+const FORCE_CUT_SPACE_FLOOR = 100;
 
 /** Index of the last char of the next speakable slice in `s`, or -1 (buffer more). */
 export function findNextSentenceCut(s: string): number {
@@ -25,6 +34,11 @@ export function findNextSentenceCut(s: string): number {
     }
   }
   if (s.length >= FORCE_CUT_LEN) {
+    // Prefer cutting at a comma-like pause near the force-cut point over an
+    // arbitrary word boundary, so a forced cut still lands somewhere that
+    // sounds like a natural breath rather than a random chop mid-clause.
+    const commaIdx = s.lastIndexOf(",", FORCE_CUT_LEN);
+    if (commaIdx > FORCE_CUT_SPACE_FLOOR) return commaIdx;
     const sp = s.lastIndexOf(" ", FORCE_CUT_LEN);
     if (sp > FORCE_CUT_SPACE_FLOOR) return sp - 1;
     return FORCE_CUT_LEN - 1;
