@@ -992,9 +992,38 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
       const adapterForParsing = new VodafoneAdapter();
       let streamId: string | null = null;
 
+      // Diagnostic-only additions (2026-09-17): this route had ZERO visibility
+      // into how a connection actually ends - socket.on("close") logged
+      // nothing at all (not even that a close happened), there was no
+      // socket.on("error") handler, and VI's own "stop" event (which carries
+      // a `reason` string) has not fired even once across every real call
+      // today, successful or not - grep confirms 0 occurrences. That means
+      // every single disconnect today happened as a bare transport-level
+      // close, with nothing in our logs showing why. These three additions
+      // are pure logging - no behavior changes - so the next real call
+      // finally shows the actual WS close code/reason and raw inbound
+      // payloads instead of silence.
+      socket.on("close", (code: number, reasonBuf: Buffer) => {
+        app.log.info(
+          { streamId, code, reason: reasonBuf?.toString("utf8") || null },
+          "vodafone-voicebot: raw socket closed"
+        );
+      });
+      socket.on("error", (err: Error) => {
+        app.log.error({ streamId, err: err.message }, "vodafone-voicebot: raw socket error");
+      });
+
       socket.on("message", (raw: Buffer) => {
         void (async () => {
-          const event = adapterForParsing.parseInboundMessage(raw.toString("utf8"));
+          const rawText = raw.toString("utf8");
+          // Full raw payload for every non-media event (rare, small) -
+          // media frames are logged via the existing throttled
+          // "media frame received" summary instead, since every 100ms
+          // frame's base64 payload would flood the log otherwise.
+          if (!rawText.includes('"event":"media"')) {
+            app.log.info({ streamId, raw: rawText.slice(0, 2000) }, "vodafone-voicebot: raw inbound message");
+          }
+          const event = adapterForParsing.parseInboundMessage(rawText);
           if (!event) return;
 
           switch (event.type) {
