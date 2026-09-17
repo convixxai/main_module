@@ -537,6 +537,19 @@ async function handleLanguageSwitchFlow(
   if (!sttLanguageCode) {
     return { action: "continue", transcript };
   }
+  // A single short utterance ("Hello", "Sir", "Hi") is not a reliable signal
+  // of which language the caller wants to continue in - these are
+  // near-universal filler/loanwords in Indian English regardless of the
+  // caller's actual language. Mirrors exotel-voicebot.ts's isShortAmbiguous
+  // guard, which this route never carried over. Found 2026-09-17: a caller
+  // saying "Hello" then "Sir" (nothing else) was enough to cross the
+  // 2-consecutive-detections threshold below and falsely trigger a spoken
+  // "switch to English?" offer, derailing several turns before the caller
+  // even asked their real question.
+  const isShortAmbiguous = transcript.trim().length <= 8;
+  if (isShortAmbiguous) {
+    return { action: "continue", transcript };
+  }
   const clamped = clampLanguageToAllowed(sttLanguageCode, allowedNorm, activeBcp);
   const decision = decideLanguageSwitchAction(session, state.customerSettings, {
     multilingual: true,
