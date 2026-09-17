@@ -738,17 +738,7 @@ export async function runAskPipeline(params: {
     };
   }
 
-  // Skipped for multilingual tenants: kb_direct returns the KB entry's stored
-  // answer text completely verbatim, with no LLM call at all - so none of the
-  // agent's language rules, grammar instructions, or landmark-accuracy rules
-  // apply to it (they're all injected into the LLM prompt, which this branch
-  // never calls). Confirmed live 2026-09-16: a Marathi caller's very first
-  // question hit this fast path on a high-confidence match against an
-  // English-authored KB entry and got the raw English text spoken back,
-  // prompting the caller to ask "can you speak in Marathi?" on their next
-  // turn. For a single-language tenant this is safe (the caller and the KB
-  // are always the same language), so the latency/cost win is kept there.
-  if (topMatch.distance < directTh && history.length === 0 && !multilingual) {
+  if (topMatch.distance < directTh && history.length === 0) {
     trace?.("pipeline_exit", {
       branch: "kb_direct",
       distance: topMatch.distance,
