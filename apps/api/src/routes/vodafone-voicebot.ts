@@ -172,9 +172,23 @@ const VODAFONE_FRAME_DURATION_MS = 100;
  * each new connection - the earlier Cartesia-timeout fix addressed a real
  * but separate risk (an unbounded hang) and did not touch this, which is
  * why the repeating-greeting symptom persisted even with healthy, fast
- * Cartesia responses. Sleeping ~50% of each frame's real-time duration
- * keeps Vodafone's ingress buffer topped up without overflowing it - the
- * same ratio Exotel already uses successfully.
+ * Cartesia responses.
+ *
+ * Ratio note (revised 2026-09-17, same day): initially copied Exotel's
+ * "sleep 50% of the frame duration" (2x real-time delivery) verbatim, since
+ * that's the exact ratio its own comment credits with fixing the identical
+ * ingress-overflow problem there. But Exotel's chunks are 400ms/6400 bytes -
+ * 4x bigger than Vodafone's fixed 100ms/1600-byte frames - so the same ratio
+ * pushes audio at Vodafone twice as fast per wall-clock second as it does at
+ * Exotel. Real calls after deploying the 50% version kept ending in near-
+ * total silence with no reconnect and no error - consistent with VI's own
+ * playback buffer (whatever its size) being fed faster than it drains and
+ * silently dropping the overflow, which a same-process ingest-byte-count
+ * check on our end can never detect since VI still acknowledges receiving
+ * every byte. Sleeping the FULL frame duration (ratio 1.0, true real-time)
+ * removes that ambiguity entirely: VI is never sent audio faster than it
+ * should be playing it, so nothing downstream of us can be asked to buffer
+ * ahead of real-time.
  */
 async function sendFramesPaced(
   ws: WebSocket,
@@ -182,7 +196,7 @@ async function sendFramesPaced(
   isStale?: () => boolean
 ): Promise<void> {
   const list = Array.isArray(frames) ? frames : [frames];
-  const sleepMs = Math.floor(VODAFONE_FRAME_DURATION_MS * 0.5);
+  const sleepMs = VODAFONE_FRAME_DURATION_MS;
   for (let i = 0; i < list.length; i++) {
     // Pacing a long buffer (a full greeting is ~100 frames, ~5s of real
     // wall-clock time here) means a reconnect can now land mid-send, not
