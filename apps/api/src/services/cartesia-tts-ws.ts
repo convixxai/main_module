@@ -22,6 +22,17 @@ export type CartesiaWsSpeakParams = {
   maxBufferDelayMs?: number;
   continue?: boolean;
   contextId?: string;
+  /**
+   * Marks a clean boundary between this transcript submission and the next
+   * one on the same (continuation) context_id. Per Cartesia's own docs,
+   * without this, multiple `continue:true` pushes on one context are treated
+   * as one undifferentiated stream with no documented guarantee about where
+   * one submission's audio ends and the next begins - exactly the ambiguity
+   * that would explain a caller hearing part of a sentence repeated at a
+   * sentence boundary (found 2026-09-16/17, beginReplyStream's per-sentence
+   * pushes never set this).
+   */
+  flush?: boolean;
   /** See CartesiaTtsParams.normalization in services/cartesia.ts. Requires sonic-3.6+. */
   normalization?: string | null;
 };
@@ -66,6 +77,13 @@ type CartesiaWsInbound =
       title?: string;
       error_code?: string;
       done?: boolean;
+    }
+  | {
+      /** Ack for a `flush: true` request - carries no audio, purely a boundary marker. */
+      type: "flush_done";
+      context_id?: string;
+      flush_id?: number;
+      status_code?: number;
     };
 
 const CONTEXT_TIMEOUT_MS = 120_000;
@@ -334,6 +352,11 @@ export class CartesiaTtsSession {
           transcript: text,
           contextId,
           continue: moreComing,
+          // Marks this sentence as its own clean segment within the shared
+          // context, instead of leaving Cartesia to treat every push on this
+          // context as one undifferentiated stream - see the flush field's
+          // doc comment on CartesiaWsSpeakParams for why.
+          flush: true,
         })
       );
     };
@@ -382,6 +405,9 @@ export class CartesiaTtsSession {
       continue: params.continue ?? false,
       max_buffer_delay_ms: params.maxBufferDelayMs ?? 0,
     };
+    if (params.flush) {
+      body.flush = true;
+    }
 
     if (params.language?.trim()) {
       body.language = params.language.trim();
@@ -471,6 +497,11 @@ export class CartesiaTtsSession {
 
     const pending = this.pending.get(contextId);
     if (!pending) return;
+
+    if (msg.type === "flush_done") {
+      // Pure boundary ack, no audio attached - nothing to do.
+      return;
+    }
 
     if (msg.type === "error") {
       this.pending.delete(contextId);

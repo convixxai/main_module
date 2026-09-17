@@ -355,6 +355,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
     <div class="nav-tabs-inner">
       <button class="nav-tab active" id="nav-tab-kb" data-view="kb">Knowledgebase</button>
       <button class="nav-tab" id="nav-tab-prompt" data-view="prompt">System prompt</button>
+      <button class="nav-tab" id="nav-tab-suggested" data-view="suggested">Suggested KB<span id="suggested-tab-count"></span></button>
     </div>
   </nav>
 
@@ -423,6 +424,33 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
           <span class="prompt-save-hint" id="prompt-save-hint"></span>
           <div class="spacer"></div>
           <button class="btn btn-primary" id="prompt-save-btn" disabled>Save changes</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-suggested" hidden>
+      <div class="toolbar">
+        <div class="stat-chip"><strong id="stat-suggested-total">...</strong> pending</div>
+        <div class="spacer"></div>
+      </div>
+      <div class="panel">
+        <table class="kb-table">
+          <thead>
+            <tr>
+              <th>Question callers asked</th>
+              <th>Bot's answer</th>
+              <th>Asked</th>
+              <th>Last asked</th>
+              <th class="col-actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="suggested-tbody">
+            <tr class="loading-row"><td colspan="5"><span class="spinner dark"></span> Loading…</td></tr>
+          </tbody>
+        </table>
+        <div class="empty-state" id="suggested-empty-state" hidden>
+          <div class="big">✅</div>
+          <div>No suggested questions right now - the bot hasn't hit a knowledgebase gap recently.</div>
         </div>
       </div>
     </div>
@@ -553,7 +581,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
   var API = '/kb-admin/ganeshotsav';
   var state = {
     entries: [], selected: new Set(), filtered: [], editingId: null, sessionTimer: null,
-    allowedLanguages: [], sourceLanguage: 'en-IN',
+    allowedLanguages: [], sourceLanguage: 'en-IN', suggestedEntries: [],
     // Populated when the edit modal opens: language_code -> {question, answer, is_source, manually_edited, translation_status}
     entryTranslations: {}, activeLanguage: 'en-IN'
   };
@@ -651,6 +679,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
       loadEntries();
       loadLanguages();
       checkTranslationStatus();
+      loadSuggestedEntries();
     } catch (err) {
       $('login-error').textContent = err.message || 'Invalid username or password';
       $('login-error').hidden = false;
@@ -831,17 +860,18 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
     renderLangTabs();
   }
 
-  $('add-entry-btn').addEventListener('click', function () {
+  function openAddEntryModal(prefillQuestion) {
     state.editingId = null;
     state.entryTranslations = {};
     state.activeLanguage = state.sourceLanguage;
     $('entry-modal-title').textContent = 'Add entry';
-    $('entry-question').value = '';
+    $('entry-question').value = prefillQuestion || '';
     $('entry-answer').value = '';
     renderLangTabs();
     openModal('entry-modal-overlay');
-    $('entry-question').focus();
-  });
+    prefillQuestion ? $('entry-answer').focus() : $('entry-question').focus();
+  }
+  $('add-entry-btn').addEventListener('click', function () { openAddEntryModal(''); });
 
   async function openEditModal(id) {
     var e = state.entries.find(function (x) { return x.id === id; });
@@ -894,8 +924,8 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
           openModal('cascade-confirm-overlay');
         }
       } else {
-        await api('/api/entries', { method: 'POST', body: JSON.stringify({ question: question, answer: answer }) });
-        toast(state.allowedLanguages.length > 1 ? 'Entry added - translating in background' : 'Entry added', 'ok');
+        var addResult = await api('/api/entries', { method: 'POST', body: JSON.stringify({ question: question, answer: answer }) });
+        toast(addResult.translationsPending ? 'Entry added - translating in background' : 'Entry added', 'ok');
         closeModal('entry-modal-overlay');
         loadEntries();
         checkTranslationStatus();
@@ -1072,12 +1102,90 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
   function switchView(view) {
     $('view-kb').hidden = view !== 'kb';
     $('view-prompt').hidden = view !== 'prompt';
+    $('view-suggested').hidden = view !== 'suggested';
     $('nav-tab-kb').classList.toggle('active', view === 'kb');
     $('nav-tab-prompt').classList.toggle('active', view === 'prompt');
+    $('nav-tab-suggested').classList.toggle('active', view === 'suggested');
     if (view === 'prompt' && !promptState.loaded) loadAgentPrompt();
+    if (view === 'suggested') loadSuggestedEntries();
   }
   $('nav-tab-kb').addEventListener('click', function () { switchView('kb'); });
   $('nav-tab-prompt').addEventListener('click', function () { switchView('prompt'); });
+  $('nav-tab-suggested').addEventListener('click', function () { switchView('suggested'); });
+
+  // ---------- suggested knowledgebase (queries the bot couldn't answer live on calls) ----------
+  function fmtDateTime(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) +
+      ', ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+
+  async function loadSuggestedEntries() {
+    $('suggested-tbody').innerHTML = '<tr class="loading-row"><td colspan="5"><span class="spinner dark"></span> Loading…</td></tr>';
+    try {
+      var data = await api('/api/suggested-entries');
+      state.suggestedEntries = data.entries || [];
+      renderSuggested();
+    } catch (err) {
+      if (err.message !== 'session_expired') toast('Failed to load suggested entries: ' + err.message, 'err');
+    }
+  }
+
+  function renderSuggested() {
+    var entries = state.suggestedEntries || [];
+    $('stat-suggested-total').textContent = entries.length;
+    var countLabel = entries.length > 0 ? ' (' + entries.length + ')' : '';
+    $('suggested-tab-count').textContent = countLabel;
+
+    var tbody = $('suggested-tbody');
+    if (entries.length === 0) {
+      tbody.innerHTML = '';
+      $('suggested-empty-state').hidden = false;
+      return;
+    }
+    $('suggested-empty-state').hidden = true;
+
+    tbody.innerHTML = entries.map(function (e) {
+      var langChip = e.question_language_code ? ' <span class="stat-chip" style="padding:1px 7px;font-size:11px">' + esc(langLabel(e.question_language_code)) + '</span>' : '';
+      var timesChip = e.occurrence_count > 1 ? ' <span class="stat-chip" style="padding:1px 7px;font-size:11px">asked ' + e.occurrence_count + 'x</span>' : '';
+      return '' +
+        '<tr data-id="' + esc(e.id) + '">' +
+          '<td class="q-cell"><div class="clamp-2">' + esc(e.question) + '</div>' + langChip + timesChip + '</td>' +
+          '<td class="a-cell"><div class="clamp-2" style="color:var(--text-dim)">' + esc(e.answer_given || '') + '</div></td>' +
+          '<td class="row-date">' + esc(fmtDate(e.first_asked_at)) + '</td>' +
+          '<td class="row-date">' + esc(fmtDateTime(e.last_asked_at)) + '</td>' +
+          '<td class="col-actions">' +
+            '<button class="btn btn-secondary btn-sm" data-ignore="' + esc(e.id) + '">Ignore</button>' +
+            '<button class="btn btn-primary btn-sm" data-add-to-kb="' + esc(e.id) + '">Add to KB</button>' +
+          '</td>' +
+        '</tr>';
+    }).join('');
+
+    tbody.querySelectorAll('[data-ignore]').forEach(function (b) {
+      b.addEventListener('click', function () { resolveSuggestedEntry(b.getAttribute('data-ignore'), 'ignore'); });
+    });
+    tbody.querySelectorAll('[data-add-to-kb]').forEach(function (b) {
+      b.addEventListener('click', function () { resolveSuggestedEntry(b.getAttribute('data-add-to-kb'), 'add-to-kb'); });
+    });
+  }
+
+  async function resolveSuggestedEntry(id, action) {
+    try {
+      var result = await api('/api/suggested-entries/' + encodeURIComponent(id) + '/' + action, { method: 'POST' });
+      state.suggestedEntries = (state.suggestedEntries || []).filter(function (e) { return e.id !== id; });
+      renderSuggested();
+      if (action === 'ignore') {
+        toast('Suggestion ignored', 'ok');
+      } else {
+        toast('Marked handled - fill in the answer and save to add it to the knowledgebase', 'ok');
+        openAddEntryModal(result.question || '');
+      }
+    } catch (err) {
+      if (err.message !== 'session_expired') toast('Failed: ' + err.message, 'err');
+    }
+  }
 
   // ---------- system prompt editor ----------
   async function loadAgentPrompt() {
@@ -1162,6 +1270,7 @@ export const KB_ADMIN_GANESHOTSAV_HTML = `<!doctype html>
         loadEntries();
         loadLanguages();
         checkTranslationStatus();
+        loadSuggestedEntries();
         return;
       }
     } catch (e) { /* fall through to login */ }

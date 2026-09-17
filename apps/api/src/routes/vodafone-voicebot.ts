@@ -42,6 +42,7 @@ import { getTelephonySettings } from "../services/telephony-settings";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { runAskPipeline } from "./ask";
 import { runSimulatorStt } from "./voice-simulator";
+import { logSuggestedKbEntryIfNoAnswer } from "../services/suggested-kb";
 import { createRagTrace } from "../services/rag-trace";
 import { synthesizeSpeechToPcm8k } from "../services/vodafone-tts";
 import { pcmDurationMs } from "../services/pcm-audio";
@@ -720,6 +721,14 @@ async function answerUtteranceBatch(
     { streamId, askMs: askResult.response_time_ms, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (batch)"
   );
+  logSuggestedKbEntryIfNoAnswer({
+    customerId: session.customerId,
+    question: transcript,
+    answer: askResult.answer,
+    languageCode: sttLanguageCode,
+    source: "vodafone-voicebot",
+    log: app.log,
+  });
   const answer = askResult.answer.trim();
   if (!answer) return;
 
@@ -835,6 +844,14 @@ async function answerUtteranceStreaming(
     { streamId, askMs: askResult.response_time_ms, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (streaming)"
   );
+  logSuggestedKbEntryIfNoAnswer({
+    customerId: session.customerId,
+    question: transcript,
+    answer: askResult.answer,
+    languageCode: sttLanguageCode,
+    source: "vodafone-voicebot",
+    log: app.log,
+  });
 
   await sentences.flush();
 

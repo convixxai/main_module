@@ -42,6 +42,20 @@ const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 12; // 12h, a stale forgotten-open tab 
 const SOURCE_LANGUAGE_CODE = "en-IN"; // fallback when an entry's language can't be detected from its own text
 
 /**
+ * Paused 2026-09-17 at the user's request: add/bulk-upload no longer
+ * auto-translates a new entry into the tenant's other allowed languages.
+ * Entries are saved and searchable in whatever language they were typed in
+ * (source_language_code is still detected and stored), but the Sarvam
+ * translate fan-out is skipped entirely - a separate, deliberate translation
+ * feature is planned instead of triggering it implicitly on every add. The
+ * underlying fan-out machinery (kb-translation.ts, the cascade/backfill
+ * scripts, the translation-status endpoint) is untouched and still works -
+ * flip this back to true to resume auto-fan-out-on-add once that separate
+ * feature is ready to build on top of it.
+ */
+const AUTO_TRANSLATE_ON_ADD = false;
+
+/**
  * Detects which of this tenant's allowed languages an entry was actually
  * authored in (script-based, via the same inferLanguageFromTranscript used
  * on live calls) instead of always assuming English. Found 2026-09-16: a
@@ -252,22 +266,22 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       );
       const entry = r.rows[0];
 
-      // Respond immediately - the entry itself is already saved and
-      // searchable in its own (source) language. Translation into the
-      // tenant's other allowed languages runs detached in the background so
-      // the admin isn't stuck waiting on a Sarvam round-trip per language;
-      // poll /api/entries/translation-status for progress.
-      runFanOutInBackground(app.log, "kb-admin-ganeshotsav: translation fan-out failed on add", () =>
-        fanOutNewKbEntry({
-          kbEntryId: entry.id,
-          customerId: CUSTOMER_ID,
-          sourceLanguageCode,
-          question,
-          answer,
-          allowedLanguageCodes: allowed,
-        })
-      );
-      return reply.status(201).send({ ...entry, translationsPending: allowed.length > 1 });
+      // Auto-translate-on-add is paused (AUTO_TRANSLATE_ON_ADD) - entry is
+      // saved and searchable in its own (source) language only, no Sarvam
+      // calls triggered here right now.
+      if (AUTO_TRANSLATE_ON_ADD) {
+        runFanOutInBackground(app.log, "kb-admin-ganeshotsav: translation fan-out failed on add", () =>
+          fanOutNewKbEntry({
+            kbEntryId: entry.id,
+            customerId: CUSTOMER_ID,
+            sourceLanguageCode,
+            question,
+            answer,
+            allowedLanguageCodes: allowed,
+          })
+        );
+      }
+      return reply.status(201).send({ ...entry, translationsPending: AUTO_TRANSLATE_ON_ADD && allowed.length > 1 });
     }
   );
 
@@ -537,44 +551,93 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
         client.release();
       }
 
-      // Respond immediately - every row is already saved and searchable in
-      // its own (source) language. Translation into the tenant's other
-      // allowed languages runs detached in the background (batched, paced -
-      // see kb-translation.ts's pacedSarvamTranslate - so it respects
-      // Sarvam's rate limit regardless of file size) and keeps going even if
-      // the admin closes this tab; poll /api/entries/translation-status for
-      // progress. This is the fix for bulk-upload appearing to "hang"/"not
-      // work": it used to await this whole loop before responding, which for
-      // a large file could take minutes with zero feedback - see chat
-      // context 2026-09-16 for the resulting duplicate-upload races.
-      const BATCH_SIZE = 2; // Sarvam's translate endpoint rate-limits in short bursts - see sarvamTranslateText
-      runFanOutInBackground(app.log, "kb-admin-ganeshotsav: translation fan-out failed on bulk-upload", async () => {
-        for (let i = 0; i < insertedIds.length; i += BATCH_SIZE) {
-          const batchIds = insertedIds.slice(i, i + BATCH_SIZE);
-          const batchRows = rowsToInsert.slice(i, i + BATCH_SIZE);
-          const batchLangs = sourceLanguages.slice(i, i + BATCH_SIZE);
-          await Promise.all(
-            batchIds.map((entryId, j) =>
-              fanOutNewKbEntry({
-                kbEntryId: entryId,
-                customerId: CUSTOMER_ID,
-                sourceLanguageCode: batchLangs[j],
-                question: batchRows[j].question,
-                answer: batchRows[j].answer,
-                allowedLanguageCodes: allowed,
-              })
-            )
-          );
-        }
-      });
+      // Auto-translate-on-upload is paused (AUTO_TRANSLATE_ON_ADD) - every
+      // row is saved and searchable in its own (source) language only, no
+      // Sarvam calls triggered here right now.
+      if (AUTO_TRANSLATE_ON_ADD) {
+        const BATCH_SIZE = 2; // Sarvam's translate endpoint rate-limits in short bursts - see sarvamTranslateText
+        runFanOutInBackground(app.log, "kb-admin-ganeshotsav: translation fan-out failed on bulk-upload", async () => {
+          for (let i = 0; i < insertedIds.length; i += BATCH_SIZE) {
+            const batchIds = insertedIds.slice(i, i + BATCH_SIZE);
+            const batchRows = rowsToInsert.slice(i, i + BATCH_SIZE);
+            const batchLangs = sourceLanguages.slice(i, i + BATCH_SIZE);
+            await Promise.all(
+              batchIds.map((entryId, j) =>
+                fanOutNewKbEntry({
+                  kbEntryId: entryId,
+                  customerId: CUSTOMER_ID,
+                  sourceLanguageCode: batchLangs[j],
+                  question: batchRows[j].question,
+                  answer: batchRows[j].answer,
+                  allowedLanguageCodes: allowed,
+                })
+              )
+            );
+          }
+        });
+      }
 
       return reply.status(201).send({
         inserted: rowsToInsert.length,
         skipped: skippedBlank,
-        translationsPending: allowed.length > 1 ? rowsToInsert.length : 0,
+        translationsPending: AUTO_TRANSLATE_ON_ADD && allowed.length > 1 ? rowsToInsert.length : 0,
       });
     });
   });
+
+  // ---------- suggested knowledgebase: queries the bot couldn't answer live on calls ----------
+  app.get("/kb-admin/ganeshotsav/api/suggested-entries", async (request, reply) => {
+    const user = await requireSession(request, reply);
+    if (!user) return;
+    const r = await pool.query(
+      `SELECT id, question, question_language_code, answer_given, occurrence_count,
+              first_asked_at, last_asked_at
+       FROM suggested_kb_entries
+       WHERE customer_id = $1 AND status = 'pending'
+       ORDER BY last_asked_at DESC`,
+      [CUSTOMER_ID]
+    );
+    return reply.send({ entries: r.rows });
+  });
+
+  app.post<{ Params: { id: string } }>(
+    "/kb-admin/ganeshotsav/api/suggested-entries/:id/ignore",
+    async (request, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
+      const r = await pool.query(
+        `UPDATE suggested_kb_entries SET status = 'ignored', updated_at = now()
+         WHERE id = $1 AND customer_id = $2 AND status = 'pending' RETURNING id`,
+        [request.params.id, CUSTOMER_ID]
+      );
+      if (r.rows.length === 0) {
+        return reply.status(404).send({ error: "Suggested entry not found (or already handled)" });
+      }
+      return reply.send({ ok: true });
+    }
+  );
+
+  // Marks the suggestion handled and hands back its question/answer so the UI
+  // can prefill the normal Add Entry modal - this endpoint itself only updates
+  // status, it does not create a kb_entries row (an admin still writes/reviews
+  // the real answer text through the existing add-entry flow).
+  app.post<{ Params: { id: string } }>(
+    "/kb-admin/ganeshotsav/api/suggested-entries/:id/add-to-kb",
+    async (request, reply) => {
+      const user = await requireSession(request, reply);
+      if (!user) return;
+      const r = await pool.query(
+        `UPDATE suggested_kb_entries SET status = 'added', updated_at = now()
+         WHERE id = $1 AND customer_id = $2 AND status = 'pending'
+         RETURNING id, question, question_language_code, answer_given`,
+        [request.params.id, CUSTOMER_ID]
+      );
+      if (r.rows.length === 0) {
+        return reply.status(404).send({ error: "Suggested entry not found (or already handled)" });
+      }
+      return reply.send({ ok: true, ...r.rows[0] });
+    }
+  );
 
   // ---------- downloadable template matching the required format exactly ----------
   app.get("/kb-admin/ganeshotsav/api/template.xlsx", async (request, reply) => {
