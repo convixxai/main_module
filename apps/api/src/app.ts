@@ -33,6 +33,7 @@ import { sarvamTtsSimulatorRoutes } from "./routes/sarvam-tts-simulator";
 import { voiceCartesiaTestConsoleRoutes } from "./routes/voice-cartesia-test-console";
 import { qaTestConsoleRoutes } from "./routes/qa-test-console";
 import { kbAdminGaneshotsavRoutes } from "./routes/kb-admin-ganeshotsav";
+import { vodafoneWsSimulatorRoutes } from "./routes/vodafone-ws-simulator";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -91,6 +92,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)
   app.register(outboundCampaignRoutes);         // Outbound Campaign management & triggering
   app.register(kbAdminGaneshotsavRoutes);       // Temporary username/password-protected KB admin page (Ganeshotsav project)
+  app.register(vodafoneWsSimulatorRoutes);      // Standalone VI WebSocket simulator page - does not touch the live Vodafone route
 
   return app;
 }
