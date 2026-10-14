@@ -78,3 +78,19 @@ export interface ExotelCredentials {
   api_key: string | null;
   api_token: string | null;
 }
+
+/**
+ * credentials_enc shape for provider_id='vodafone', OBD Campaign API usage
+ * (see services/vodafone-obd.ts). Set via the existing generic
+ * `credentials` blob on PUT /customers/:customerId/vodafone-settings
+ * (routes/vodafone-settings.ts) — same login/password pair VI issued at
+ * onboarding for the CPaaS portal (shared across CTC/OBD/Schema/Streaming
+ * APIs per the vendor doc), plus the DNI (the VI server CLI number this
+ * tenant dials outbound from) used by OBD campaign leads/base rows.
+ */
+export interface VodafoneObdCredentials {
+  username: string | null;
+  password: string | null;
+  /** Server CLI / DNI used as the outbound-dialing number for OBD campaigns. */
+  dni: string | null;
+}

@@ -344,6 +344,33 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   session.greetingText = greetingText ?? undefined;
   session.voiceRagCustomerCache = { systemPrompt, defaultNoKb: null };
 
+  // Outbound OBD campaign call (routes/outbound-campaigns.ts): VI's portal
+  // Flow forwards these as custom_parameters on the `start` event, per the
+  // "With Flow" design in services/vodafone-obd.ts. Mirrors how
+  // exotel-voicebot.ts flags session.mode = "outbound" for a campaign-linked
+  // call today — no dual-leg/wait-for-speech state machine (that was removed
+  // 2026-09 as purposeless without a second leg to coordinate with); the
+  // only difference from a normal inbound call is which text is spoken
+  // first: the campaign's own script instead of the tenant's default
+  // greeting. The rest of the call (RAG pipeline, language handling, etc.)
+  // proceeds exactly like any inbound call.
+  let campaignGreetingText: string | null = null;
+  if (event.customParameters?.call_type === "outbound" && event.customParameters?.campaign_id) {
+    session.mode = "outbound";
+    try {
+      const campaignRes = await pool.query(
+        `SELECT script_text FROM outbound_campaigns WHERE id = $1 AND customer_id = $2 AND status != 'deleted'`,
+        [event.customParameters.campaign_id, customerId]
+      );
+      campaignGreetingText = campaignRes.rows[0]?.script_text ?? null;
+    } catch (err) {
+      app.log.error(
+        { err, customerId, campaignId: event.customParameters.campaign_id },
+        "vodafone-voicebot: failed to load campaign script_text, falling back to default greeting"
+      );
+    }
+  }
+
   const ttsConfig = await resolveTtsConfig(
     (customerSettings?.tts_provider as "sarvam" | "elevenlabs" | "cartesia") ?? "sarvam",
     agentId,
@@ -367,7 +394,9 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   app.log.info({ customerId, streamId: event.streamId, callId: event.callId }, "vodafone-voicebot: call started");
 
   const greeting =
-    session.greetingText || resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
+    campaignGreetingText ||
+    session.greetingText ||
+    resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
     sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));

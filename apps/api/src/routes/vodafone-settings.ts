@@ -3,16 +3,19 @@
 // CRUD for company_telephony_settings where provider_id='vodafone' - mirrors
 // exotel-settings.ts's shape for company_telephony_settings/customer_exotel_settings.
 //
-// There is no Vodafone outbound-call-creation REST API to wrap here (VI's
-// contract for that is still undocumented, see
-// services/vodafone-adapter.ts's triggerOutboundCall). VI's model is the
-// reverse of Exotel's: VI connects out to a WebSocket URL that the customer
-// configures on VI's own Streaming Object, we never call VI to start a
-// stream. So this route only captures what our side actually needs to
-// accept that inbound connection (is_enabled), plus a generic, optional
-// credentials blob in case VI's auth mechanism (still open, see roadmap
-// §8.5.1 item 3) turns out to need one, and returns the WebSocket URL to
-// hand to VI's config UI.
+// There is no Vodafone single-ad-hoc-outbound-call REST API to wrap here
+// (VI's contract for that is still undocumented, see
+// services/vodafone-adapter.ts's triggerOutboundCall). VI's inbound model is
+// the reverse of Exotel's: VI connects out to a WebSocket URL that the
+// customer configures on VI's own Streaming Object, we never call VI to
+// start a stream. So this route captures what our side needs to accept that
+// inbound connection (is_enabled), a generic optional credentials blob in
+// case VI's auth mechanism (still open, see roadmap §8.5.1 item 3) turns out
+// to need one, and `vi_flow_id` — the VI portal Flow id used for OBD
+// outbound campaigns (routes/outbound-campaigns.ts, services/vodafone-obd.ts).
+// `vi_flow_id` lives here (one per tenant's WS/Streaming Object config, set
+// up once) rather than being passed per-campaign, since it's tied to the
+// tenant's Streaming node wiring, not to any individual campaign.
 //
 // Reference: docs/VOICE_PLATFORM_ARCHITECTURE_REVIEW_AND_ROADMAP_2026-09-07.md §8.5, §8.5.1
 // ============================================================
@@ -32,6 +35,15 @@ const upsertVodafoneSettingsSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
   /** Opaque credentials blob (shape TBD - VI's auth/handshake mechanism is undocumented). Stored encrypted if provided; never read back in plaintext. */
   credentials: z.record(z.string(), z.string()).optional(),
+  /**
+   * VI portal Flow id for OBD outbound campaigns. The Flow must already
+   * contain a Streaming node bound to this tenant's Vodafone WS endpoint
+   * (one-time manual setup in VI's portal, outside this API) — see
+   * services/vodafone-obd.ts header comment. Stored under metadata.vi_flow_id
+   * (merged with any `metadata` also given in this request), surfaced at the
+   * top level of responses for convenience.
+   */
+  vi_flow_id: z.string().min(1).optional(),
 });
 
 async function loadRow(customerId: string) {
@@ -44,6 +56,11 @@ async function loadRow(customerId: string) {
     [customerId]
   );
   return result.rows[0] ?? null;
+}
+
+function withFlowIdSurfaced(row: Record<string, unknown>): Record<string, unknown> {
+  const metadata = (row.metadata as Record<string, unknown> | null) ?? {};
+  return { ...row, vi_flow_id: (metadata.vi_flow_id as string | undefined) ?? null };
 }
 
 export async function vodafoneSettingsRoutes(app: FastifyInstance): Promise<void> {
@@ -60,7 +77,7 @@ export async function vodafoneSettingsRoutes(app: FastifyInstance): Promise<void
       }
 
       const urls = vodafoneVoicebotUrlForCustomer(customerId, request);
-      return reply.send({ ...row, ...urls });
+      return reply.send({ ...withFlowIdSurfaced(row), ...urls });
     }
   );
 
@@ -87,6 +104,16 @@ export async function vodafoneSettingsRoutes(app: FastifyInstance): Promise<void
       const d = body.data;
       const credentialsEnc = d.credentials ? encrypt(JSON.stringify(d.credentials)) : null;
 
+      // vi_flow_id lives inside the generic metadata jsonb column
+      // (metadata.vi_flow_id), merged with any `metadata` also given in this
+      // request rather than replacing it outright, and layered on top of
+      // whatever metadata already existed for this tenant.
+      let metadataToWrite: Record<string, unknown> | null = null;
+      if (d.metadata !== undefined || d.vi_flow_id !== undefined) {
+        metadataToWrite = { ...((existing?.metadata as Record<string, unknown>) ?? {}), ...(d.metadata ?? {}) };
+        if (d.vi_flow_id !== undefined) metadataToWrite.vi_flow_id = d.vi_flow_id;
+      }
+
       const result = await pool.query(
         `INSERT INTO company_telephony_settings (
            customer_id, provider_id, credentials_enc, is_enabled, use_sandbox, metadata
@@ -111,7 +138,7 @@ export async function vodafoneSettingsRoutes(app: FastifyInstance): Promise<void
           credentialsEnc,
           d.is_enabled ?? null,
           d.use_sandbox ?? null,
-          d.metadata ? JSON.stringify(d.metadata) : null,
+          metadataToWrite ? JSON.stringify(metadataToWrite) : null,
         ]
       );
 
@@ -120,7 +147,7 @@ export async function vodafoneSettingsRoutes(app: FastifyInstance): Promise<void
       const row = result.rows[0];
       const urls = vodafoneVoicebotUrlForCustomer(customerId, request);
       return reply.send({
-        ...row,
+        ...withFlowIdSurfaced(row),
         ...urls,
         ...(previousProviderId && previousProviderId !== "vodafone"
           ? { switched_from_provider_id: previousProviderId }

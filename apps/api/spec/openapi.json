@@ -1559,7 +1559,39 @@
             "type": "string",
             "format": "uuid",
             "nullable": true,
-            "description": "FK to company_phone_numbers. Null falls back to customer_exotel_settings.default_outbound_caller_id || inbound_phone_number when triggering calls."
+            "description": "FK to company_phone_numbers. Null falls back to customer_exotel_settings.default_outbound_caller_id || inbound_phone_number when triggering calls. Unused for Vodafone campaigns."
+          },
+          "telephony_provider_id": {
+            "type": "string",
+            "enum": [
+              "exotel",
+              "vodafone"
+            ],
+            "default": "exotel",
+            "description": "Resolved from the customer's company_telephony_settings at creation time. 'vodafone' campaigns are dialed in bulk by VI itself (OBD Campaign API With Flow) instead of per-lead at /trigger."
+          },
+          "vi_flow_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Vodafone only. Snapshot of the tenant's VI portal Flow id (set via PUT /customers/{customerId}/vodafone-settings, not passed when creating this campaign) at the time this campaign was created. The Flow must already contain a Streaming node bound to this tenant's Vodafone WS endpoint (one-time manual setup in VI's portal, outside this API)."
+          },
+          "vi_campaign_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Vodafone only. VI-issued encrypted campaign key, returned by VI's createCampaign and used for all later OBD API calls (base load, start/pause, status)."
+          },
+          "vi_campaign_ref_id": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Vodafone only. VI-issued numeric campaign reference id, for display/reporting."
+          },
+          "vi_base_variable_names": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "Vodafone only. Per-lead variable names VI's Flow base schema expects (fetched once from getsampleBaseHeads at creation time), e.g. [\"msisdn\",\"dni\",\"call_type\",\"campaign_id\"]."
           }
         }
       },
@@ -1576,7 +1608,8 @@
           },
           "script_text": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "description": "Spoken as the campaign greeting once a call connects — via live TTS on our own WS channel for both carriers, independent of either carrier's own prompt-upload mechanism."
           },
           "language_code": {
             "type": "string",
@@ -1585,7 +1618,51 @@
           "phone_number_id": {
             "type": "string",
             "format": "uuid",
-            "description": "Optional. Must reference an enabled number owned by this customer (see /customers/{customerId}/phone-numbers)."
+            "description": "Optional, Exotel only. Must reference an enabled number owned by this customer (see /customers/{customerId}/phone-numbers)."
+          },
+          "fromdate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Required when this customer's telephony provider is Vodafone. Campaign window start date."
+          },
+          "todate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Required when this customer's telephony provider is Vodafone. Campaign window end date."
+          },
+          "fromtime": {
+            "type": "string",
+            "pattern": "^\\d{2}:\\d{2}:\\d{2}$",
+            "description": "Required when this customer's telephony provider is Vodafone. Daily dialing window start time."
+          },
+          "totime": {
+            "type": "string",
+            "pattern": "^\\d{2}:\\d{2}:\\d{2}$",
+            "description": "Required when this customer's telephony provider is Vodafone. Daily dialing window end time."
+          },
+          "dial_timeout_seconds": {
+            "type": "integer",
+            "default": 15,
+            "description": "Vodafone only. Seconds to let a dial ring before giving up."
+          },
+          "retry_interval_type": {
+            "type": "string",
+            "enum": [
+              "0",
+              "1"
+            ],
+            "default": "0",
+            "description": "Vodafone only. 0 = retry_interval_value is in minutes, 1 = in days."
+          },
+          "retry_interval_value": {
+            "type": "integer",
+            "default": 60,
+            "description": "Vodafone only. Retry interval, in the unit retry_interval_type selects."
+          },
+          "retry_count": {
+            "type": "integer",
+            "default": 0,
+            "description": "Vodafone only. Max retry attempts for an unconnected lead."
           }
         }
       },
@@ -4249,7 +4326,7 @@
           "Vodafone Voicebot"
         ],
         "summary": "Get Vodafone settings",
-        "description": "Returns the per-tenant Vodafone (VI) configuration for a customer.\n\n`vodafone_voicebot_wss_url` is **always generated** by the server from `PUBLIC_API_HOST` (or the request host) and the path `customerId`; paste it into Vodafone's Streaming Object \"WebSocket URL\" field. Credentials are never returned in plaintext, only `has_credentials`.\n\nRequires `x-admin-token`.",
+        "description": "Returns the per-tenant Vodafone (VI) configuration for a customer.\n\n`vodafone_voicebot_wss_url` is **always generated** by the server from `PUBLIC_API_HOST` (or the request host) and the path `customerId`; paste it into Vodafone's Streaming Object \"WebSocket URL\" field. Credentials are never returned in plaintext, only `has_credentials`. `vi_flow_id` (surfaced at the top level, stored under `metadata.vi_flow_id`) is the VI portal Flow id used by outbound OBD campaigns (see POST /outbound/campaigns) — set it here once per tenant, not per campaign.\n\nRequires `x-admin-token`.",
         "security": [
           {
             "AdminToken": []
@@ -4284,6 +4361,7 @@
                     }
                   },
                   "has_credentials": false,
+                  "vi_flow_id": "kFjQauhi7itxxXxxD4UaocQ%3D%3D",
                   "vodafone_voicebot_wss_url": "wss://convixx.in/telephony/vodafone/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                   "created_at": "2026-09-09T20:49:29.494Z",
                   "updated_at": "2026-09-09T20:49:29.494Z"
@@ -4318,7 +4396,7 @@
           "Vodafone Voicebot"
         ],
         "summary": "Create or update Vodafone settings",
-        "description": "Upserts the per-tenant Vodafone (VI) configuration for a customer (one row per customer, shared with Exotel via `company_telephony_settings.customer_id UNIQUE` - switching a customer to Vodafone here overwrites any existing Exotel row for the same customer, returned as `switched_from_provider_id` when that happens).\n\nAll fields are optional; omitted fields are left unchanged (or default to `false`/`{}` on first creation). `is_enabled` must be `true` before `/telephony/vodafone/voicebot/{customerId}` will accept a connection. `metadata` is free-form (e.g. document the custom key/value parameters configured on Vodafone's Streaming Object) and is not enforced by the WS route. `credentials` is an opaque object stored encrypted, in case Vodafone's still-undocumented auth mechanism turns out to need one; omit it if you don't need it.\n\n`vodafone_voicebot_wss_url` is **not** accepted here - it is computed and returned in the response.\n\nRequires `x-admin-token`.",
+        "description": "Upserts the per-tenant Vodafone (VI) configuration for a customer (one row per customer, shared with Exotel via `company_telephony_settings.customer_id UNIQUE` - switching a customer to Vodafone here overwrites any existing Exotel row for the same customer, returned as `switched_from_provider_id` when that happens).\n\nAll fields are optional; omitted fields are left unchanged (or default to `false`/`{}` on first creation). `is_enabled` must be `true` before `/telephony/vodafone/voicebot/{customerId}` will accept a connection. `metadata` is free-form (e.g. document the custom key/value parameters configured on Vodafone's Streaming Object) and is not enforced by the WS route. `credentials` is an opaque object stored encrypted, in case Vodafone's still-undocumented auth mechanism turns out to need one; omit it if you don't need it. `vi_flow_id` is the VI portal Flow id that drives outbound OBD campaigns (POST /outbound/campaigns) for this tenant — the Flow must already contain a Streaming node bound to this tenant's `vodafone_voicebot_wss_url` (one-time manual setup in VI's portal). It's merged into `metadata.vi_flow_id` and does not replace any other `metadata` keys also given in the same request.\n\n`vodafone_voicebot_wss_url` is **not** accepted here - it is computed and returned in the response.\n\nRequires `x-admin-token`.",
         "security": [
           {
             "AdminToken": []
@@ -4365,8 +4443,15 @@
                       "type": "string"
                     },
                     "example": {
-                      "some_key": "some_value"
-                    }
+                      "username": "...",
+                      "password": "...",
+                      "dni": "97XXXXXXXX"
+                    },
+                    "description": "For OBD outbound campaigns (services/vodafone-obd.ts), use keys username/password/dni — VI's OBD portal login and the server CLI this tenant dials outbound from."
+                  },
+                  "vi_flow_id": {
+                    "type": "string",
+                    "description": "VI portal Flow id for OBD outbound campaigns. The Flow must already contain a Streaming node bound to this tenant's vodafone_voicebot_wss_url."
                   }
                 }
               },
@@ -4376,7 +4461,8 @@
                   "custom_parameters": {
                     "agentId": "..."
                   }
-                }
+                },
+                "vi_flow_id": "kFjQauhi7itxxXxxD4UaocQ%3D%3D"
               }
             }
           }
@@ -4392,8 +4478,11 @@
                   "provider_id": "vodafone",
                   "is_enabled": true,
                   "use_sandbox": false,
-                  "metadata": {},
+                  "metadata": {
+                    "vi_flow_id": "kFjQauhi7itxxXxxD4UaocQ%3D%3D"
+                  },
                   "has_credentials": false,
+                  "vi_flow_id": "kFjQauhi7itxxXxxD4UaocQ%3D%3D",
                   "vodafone_voicebot_wss_url": "wss://convixx.in/telephony/vodafone/voicebot/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                   "created_at": "2026-09-09T20:49:29.494Z",
                   "updated_at": "2026-09-09T20:49:29.494Z"
@@ -5899,7 +5988,7 @@
           "Outbound Campaigns"
         ],
         "summary": "Create campaign",
-        "description": "Creates an outbound campaign and generates script audio using TTS. Audio is stored temporarily until campaign is deleted.",
+        "description": "Creates an outbound campaign and generates script audio using TTS. Audio is stored temporarily until campaign is deleted. If this customer's telephony provider is Vodafone, also creates a matching VI OBD campaign (API With Flow) using fromdate/todate/fromtime/totime (required in that case) plus the tenant's vi_flow_id already configured via PUT /customers/{customerId}/vodafone-settings, and caches VI's expected base-record variable names.",
         "security": [
           {
             "ApiKey": []
@@ -6039,7 +6128,7 @@
           "Outbound Campaigns"
         ],
         "summary": "Add leads to campaign",
-        "description": "Adds one or more phone numbers to the campaign lead list.",
+        "description": "Adds one or more phone numbers to the campaign lead list. For a Vodafone campaign, also pushes the base to VI (staticCampaignDataIngestion) so VI will actually dial these numbers; for Exotel, numbers are only dialed later by POST .../trigger.",
         "security": [
           {
             "ApiKey": []
@@ -6089,7 +6178,7 @@
           "Outbound Campaigns"
         ],
         "summary": "Trigger campaign calls",
-        "description": "Initiates outbound calls to all leads in the campaign that are in 'pending' status. Optionally accepts a list of phone numbers to add as leads before triggering.",
+        "description": "Exotel: initiates outbound calls to all leads in the campaign that are in 'pending' status, one REST call per lead. Vodafone: pushes any provided phone_numbers to VI's base then calls VI's StartorStop(S) once — VI dials the whole base itself, so the response only confirms the campaign was started, not per-lead results. Optionally accepts a list of phone numbers to add as leads before triggering.",
         "security": [
           {
             "ApiKey": []
@@ -6134,6 +6223,114 @@
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/outbound/campaigns/{id}/pause": {
+      "post": {
+        "tags": [
+          "Outbound Campaigns"
+        ],
+        "summary": "Pause a Vodafone OBD campaign",
+        "description": "Vodafone only — calls VI's StartorStop(P) to pause a running OBD campaign. 400 if this campaign isn't on Vodafone. Exotel has no campaign-level pause since its calls are already individually triggered.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paused",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Vodafone OBD campaign paused"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a Vodafone campaign"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "502": {
+            "description": "VI OBD API error"
+          }
+        }
+      }
+    },
+    "/outbound/campaigns/{id}/status": {
+      "get": {
+        "tags": [
+          "Outbound Campaigns"
+        ],
+        "summary": "Live status for a Vodafone OBD campaign",
+        "description": "Vodafone only — proxies VI's campaignstatus API (dial counts, success rate, campaign window). 400 if this campaign isn't on Vodafone.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "VI campaign status",
+            "content": {
+              "application/json": {
+                "example": {
+                  "campaignName": "Festival Offer OBD",
+                  "campaignType": "OBD with flow, campaign with api",
+                  "currentStatus": "Running",
+                  "baseDetails": {
+                    "totalBaseReceived": 500,
+                    "totalCallInitiated": 120,
+                    "totalCallsConnected": 64,
+                    "totalCallsNotConnected": 56,
+                    "remainingNumbersInQueue": 380,
+                    "successRatePercentage": 53.3
+                  },
+                  "retryInterval": "Minutes",
+                  "retryWithin": 60,
+                  "retryAttempts": 2,
+                  "campaignCreatedTime": "14-10-2026 10:00:00",
+                  "campaignWindow": "09:00:00 - 20:00:00",
+                  "campaignEndDate": "20-10-2026"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a Vodafone campaign"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "502": {
+            "description": "VI OBD API error"
           }
         }
       }
