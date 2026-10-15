@@ -45,7 +45,9 @@ import { runAskPipeline } from "./ask";
 import { runSimulatorStt } from "./voice-simulator";
 import { logSuggestedKbEntryIfNoAnswer } from "../services/suggested-kb";
 import { createRagTrace } from "../services/rag-trace";
-import { synthesizeSpeechToPcm8k } from "../services/vodafone-tts";
+import { synthesizeSpeechToPcm8k, type VodafoneTtsConfig } from "../services/vodafone-tts";
+import { parseCartesiaGenerationConfig } from "../services/cartesia";
+import { sanitizeElevenLabsVoiceSettingsFromJson } from "../services/voice-persona";
 import { pcmDurationMs } from "../services/pcm-audio";
 import { VodafoneAdapter } from "../services/vodafone-adapter";
 import {
@@ -136,14 +138,7 @@ interface VodafoneCallState {
   ws: WebSocket;
   silenceTimer: ReturnType<typeof setTimeout> | null;
   customerSettings: CustomerSettings | null;
-  ttsConfig: {
-    provider: "sarvam" | "elevenlabs" | "cartesia";
-    model: string | null;
-    speaker: string | null;
-    language: string | null;
-    normalization: string | null;
-    voiceGender: "male" | "female" | null;
-  };
+  ttsConfig: VodafoneTtsConfig & { voiceGender: "male" | "female" | null };
   processing: boolean;
   mediaFrameCount: number;
 }
@@ -173,14 +168,7 @@ async function resolveTtsConfig(
   agentId: string | null,
   cust: CustomerSettings | null,
   language: string
-): Promise<{
-  provider: "sarvam" | "elevenlabs" | "cartesia";
-  model: string | null;
-  speaker: string | null;
-  language: string;
-  normalization: string | null;
-  voiceGender: "male" | "female" | null;
-}> {
+): Promise<VodafoneTtsConfig & { voiceGender: "male" | "female" | null }> {
   // Cartesia-only, customer-level (mirrors cartesia_max_buffer_delay_ms/cartesia_emotion_mode -
   // not per-avatar today). No-op for sarvam/elevenlabs providers.
   const normalization = cust?.cartesia_normalization ?? null;
@@ -197,40 +185,61 @@ async function resolveTtsConfig(
           speaker: row.rows[0].voice_id,
           language,
           normalization,
+          generationConfig: parseCartesiaGenerationConfig(row.rows[0].generation_config),
           voiceGender: extractVoiceGender(row.rows[0].generation_config),
         };
       }
     } else if (provider === "elevenlabs") {
       const row = await pool.query(
-        `SELECT ea.voice_id, ea.model_id FROM agents a JOIN elevenlabs_avatars ea ON ea.id = a.elevenlabs_avatar_id WHERE a.id = $1`,
+        `SELECT ea.voice_id, ea.model_id, ea.voice_settings FROM agents a JOIN elevenlabs_avatars ea ON ea.id = a.elevenlabs_avatar_id WHERE a.id = $1`,
         [agentId]
       );
       if (row.rows.length > 0) {
-        return { provider, model: row.rows[0].model_id, speaker: row.rows[0].voice_id, language, normalization, voiceGender: null };
+        return {
+          provider,
+          model: row.rows[0].model_id,
+          speaker: row.rows[0].voice_id,
+          language,
+          normalization,
+          voiceSettings: sanitizeElevenLabsVoiceSettingsFromJson(row.rows[0].voice_settings),
+          voiceGender: null,
+        };
       }
     } else {
       const row = await pool.query(
-        `SELECT av.tts_speaker, av.tts_model FROM avatars av JOIN agents a ON a.avatar_id = av.id WHERE a.id = $1 AND av.tts_provider = 'sarvam'`,
+        `SELECT av.tts_speaker, av.tts_model, av.tts_pace, av.tts_pitch, av.tts_loudness FROM avatars av JOIN agents a ON a.avatar_id = av.id WHERE a.id = $1 AND av.tts_provider = 'sarvam'`,
         [agentId]
       );
       if (row.rows.length > 0) {
-        return { provider, model: row.rows[0].tts_model, speaker: row.rows[0].tts_speaker, language, normalization, voiceGender: null };
+        return {
+          provider,
+          model: row.rows[0].tts_model,
+          speaker: row.rows[0].tts_speaker,
+          language,
+          normalization,
+          pace: row.rows[0].tts_pace != null ? Number(row.rows[0].tts_pace) : null,
+          pitch: row.rows[0].tts_pitch != null ? Number(row.rows[0].tts_pitch) : null,
+          loudness: row.rows[0].tts_loudness != null ? Number(row.rows[0].tts_loudness) : null,
+          voiceGender: null,
+        };
       }
     }
 
     // No avatar linked for this provider: fall back to the agent's own raw
-    // tts_speaker/tts_model (set directly via the GET /voices catalog +
-    // agents.tts_provider/tts_speaker — see routes/agents.ts and
-    // routes/voice-catalog.ts) before falling all the way to the tenant's
-    // customer_settings default. tts_model is a free-text column shared
-    // across providers, so only trust it when it looks like it belongs to
-    // `provider` (same guard as exotel-voicebot.ts's ttsModelMatchesProvider).
+    // tts_speaker/tts_model/tts_pace/tts_pitch/tts_loudness/tts_voice_settings
+    // (set directly via the GET /voices catalog + agents.tts_provider — see
+    // routes/agents.ts and routes/voice-catalog.ts) before falling all the
+    // way to the tenant's customer_settings default. tts_model is a
+    // free-text column shared across providers, so only trust it when it
+    // looks like it belongs to `provider` (same guard as
+    // exotel-voicebot.ts's ttsModelMatchesProvider).
     const agentRow = await pool.query(
-      `SELECT tts_speaker, tts_model FROM agents WHERE id = $1`,
+      `SELECT tts_speaker, tts_model, tts_pace, tts_pitch, tts_loudness, tts_voice_settings FROM agents WHERE id = $1`,
       [agentId]
     );
-    const agentSpeaker = agentRow.rows[0]?.tts_speaker as string | null | undefined;
-    const agentModel = agentRow.rows[0]?.tts_model as string | null | undefined;
+    const a = agentRow.rows[0];
+    const agentSpeaker = a?.tts_speaker as string | null | undefined;
+    const agentModel = a?.tts_model as string | null | undefined;
     if (agentSpeaker?.trim()) {
       return {
         provider,
@@ -238,6 +247,15 @@ async function resolveTtsConfig(
         speaker: agentSpeaker,
         language,
         normalization,
+        pace: a?.tts_pace != null ? Number(a.tts_pace) : null,
+        pitch: a?.tts_pitch != null ? Number(a.tts_pitch) : null,
+        loudness: a?.tts_loudness != null ? Number(a.tts_loudness) : null,
+        voiceSettings:
+          provider === "elevenlabs" ? sanitizeElevenLabsVoiceSettingsFromJson(a?.tts_voice_settings) : null,
+        generationConfig:
+          provider === "cartesia" && a?.tts_voice_settings && Object.keys(a.tts_voice_settings).length
+            ? parseCartesiaGenerationConfig(a.tts_voice_settings)
+            : null,
         voiceGender: null,
       };
     }
@@ -248,6 +266,9 @@ async function resolveTtsConfig(
     speaker: cust?.tts_default_speaker ?? null,
     language,
     normalization,
+    pace: cust?.tts_default_pace != null ? Number(cust.tts_default_pace) : null,
+    pitch: cust?.tts_default_pitch != null ? Number(cust.tts_default_pitch) : null,
+    loudness: cust?.tts_default_loudness != null ? Number(cust.tts_default_loudness) : null,
     voiceGender: null,
   };
 }
@@ -895,6 +916,7 @@ async function answerUtteranceStreaming(
           voiceId: state.ttsConfig.speaker!.trim(),
           language: state.ttsConfig.language ?? "en",
           normalization: state.ttsConfig.normalization ?? undefined,
+          generationConfig: state.ttsConfig.generationConfig ?? undefined,
           outputFormat: { container: "raw", encoding: "pcm_s16le", sample_rate: 8000 },
         });
         const stream = cartesia.reply;

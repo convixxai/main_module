@@ -44,6 +44,10 @@ export interface VoicebotSession {
   errorText?: string;
   /** TTS pace override for this session. */
   ttsPace?: number | null;
+  /** Sarvam-only TTS pitch override for this session (agents.tts_pitch). */
+  ttsPitch?: number | null;
+  /** Sarvam-only TTS loudness override for this session (agents.tts_loudness). */
+  ttsLoudness?: number | null;
   /** TTS model override for this session. */
   ttsModel?: string | null;
   /** TTS speaker override for this session. */

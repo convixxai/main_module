@@ -40,6 +40,28 @@ function mergeLanguageMapEntry<T extends Record<string, unknown>>(
   return null;
 }
 
+/** Picks only known ElevenLabs voice_settings keys from raw agents.tts_voice_settings JSONB, clamping to each field's valid range. */
+export function sanitizeElevenLabsVoiceSettingsFromJson(
+  raw: unknown
+): ElevenLabsVoiceSettingsPayload | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const out: ElevenLabsVoiceSettingsPayload = {};
+  const clamp01 = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : undefined;
+  const stability = clamp01(o.stability);
+  if (stability !== undefined) out.stability = stability;
+  const similarity = clamp01(o.similarity_boost);
+  if (similarity !== undefined) out.similarity_boost = similarity;
+  const style = clamp01(o.style);
+  if (style !== undefined) out.style = style;
+  if (typeof o.use_speaker_boost === "boolean") out.use_speaker_boost = o.use_speaker_boost;
+  if (typeof o.speed === "number" && Number.isFinite(o.speed)) {
+    out.speed = Math.min(1.2, Math.max(0.7, o.speed));
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 function mergeVoiceSettings(
   base: unknown,
   override: unknown
@@ -95,6 +117,8 @@ export async function applyAgentVoicePersonaToSession(
     elevenlabsAvatarId?: string | null;
     cartesiaAvatarId?: string | null;
     customerSettings?: CustomerSettings | null;
+    /** agents.tts_voice_settings — applied when no avatar is linked for the effective provider (see createAgentSchema's `voice_id` flow). */
+    agentVoiceSettings?: Record<string, unknown> | null;
   }
 ): Promise<void> {
   const cs = prefetched?.customerSettings ?? session.customerSettingsSnapshot ?? null;
@@ -104,13 +128,14 @@ export async function applyAgentVoicePersonaToSession(
   let avatarId = prefetched?.avatarId;
   let elevenlabsAvatarId = prefetched?.elevenlabsAvatarId;
   let cartesiaAvatarId = prefetched?.cartesiaAvatarId;
+  let agentVoiceSettings = prefetched?.agentVoiceSettings;
   if (
     avatarId === undefined &&
     elevenlabsAvatarId === undefined &&
     cartesiaAvatarId === undefined
   ) {
     const r = await pool.query(
-      `SELECT avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
+      `SELECT avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, tts_voice_settings
        FROM agents WHERE id = $1 AND customer_id = $2`,
       [session.agentId, session.customerId]
     );
@@ -118,6 +143,7 @@ export async function applyAgentVoicePersonaToSession(
     avatarId = r.rows[0].avatar_id as string | null;
     elevenlabsAvatarId = r.rows[0].elevenlabs_avatar_id as string | null;
     cartesiaAvatarId = r.rows[0].cartesia_avatar_id as string | null;
+    agentVoiceSettings = r.rows[0].tts_voice_settings as Record<string, unknown> | null;
   }
 
   const lang = pickLang(session);
@@ -176,11 +202,11 @@ export async function applyAgentVoicePersonaToSession(
       session.ttsModel = resolveCartesiaModel(cs?.tts_model);
     }
     if (!session.cartesiaGenerationConfig) {
-      session.cartesiaGenerationConfig = normalizeCartesiaGenerationConfigForVoice({
-        speed: 1,
-        volume: 1,
-        emotion: "neutral",
-      });
+      session.cartesiaGenerationConfig = normalizeCartesiaGenerationConfigForVoice(
+        agentVoiceSettings && Object.keys(agentVoiceSettings).length
+          ? parseCartesiaGenerationConfig(agentVoiceSettings)
+          : { speed: 1, volume: 1, emotion: "neutral" }
+      );
     } else {
       session.cartesiaGenerationConfig = normalizeCartesiaGenerationConfigForVoice(
         session.cartesiaGenerationConfig
@@ -240,6 +266,7 @@ export async function applyAgentVoicePersonaToSession(
           env.elevenlabs.defaultIndianMultilingualVoiceId?.trim() ||
           ELEVENLABS_BUILTIN_INDIAN_MULTILINGUAL_VOICE_ID;
       }
+      session.elevenlabsVoiceSettings = sanitizeElevenLabsVoiceSettingsFromJson(agentVoiceSettings);
     }
     return;
   }

@@ -8,9 +8,9 @@
 // decision).
 // ============================================================
 
-import { cartesiaTextToSpeech, cartesiaOutputFormatForExotel } from "./cartesia";
+import { cartesiaTextToSpeech, cartesiaOutputFormatForExotel, type CartesiaGenerationConfig } from "./cartesia";
 import { sarvamTextToSpeech } from "./sarvam";
-import { elevenLabsTextToSpeech, elevenLabsPcmOutputFormat } from "./elevenlabs";
+import { elevenLabsTextToSpeech, elevenLabsPcmOutputFormat, type ElevenLabsVoiceSettingsPayload } from "./elevenlabs";
 import { parseWavToPcmS16leMono, resamplePcm16 } from "./pcm-audio";
 
 export interface VodafoneTtsConfig {
@@ -20,6 +20,16 @@ export interface VodafoneTtsConfig {
   language?: string | null;
   /** Cartesia-only. See CartesiaTtsParams.normalization in services/cartesia.ts. */
   normalization?: string | null;
+  /** Sarvam-only. agents.tts_pace / customer_settings.tts_default_pace. */
+  pace?: number | null;
+  /** Sarvam-only. agents.tts_pitch / customer_settings.tts_default_pitch. */
+  pitch?: number | null;
+  /** Sarvam-only. agents.tts_loudness / customer_settings.tts_default_loudness. */
+  loudness?: number | null;
+  /** ElevenLabs-only. agents.tts_voice_settings, sanitized. */
+  voiceSettings?: ElevenLabsVoiceSettingsPayload | null;
+  /** Cartesia-only. agents.tts_voice_settings, sanitized. */
+  generationConfig?: CartesiaGenerationConfig | null;
 }
 
 const TARGET_SAMPLE_RATE = 8000;
@@ -37,6 +47,7 @@ export async function synthesizeSpeechToPcm8k(
       voiceId: cfg.speaker,
       language: cfg.language ?? "en",
       normalization: cfg.normalization ?? undefined,
+      generationConfig: cfg.generationConfig ?? undefined,
       outputFormat: cartesiaOutputFormatForExotel(TARGET_SAMPLE_RATE),
     });
     // cartesiaOutputFormatForExotel(8000) always returns raw pcm_s16le @ 8000 for this input.
@@ -51,6 +62,7 @@ export async function synthesizeSpeechToPcm8k(
       voiceId: cfg.speaker,
       modelId: cfg.model ?? "eleven_multilingual_v2",
       outputFormat,
+      voiceSettings: cfg.voiceSettings ?? undefined,
     });
     if (res.status !== 200 || !Buffer.isBuffer(res.body)) {
       throw new Error(`ElevenLabs TTS failed (${res.status})`);
@@ -71,6 +83,9 @@ export async function synthesizeSpeechToPcm8k(
     speaker: cfg.speaker ?? undefined,
     model: (cfg.model as "bulbul:v3" | "bulbul:v2" | undefined) ?? "bulbul:v3",
     speech_sample_rate: String(TARGET_SAMPLE_RATE),
+    pace: cfg.pace ?? undefined,
+    pitch: cfg.pitch ?? undefined,
+    loudness: cfg.loudness ?? undefined,
   });
   if (res.status !== 200) {
     throw new Error(`Sarvam TTS failed (${res.status}): ${JSON.stringify(res.body)}`);

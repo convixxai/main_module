@@ -75,6 +75,18 @@ function sampleTextForLanguage(lang: string | null | undefined): string {
   return SAMPLE_BY_LANG[primary] ?? SAMPLE_BY_LANG.en;
 }
 
+/** Sarvam's `target_language_code` wants a full locale (e.g. "hi-IN"), not just "hi". */
+const SARVAM_LOCALE_BY_PRIMARY: Record<string, string> = {
+  en: "en-IN", hi: "hi-IN", mr: "mr-IN", ta: "ta-IN", te: "te-IN",
+  bn: "bn-IN", gu: "gu-IN", kn: "kn-IN", ml: "ml-IN", pa: "pa-IN", od: "od-IN",
+};
+
+function normalizeSarvamSampleLanguage(lang: string | null | undefined): string {
+  if (lang?.includes("-")) return lang;
+  const primary = (lang || "en").trim().toLowerCase();
+  return SARVAM_LOCALE_BY_PRIMARY[primary] ?? "en-IN";
+}
+
 function sampleUrl(provider: CatalogProvider, voiceId: string, model: string | null): string {
   const qs = new URLSearchParams({ provider, voice_id: voiceId });
   if (model) qs.set("model", model);
@@ -126,9 +138,13 @@ async function listElevenLabsCatalog(): Promise<VoiceCatalogEntry[]> {
   });
 }
 
-async function listCartesiaCatalog(): Promise<VoiceCatalogEntry[]> {
+async function listCartesiaCatalog(language?: string | null): Promise<VoiceCatalogEntry[]> {
   if (!cartesiaConfigured()) return [];
-  const result = await cartesiaListVoices({ limit: 100, expandPreview: true });
+  const result = await cartesiaListVoices({
+    limit: 100,
+    expandPreview: true,
+    language: language ?? undefined,
+  });
   return result.voices.map((v): VoiceCatalogEntry => ({
     provider: "cartesia",
     voice_id: v.id,
@@ -140,17 +156,36 @@ async function listCartesiaCatalog(): Promise<VoiceCatalogEntry[]> {
   }));
 }
 
+export interface VoiceCatalogFilter {
+  /** BCP-47 or plain ISO-639-1 (e.g. "hi-IN" or "hi"). Sarvam voices always match (they work across every Sarvam-supported language, incl. the current hi/en/mr focus); ElevenLabs/Cartesia voices are filtered to this language's primary subtag. */
+  language?: string | null;
+  gender?: string | null;
+}
+
 /**
  * Full cross-provider catalog. A provider whose API key isn't configured
  * (or whose call fails) is silently omitted rather than failing the whole
  * request — this is a convenience picker, not a health check.
  */
-export async function listVoiceCatalog(): Promise<VoiceCatalogEntry[]> {
+export async function listVoiceCatalog(filter: VoiceCatalogFilter = {}): Promise<VoiceCatalogEntry[]> {
+  const lang = filter.language?.trim().toLowerCase().split(/[-_]/)[0] || null;
+  const gender = filter.gender?.trim().toLowerCase() || null;
+
   const [elevenlabs, cartesia] = await Promise.all([
     listElevenLabsCatalog().catch(() => []),
-    listCartesiaCatalog().catch(() => []),
+    listCartesiaCatalog(lang).catch(() => []),
   ]);
-  return [...listSarvamCatalog(), ...elevenlabs, ...cartesia];
+
+  let all = [...listSarvamCatalog(), ...elevenlabs, ...cartesia];
+  if (lang) {
+    all = all.filter(
+      (v) => v.provider === "sarvam" || !v.language || v.language.toLowerCase().split(/[-_]/)[0] === lang
+    );
+  }
+  if (gender) {
+    all = all.filter((v) => !v.gender || v.gender.toLowerCase() === gender);
+  }
+  return all;
 }
 
 /**
@@ -169,7 +204,7 @@ export async function synthesizeVoiceSample(params: {
   if (params.provider === "sarvam") {
     const result = await sarvamTextToSpeech({
       text,
-      target_language_code: "en-IN",
+      target_language_code: normalizeSarvamSampleLanguage(params.language),
       model: (params.model as "bulbul:v3" | "bulbul:v2" | undefined) ?? "bulbul:v3",
       speaker: params.voiceId,
       speech_sample_rate: "22050",

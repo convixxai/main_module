@@ -1034,7 +1034,7 @@ async function bootstrapVoicebotChatSession(
       if (agentResult.rows.length > 0 && agentResult.rows[0].agent_id) {
         session.agentId = agentResult.rows[0].agent_id as string;
         const agentRow = await pool.query(
-          `SELECT greeting_text, error_text, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+          `SELECT greeting_text, error_text, tts_provider, tts_pace, tts_pitch, tts_loudness, tts_model, tts_speaker, tts_sample_rate,
                   avatar_id, elevenlabs_avatar_id
            FROM agents WHERE id = $1`,
           [session.agentId]
@@ -1045,6 +1045,8 @@ async function bootstrapVoicebotChatSession(
           session.greetingText = row.greeting_text;
           session.errorText = row.error_text;
           session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
+          session.ttsPitch = row.tts_pitch != null ? Number(row.tts_pitch) : null;
+          session.ttsLoudness = row.tts_loudness != null ? Number(row.tts_loudness) : null;
           session.ttsModel = ttsModelMatchesProvider(
             row.tts_model,
             session.customerSettingsSnapshot?.tts_provider
@@ -1071,7 +1073,7 @@ async function bootstrapVoicebotChatSession(
   // agent" query when the number has no company_phone_numbers row, no
   // default_agent_id set (e.g. both live customers today), or that agent is
   // no longer active (deleted/deactivated since the number was configured).
-  const agentSelectColumns = `id, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+  const agentSelectColumns = `id, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_pitch, tts_loudness, tts_model, tts_speaker, tts_sample_rate,
             avatar_id, elevenlabs_avatar_id`;
   const oldestActiveAgentQuery = `SELECT ${agentSelectColumns}
      FROM agents
@@ -1100,6 +1102,8 @@ async function bootstrapVoicebotChatSession(
     session.greetingText = row.greeting_text;
     session.errorText = row.error_text;
     session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
+    session.ttsPitch = row.tts_pitch != null ? Number(row.tts_pitch) : null;
+    session.ttsLoudness = row.tts_loudness != null ? Number(row.tts_loudness) : null;
     session.ttsModel = ttsModelMatchesProvider(
       row.tts_model,
       session.customerSettingsSnapshot?.tts_provider
@@ -1979,12 +1983,12 @@ async function speakToExotel(
       ttsPayload.pace = pace;
     }
     const pitch =
-      cs?.tts_default_pitch != null ? Number(cs.tts_default_pitch) : null;
+      session.ttsPitch ?? (cs?.tts_default_pitch != null ? Number(cs.tts_default_pitch) : null);
     if (pitch != null && Number.isFinite(pitch)) {
       ttsPayload.pitch = pitch;
     }
     const loudness =
-      cs?.tts_default_loudness != null ? Number(cs.tts_default_loudness) : null;
+      session.ttsLoudness ?? (cs?.tts_default_loudness != null ? Number(cs.tts_default_loudness) : null);
     if (loudness != null && Number.isFinite(loudness)) {
       ttsPayload.loudness = loudness;
     }
@@ -3726,8 +3730,8 @@ async function runVoicebotAskPipeline(
     const agentP = (async (): Promise<{ systemPrompt: string; fallbackInstruction: string | null } | null> => {
       if (!session.agentId) return null;
       const agentResult = await pool.query(
-        `SELECT system_prompt, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
-                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
+        `SELECT system_prompt, tts_provider, tts_pace, tts_pitch, tts_loudness, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
+                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, tts_voice_settings
          FROM agents WHERE id = $1`,
         [session.agentId]
       );
@@ -3735,6 +3739,8 @@ async function runVoicebotAskPipeline(
       const row = agentResult.rows[0];
       applyAgentTtsProviderOverride(session, row.tts_provider as string | null);
       session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
+      session.ttsPitch = row.tts_pitch != null ? Number(row.tts_pitch) : null;
+      session.ttsLoudness = row.tts_loudness != null ? Number(row.tts_loudness) : null;
       session.ttsModel = ttsModelMatchesProvider(
         row.tts_model,
         session.customerSettingsSnapshot?.tts_provider
@@ -3747,6 +3753,7 @@ async function runVoicebotAskPipeline(
         avatarId: row.avatar_id as string | null,
         elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
         cartesiaAvatarId: row.cartesia_avatar_id as string | null,
+        agentVoiceSettings: row.tts_voice_settings as Record<string, unknown> | null,
       });
       return {
         systemPrompt: row.system_prompt as string,

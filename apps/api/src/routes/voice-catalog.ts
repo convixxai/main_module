@@ -21,17 +21,30 @@ const sampleQuerySchema = z.object({
   text: z.string().max(500).optional(),
 });
 
+const listQuerySchema = z.object({
+  /** BCP-47 or plain ISO-639-1, e.g. "hi-IN" or "hi". Current product focus is hi/en/mr, but any language is accepted. */
+  language: z.string().max(16).optional(),
+  gender: z.string().max(16).optional(),
+});
+
 export async function voiceCatalogRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     "/voices",
     { preHandler: apiKeyAuth },
-    async (_request: AuthenticatedRequest, reply) => {
+    async (request: AuthenticatedRequest, reply) => {
+      const parsed = listQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: parsed.error.flatten() });
+      }
       try {
-        const voices = await listVoiceCatalog();
+        const voices = await listVoiceCatalog({
+          language: parsed.data.language ?? null,
+          gender: parsed.data.gender ?? null,
+        });
         return reply.send({ voices });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Failed to load voice catalog";
-        _request.log.error({ err }, "voice-catalog: list failed");
+        request.log.error({ err }, "voice-catalog: list failed");
         return reply.status(502).send({ error: msg });
       }
     }

@@ -34,7 +34,7 @@
     },
     {
       "name": "Voice Catalog",
-      "description": "Unified cross-provider voice picker — browse every Sarvam/ElevenLabs/Cartesia voice in one list (name, language, gender, sample) and play a sample, then feed the chosen entry's `provider`/`voice_id`/`model` straight into an agent's `tts_provider`/`tts_speaker`/`tts_model` (see the Agents tag's create/update endpoints). Lets a voice be linked to one agent instead of being shared company-wide via customer_settings.tts_default_speaker."
+      "description": "Unified cross-provider voice picker — browse every Sarvam/ElevenLabs/Cartesia voice in one list (name, language, gender, sample) and play a sample, then feed the chosen entry's `provider`/`voice_id`/`model` straight into an agent's `tts_provider`/`tts_speaker`/`tts_model` (see the Agents tag's create/update endpoints). Lets a voice be linked to one agent instead of being shared company-wide via customer_settings.tts_default_speaker. Pitch/loudness/other voice settings are not part of a catalog entry — they're set independently per agent via tts_pitch/tts_loudness (Sarvam) or tts_voice_settings (ElevenLabs/Cartesia) on POST/PUT /agents, whichever fields that agent's chosen provider actually supports."
     },
     {
       "name": "Knowledgebase",
@@ -2876,6 +2876,33 @@
                     "type": "string",
                     "nullable": true,
                     "description": "Convenience alias for tts_speaker: pick an entry from GET /voices and pass its `voice_id` here (alongside that same entry's `provider` as tts_provider, and `model` as tts_model) instead of needing to already know the column name. If both voice_id and tts_speaker are given, tts_speaker wins."
+                  },
+                  "tts_pitch": {
+                    "type": "number",
+                    "format": "float",
+                    "minimum": -1,
+                    "maximum": 1,
+                    "nullable": true,
+                    "description": "Sarvam-only pitch override, same scale as customer_settings.tts_default_pitch. Null = inherit the tenant default. Ignored for elevenlabs/cartesia agents (use tts_voice_settings instead)."
+                  },
+                  "tts_loudness": {
+                    "type": "number",
+                    "format": "float",
+                    "minimum": 0,
+                    "maximum": 3,
+                    "nullable": true,
+                    "description": "Sarvam-only loudness override, same scale as customer_settings.tts_default_loudness. Null = inherit the tenant default. Ignored for elevenlabs/cartesia agents (use tts_voice_settings instead)."
+                  },
+                  "tts_voice_settings": {
+                    "type": "object",
+                    "nullable": true,
+                    "additionalProperties": true,
+                    "description": "Provider-specific extra knobs not covered by tts_pace/tts_pitch/tts_loudness, applied only when it matches this agent's effective tts_provider: ElevenLabs {stability,similarity_boost,style,speed,use_speaker_boost} (0-1 for stability/similarity_boost/style, 0.7-1.2 for speed) or Cartesia {speed,volume,emotion}. {} or null = provider/tenant defaults.",
+                    "example": {
+                      "stability": 0.5,
+                      "similarity_boost": 0.75,
+                      "speed": 1
+                    }
                   }
                 }
               }
@@ -2895,6 +2922,8 @@
                   "greeting_text": "Hello, welcome to sales!",
                   "error_text": "We are busy right now, please try again.",
                   "tts_provider": null,
+                  "tts_pitch": null,
+                  "tts_loudness": null,
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -2935,6 +2964,8 @@
                     "greeting_text": "Hello, welcome to sales!",
                     "error_text": "We are busy right now, please try again.",
                     "tts_provider": null,
+                    "tts_pitch": null,
+                    "tts_loudness": null,
                     "tts_pace": 0.85,
                     "tts_model": "bulbul:v3",
                     "tts_speaker": null,
@@ -2988,6 +3019,8 @@
                   "greeting_text": "Hello, welcome to sales!",
                   "error_text": "We are busy right now, please try again.",
                   "tts_provider": null,
+                  "tts_pitch": null,
+                  "tts_loudness": null,
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -3093,6 +3126,33 @@
                     "type": "string",
                     "nullable": true,
                     "description": "Convenience alias for tts_speaker: pick an entry from GET /voices and pass its `voice_id` here (alongside that same entry's `provider` as tts_provider, and `model` as tts_model) instead of needing to already know the column name. If both voice_id and tts_speaker are given, tts_speaker wins."
+                  },
+                  "tts_pitch": {
+                    "type": "number",
+                    "format": "float",
+                    "minimum": -1,
+                    "maximum": 1,
+                    "nullable": true,
+                    "description": "Sarvam-only pitch override, same scale as customer_settings.tts_default_pitch. Null = inherit the tenant default. Ignored for elevenlabs/cartesia agents (use tts_voice_settings instead)."
+                  },
+                  "tts_loudness": {
+                    "type": "number",
+                    "format": "float",
+                    "minimum": 0,
+                    "maximum": 3,
+                    "nullable": true,
+                    "description": "Sarvam-only loudness override, same scale as customer_settings.tts_default_loudness. Null = inherit the tenant default. Ignored for elevenlabs/cartesia agents (use tts_voice_settings instead)."
+                  },
+                  "tts_voice_settings": {
+                    "type": "object",
+                    "nullable": true,
+                    "additionalProperties": true,
+                    "description": "Provider-specific extra knobs not covered by tts_pace/tts_pitch/tts_loudness, applied only when it matches this agent's effective tts_provider: ElevenLabs {stability,similarity_boost,style,speed,use_speaker_boost} (0-1 for stability/similarity_boost/style, 0.7-1.2 for speed) or Cartesia {speed,volume,emotion}. {} or null = provider/tenant defaults.",
+                    "example": {
+                      "stability": 0.5,
+                      "similarity_boost": 0.75,
+                      "speed": 1
+                    }
                   }
                 }
               }
@@ -3112,6 +3172,8 @@
                   "greeting_text": "Hello VIP, welcome to premium sales!",
                   "error_text": "Pardon us, our premium service is delayed.",
                   "tts_provider": null,
+                  "tts_pitch": null,
+                  "tts_loudness": null,
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -9674,7 +9736,26 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "BCP-47 or plain ISO-639-1 (e.g. \"hi-IN\" or \"hi\"). Current product focus is hi/en/mr, but any language is accepted. Sarvam voices always match (one speaker roster works across every Sarvam-supported language); ElevenLabs/Cartesia voices are filtered to this language's primary subtag."
+          },
+          {
+            "name": "gender",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
       }
     },
     "/voices/sample": {
