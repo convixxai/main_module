@@ -1626,7 +1626,7 @@
           "phone_number_id": {
             "type": "string",
             "format": "uuid",
-            "description": "Optional, Exotel only. Must reference an enabled number owned by this customer (see /customers/{customerId}/phone-numbers)."
+            "description": "Optional. Must reference an enabled number owned by this customer (see /customers/{customerId}/phone-numbers). On Exotel, used as the caller ID for every triggered call. On Vodafone, used as the dni (outbound caller CLI) in the base records pushed to VI OBD instead of the tenant-wide credentials.dni — falls back to that tenant-wide dni when omitted."
           },
           "fromdate": {
             "type": "string",
@@ -6031,7 +6031,7 @@
           "Vodafone Outbound Campaign"
         ],
         "summary": "Create campaign",
-        "description": "Creates an outbound campaign and generates script audio using TTS. Audio is stored temporarily until campaign is deleted. If this customer's telephony provider is Vodafone, also creates a matching VI OBD campaign (API With Flow) using fromdate/todate/fromtime/totime (required in that case) plus the tenant's vi_flow_id already configured via PUT /customers/{customerId}/vodafone-settings, and caches VI's expected base-record variable names.",
+        "description": "Creates an outbound campaign and generates script audio using TTS. Audio is stored temporarily until campaign is deleted. If this customer's telephony provider is Vodafone, also creates a matching VI OBD campaign (API With Flow) using fromdate/todate/fromtime/totime (required in that case) plus the tenant's vi_flow_id already configured via PUT /customers/{customerId}/vodafone-settings, and caches VI's expected base-record variable names. phone_number_id (if given) is used as the Vodafone OBD dni instead of the tenant-wide one.",
         "security": [
           {
             "ApiKey": []

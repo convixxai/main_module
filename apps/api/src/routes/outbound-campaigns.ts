@@ -51,6 +51,26 @@ async function resolveOutboundCallerId(
 }
 
 /**
+ * Feature 3 (one company, many numbers) for Vodafone OBD campaigns: resolves
+ * the `dni` (outbound caller CLI) to use for this campaign's base records.
+ * If the campaign has a `phone_number_id` naming an enabled number belonging
+ * to this customer, uses that number; otherwise falls back to the tenant-wide
+ * `credentials.dni` (today's only option before per-campaign numbers existed)
+ * — mirrors resolveOutboundCallerId's same fallback shape for Exotel.
+ */
+async function resolveObdDni(
+  customerId: string,
+  phoneNumberId: string | null | undefined,
+  tenantDni: string | null | undefined
+): Promise<string> {
+  if (phoneNumberId) {
+    const number = await resolvePhoneNumberById(customerId, phoneNumberId);
+    if (number) return number.phone_number;
+  }
+  return tenantDni ?? "";
+}
+
+/**
  * Builds one VI OBD base record per lead, keyed by whatever
  * getSampleBaseHeads actually returned for this campaign's flowid (cached on
  * outbound_campaigns.vi_base_variable_names at creation time) — rather than
@@ -305,9 +325,10 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       if (campaignRow.telephony_provider_id === "vodafone") {
         try {
           const creds = await getVodafoneObdCredentials(customerId);
+          const dni = await resolveObdDni(customerId, campaignRow.phone_number_id, creds.dni);
           const variableNames: string[] = campaignRow.vi_base_variable_names ?? ["msisdn", "dni", "call_type", "campaign_id"];
           const records = phone_numbers.map((phone) =>
-            buildObdBaseRecord(variableNames, phone, creds.dni ?? "", id)
+            buildObdBaseRecord(variableNames, phone, dni, id)
           );
           await staticCampaignBaseLoad(customerId, campaignRow.vi_campaign_id, records);
         } catch (viErr) {
@@ -373,9 +394,10 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         if (campaign.telephony_provider_id === "vodafone") {
           try {
             const creds = await getVodafoneObdCredentials(customerId);
+            const dni = await resolveObdDni(customerId, campaign.phone_number_id, creds.dni);
             const variableNames: string[] = campaign.vi_base_variable_names ?? ["msisdn", "dni", "call_type", "campaign_id"];
             const records = phone_numbers.map((phone) =>
-              buildObdBaseRecord(variableNames, phone, creds.dni ?? "", id)
+              buildObdBaseRecord(variableNames, phone, dni, id)
             );
             await staticCampaignBaseLoad(customerId, campaign.vi_campaign_id, records);
           } catch (viErr) {
