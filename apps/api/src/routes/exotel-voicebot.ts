@@ -130,7 +130,7 @@ import {
   languageSwitchOptionsPrompt,
   parseLanguageChoice,
 } from "../services/voice-language-infer";
-import { applyAgentVoicePersonaToSession } from "../services/voice-persona";
+import { applyAgentVoicePersonaToSession, applyAgentTtsProviderOverride } from "../services/voice-persona";
 import {
   voiceTrace,
   safeJsonForLog,
@@ -1034,13 +1034,14 @@ async function bootstrapVoicebotChatSession(
       if (agentResult.rows.length > 0 && agentResult.rows[0].agent_id) {
         session.agentId = agentResult.rows[0].agent_id as string;
         const agentRow = await pool.query(
-          `SELECT greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+          `SELECT greeting_text, error_text, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate,
                   avatar_id, elevenlabs_avatar_id
            FROM agents WHERE id = $1`,
           [session.agentId]
         );
         if (agentRow.rows.length > 0) {
           const row = agentRow.rows[0];
+          applyAgentTtsProviderOverride(session, row.tts_provider as string | null);
           session.greetingText = row.greeting_text;
           session.errorText = row.error_text;
           session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
@@ -1070,7 +1071,7 @@ async function bootstrapVoicebotChatSession(
   // agent" query when the number has no company_phone_numbers row, no
   // default_agent_id set (e.g. both live customers today), or that agent is
   // no longer active (deleted/deactivated since the number was configured).
-  const agentSelectColumns = `id, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+  const agentSelectColumns = `id, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate,
             avatar_id, elevenlabs_avatar_id`;
   const oldestActiveAgentQuery = `SELECT ${agentSelectColumns}
      FROM agents
@@ -1095,6 +1096,7 @@ async function bootstrapVoicebotChatSession(
     const row = agentsResult.rows[0];
     session.agentId = row.id as string;
 
+    applyAgentTtsProviderOverride(session, row.tts_provider as string | null);
     session.greetingText = row.greeting_text;
     session.errorText = row.error_text;
     session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
@@ -3724,13 +3726,14 @@ async function runVoicebotAskPipeline(
     const agentP = (async (): Promise<{ systemPrompt: string; fallbackInstruction: string | null } | null> => {
       if (!session.agentId) return null;
       const agentResult = await pool.query(
-        `SELECT system_prompt, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
+        `SELECT system_prompt, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate, no_kb_fallback_instruction,
                 avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
          FROM agents WHERE id = $1`,
         [session.agentId]
       );
       if (agentResult.rows.length === 0) return null;
       const row = agentResult.rows[0];
+      applyAgentTtsProviderOverride(session, row.tts_provider as string | null);
       session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
       session.ttsModel = ttsModelMatchesProvider(
         row.tts_model,
@@ -4585,8 +4588,11 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 await applyCustomerVoiceSettingsToSession(session, csStart);
                 await ensureCartesiaSttStreamingSession(session, log);
                 await bootstrapVoicebotChatSession(session, log);
+                // Use session.customerSettingsSnapshot (not the pre-agent-load
+                // `csStart`), since bootstrapVoicebotChatSession may have just
+                // applied an agent-level tts_provider override onto it.
                 await applyAgentVoicePersonaToSession(session, {
-                  customerSettings: csStart,
+                  customerSettings: session.customerSettingsSnapshot,
                 });
                 if (outboundLinkedId) {
                   const patch = JSON.stringify({

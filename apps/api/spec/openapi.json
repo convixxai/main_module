@@ -33,6 +33,10 @@
       "description": "Per-customer agents (`x-api-key`)."
     },
     {
+      "name": "Voice Catalog",
+      "description": "Unified cross-provider voice picker — browse every Sarvam/ElevenLabs/Cartesia voice in one list (name, language, gender, sample) and play a sample, then feed the chosen entry's `provider`/`voice_id`/`model` straight into an agent's `tts_provider`/`tts_speaker`/`tts_model` (see the Agents tag's create/update endpoints). Lets a voice be linked to one agent instead of being shared company-wide via customer_settings.tts_default_speaker."
+    },
+    {
       "name": "Knowledgebase",
       "description": "Q&A upload and CRUD with embeddings (`x-api-key`)."
     },
@@ -66,7 +70,7 @@
     },
     {
       "name": "Vodafone Voicebot",
-      "description": "Vodafone (VI) Voicebot WebSocket system. Admin CRUD for per-tenant Vodafone settings (**x-admin-token**), including `vi_flow_id` (used by **Vodafone Outbound Campaign**, see that tag). Vodafone connects out to us for live calls (inbound-only — there is still no single-ad-hoc-outbound-call trigger API), so the settings response returns the `wss://` URL to configure on Vodafone's own Streaming Object."
+      "description": "Vodafone (VI) Voicebot WebSocket system. Admin CRUD for per-tenant Vodafone settings (**x-admin-token**), including `vi_flow_id` (used by **Vodafone Outbound Campaign**, see that tag). Vodafone connects out to us for live calls (inbound-only — there is still no single-ad-hoc-outbound-call trigger API), so the settings response returns the `wss://` URL to configure on Vodafone's own Streaming Object. Inbound calls honor **Company Phone Numbers**' per-number `default_agent_id` (the dialed number arrives as VI's `dni` on the `start` event), same resolution order as Exotel: falls back to the tenant's oldest active agent when the dialed number has no row or no default agent set."
     },
     {
       "name": "Vodafone Outbound Campaign",
@@ -82,7 +86,7 @@
     },
     {
       "name": "Company Phone Numbers",
-      "description": "Feature 3 — one company, many phone numbers. Admin CRUD for `company_phone_numbers` (`x-admin-token`). Inbound calls route to a number's `default_agent_id` when set; outbound calls/campaigns may pick a specific number as caller ID via `phone_number_id`."
+      "description": "Feature 3 — one company, many phone numbers. Admin CRUD for `company_phone_numbers` (`x-admin-token`). Inbound calls on both Exotel and Vodafone route to a number's `default_agent_id` when set, falling back to the tenant's oldest active agent otherwise; outbound calls/campaigns may pick a specific number as caller ID via `phone_number_id`."
     },
     {
       "name": "Cartesia",
@@ -2857,6 +2861,21 @@
                     "format": "uuid",
                     "nullable": true,
                     "description": "Optional FK to `elevenlabs_avatars`. Used when `customer_settings.tts_provider` is `elevenlabs`."
+                  },
+                  "tts_provider": {
+                    "type": "string",
+                    "enum": [
+                      "sarvam",
+                      "elevenlabs",
+                      "cartesia"
+                    ],
+                    "nullable": true,
+                    "description": "Per-agent TTS provider override (Feature 1, §8.1). Takes precedence over the tenant's customer_settings.tts_provider for this agent's calls on both Exotel and Vodafone. Null = inherit the tenant's provider (previous behavior, unchanged). Set this together with tts_speaker from a GET /voices catalog entry."
+                  },
+                  "voice_id": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Convenience alias for tts_speaker: pick an entry from GET /voices and pass its `voice_id` here (alongside that same entry's `provider` as tts_provider, and `model` as tts_model) instead of needing to already know the column name. If both voice_id and tts_speaker are given, tts_speaker wins."
                   }
                 }
               }
@@ -2875,6 +2894,7 @@
                   "system_prompt": "You are a sales agent.",
                   "greeting_text": "Hello, welcome to sales!",
                   "error_text": "We are busy right now, please try again.",
+                  "tts_provider": null,
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -2914,6 +2934,7 @@
                     "system_prompt": "You are a sales agent.",
                     "greeting_text": "Hello, welcome to sales!",
                     "error_text": "We are busy right now, please try again.",
+                    "tts_provider": null,
                     "tts_pace": 0.85,
                     "tts_model": "bulbul:v3",
                     "tts_speaker": null,
@@ -2966,6 +2987,7 @@
                   "system_prompt": "You are a sales agent.",
                   "greeting_text": "Hello, welcome to sales!",
                   "error_text": "We are busy right now, please try again.",
+                  "tts_provider": null,
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -3056,6 +3078,21 @@
                     "format": "uuid",
                     "nullable": true,
                     "description": "Optional FK to `elevenlabs_avatars` (ElevenLabs persona)."
+                  },
+                  "tts_provider": {
+                    "type": "string",
+                    "enum": [
+                      "sarvam",
+                      "elevenlabs",
+                      "cartesia"
+                    ],
+                    "nullable": true,
+                    "description": "Per-agent TTS provider override (Feature 1, §8.1). Takes precedence over the tenant's customer_settings.tts_provider for this agent's calls on both Exotel and Vodafone. Null = inherit the tenant's provider (previous behavior, unchanged). Set this together with tts_speaker from a GET /voices catalog entry."
+                  },
+                  "voice_id": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Convenience alias for tts_speaker: pick an entry from GET /voices and pass its `voice_id` here (alongside that same entry's `provider` as tts_provider, and `model` as tts_model) instead of needing to already know the column name. If both voice_id and tts_speaker are given, tts_speaker wins."
                   }
                 }
               }
@@ -3074,6 +3111,7 @@
                   "system_prompt": "You are a premium sales agent.",
                   "greeting_text": "Hello VIP, welcome to premium sales!",
                   "error_text": "Pardon us, our premium service is delayed.",
+                  "tts_provider": null,
                   "tts_pace": 0.85,
                   "tts_model": "bulbul:v3",
                   "tts_speaker": null,
@@ -9568,6 +9606,156 @@
               "application/json": {
                 "example": {
                   "error": "CARTESIA_API_KEY is not configured on this server"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voices": {
+      "get": {
+        "tags": [
+          "Voice Catalog"
+        ],
+        "summary": "List all provider voices",
+        "description": "Returns every Sarvam, ElevenLabs, and Cartesia voice in one flat list. A provider whose API key isn't configured (or whose live call fails) is silently omitted rather than failing the whole request. Requires x-api-key.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Voice catalog",
+            "content": {
+              "application/json": {
+                "example": {
+                  "voices": [
+                    {
+                      "provider": "sarvam",
+                      "voice_id": "ritu",
+                      "name": "Ritu",
+                      "language": null,
+                      "gender": "female",
+                      "model": "bulbul:v3",
+                      "sample_url": "/voices/sample?provider=sarvam&voice_id=ritu&model=bulbul%3Av3"
+                    },
+                    {
+                      "provider": "elevenlabs",
+                      "voice_id": "21m00Tcm4TlvDq8ikWAM",
+                      "name": "Rachel",
+                      "language": "en",
+                      "gender": "female",
+                      "model": null,
+                      "sample_url": "/voices/sample?provider=elevenlabs&voice_id=21m00Tcm4TlvDq8ikWAM"
+                    },
+                    {
+                      "provider": "cartesia",
+                      "voice_id": "a0e99841-438c-4a64-b679-ae501e7d6091",
+                      "name": "Barbershop Man",
+                      "language": "en",
+                      "gender": "male",
+                      "model": "sonic-3.5",
+                      "sample_url": "/voices/sample?provider=cartesia&voice_id=a0e99841-438c-4a64-b679-ae501e7d6091&model=sonic-3.5"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Catalog aggregation failed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Failed to load voice catalog"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voices/sample": {
+      "get": {
+        "tags": [
+          "Voice Catalog"
+        ],
+        "summary": "Synthesize/play a sample for one catalog voice",
+        "description": "Synthesizes (Sarvam) or proxies (ElevenLabs/Cartesia) a short sample for one voice, regardless of provider, so the frontend has a single playback code path. This is the endpoint each catalog entry's `sample_url` points to. Requires x-api-key.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "sarvam",
+                "elevenlabs",
+                "cartesia"
+              ]
+            }
+          },
+          {
+            "name": "voice_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Defaults per provider (bulbul:v3 / ElevenLabs's own default / sonic-3.5)."
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "text",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "description": "Custom sample text. Defaults to a short greeting in `language` (or English)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audio sample",
+            "content": {
+              "audio/mpeg": {},
+              "audio/wav": {}
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters"
+          },
+          "502": {
+            "description": "Sample synthesis failed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Voice sample failed"
                 }
               }
             }

@@ -57,6 +57,34 @@ function mergeVoiceSettings(
 }
 
 /**
+ * Per-agent TTS provider override (Feature 1, §8.1 — `agents.tts_provider`,
+ * nullable, added by migration 011 but unused until now). `tenantCs()` in
+ * exotel-voicebot.ts (and the raw `session.customerSettingsSnapshot?.tts_provider`
+ * reads in vodafone-voicebot.ts) is the single chokepoint every TTS-provider
+ * branch decision reads from, so overriding `tts_provider` on the session's
+ * cached settings snapshot here — once, right after the agent row loads —
+ * propagates everywhere downstream without touching each call site.
+ *
+ * Must NOT mutate the object in place: `session.customerSettingsSnapshot` can
+ * be the exact same object instance cached in customer-settings.ts's
+ * in-memory `settingsCache` (shared across calls/customers), so this always
+ * creates a new shallow-merged object instead.
+ */
+export function applyAgentTtsProviderOverride(
+  session: VoicebotSession,
+  agentTtsProvider: string | null | undefined
+): void {
+  const p = (agentTtsProvider ?? "").trim();
+  if (!p) return;
+  const base = session.customerSettingsSnapshot;
+  if (!base || base.tts_provider === p) return;
+  session.customerSettingsSnapshot = {
+    ...base,
+    tts_provider: p as CustomerSettings["tts_provider"],
+  };
+}
+
+/**
  * Apply `agents.avatar_id` / `agents.elevenlabs_avatar_id` + language map onto session TTS fields.
  * Call after agent row is loaded and `customerSettingsSnapshot` is set.
  */

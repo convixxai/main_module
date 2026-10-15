@@ -9,6 +9,7 @@ import { askRoutes } from "./routes/ask";
 import { chatRoutes } from "./routes/chat";
 import { agentRoutes } from "./routes/agents";
 import { avatarRoutes } from "./routes/avatars";
+import { voiceCatalogRoutes } from "./routes/voice-catalog";
 import { voiceRoutes } from "./routes/voice";
 import { elevenlabsApiRoutes } from "./routes/elevenlabs-api";
 import { settingsRoutes } from "./routes/settings";
@@ -66,6 +67,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(settingsRoutes);
   app.register(agentRoutes);
   app.register(avatarRoutes);
+  app.register(voiceCatalogRoutes);             // Unified cross-provider voice picker (GET /voices, /voices/sample)
   app.register(kbRoutes);
   app.register(askRoutes);
   app.register(chatRoutes);

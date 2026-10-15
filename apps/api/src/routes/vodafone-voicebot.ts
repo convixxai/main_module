@@ -39,6 +39,7 @@ import type { WebSocket } from "ws";
 import { env } from "../config/env";
 import { pool } from "../config/db";
 import { getTelephonySettings } from "../services/telephony-settings";
+import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { runAskPipeline } from "./ask";
 import { runSimulatorStt } from "./voice-simulator";
@@ -216,6 +217,30 @@ async function resolveTtsConfig(
         return { provider, model: row.rows[0].tts_model, speaker: row.rows[0].tts_speaker, language, normalization, voiceGender: null };
       }
     }
+
+    // No avatar linked for this provider: fall back to the agent's own raw
+    // tts_speaker/tts_model (set directly via the GET /voices catalog +
+    // agents.tts_provider/tts_speaker — see routes/agents.ts and
+    // routes/voice-catalog.ts) before falling all the way to the tenant's
+    // customer_settings default. tts_model is a free-text column shared
+    // across providers, so only trust it when it looks like it belongs to
+    // `provider` (same guard as exotel-voicebot.ts's ttsModelMatchesProvider).
+    const agentRow = await pool.query(
+      `SELECT tts_speaker, tts_model FROM agents WHERE id = $1`,
+      [agentId]
+    );
+    const agentSpeaker = agentRow.rows[0]?.tts_speaker as string | null | undefined;
+    const agentModel = agentRow.rows[0]?.tts_model as string | null | undefined;
+    if (agentSpeaker?.trim()) {
+      return {
+        provider,
+        model: ttsModelLooksLikeProvider(agentModel, provider) ? agentModel ?? null : cust?.tts_model ?? null,
+        speaker: agentSpeaker,
+        language,
+        normalization,
+        voiceGender: null,
+      };
+    }
   }
   return {
     provider,
@@ -227,27 +252,63 @@ async function resolveTtsConfig(
   };
 }
 
-async function resolveInitialAgentAndChatSession(customerId: string): Promise<{
+function ttsModelLooksLikeProvider(
+  model: string | null | undefined,
+  provider: "sarvam" | "elevenlabs" | "cartesia"
+): boolean {
+  const m = (model ?? "").trim();
+  if (!m) return false;
+  switch (provider) {
+    case "sarvam":
+      return /^bulbul:/i.test(m);
+    case "elevenlabs":
+      return /^eleven_/i.test(m);
+    case "cartesia":
+      return /^sonic/i.test(m);
+    default:
+      return true;
+  }
+}
+
+async function resolveInitialAgentAndChatSession(
+  customerId: string,
+  dialedNumber: string | null | undefined
+): Promise<{
   chatSessionId: string;
   agentId: string | null;
   systemPrompt: string;
   greetingText: string | null;
   errorText: string | null;
+  ttsProvider: string | null;
 }> {
   const chatRes = await pool.query(`INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`, [
     customerId,
   ]);
   const chatSessionId = chatRes.rows[0].id as string;
 
-  const agentRes = await pool.query(
-    `SELECT id, system_prompt, greeting_text, error_text FROM agents WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
-    [customerId]
-  );
+  const agentSelectColumns = `id, system_prompt, greeting_text, error_text, tts_provider`;
+  const oldestActiveAgentQuery = `SELECT ${agentSelectColumns}
+     FROM agents WHERE customer_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`;
+
+  // Feature 3 (one company, many numbers): prefer the dialed number's
+  // configured default agent, same as exotel-voicebot.ts's resolution order.
+  const numberDefaultAgentId = await resolveDefaultAgentForNumber(customerId, dialedNumber ?? "");
+  let agentRes = numberDefaultAgentId
+    ? await pool.query(
+        `SELECT ${agentSelectColumns} FROM agents WHERE id = $1 AND customer_id = $2 AND is_active = TRUE LIMIT 1`,
+        [numberDefaultAgentId, customerId]
+      )
+    : await pool.query(oldestActiveAgentQuery, [customerId]);
+
+  if (agentRes.rows.length === 0 && numberDefaultAgentId) {
+    agentRes = await pool.query(oldestActiveAgentQuery, [customerId]);
+  }
+
   const customerRes = await pool.query(`SELECT system_prompt FROM customers WHERE id = $1`, [customerId]);
   const fallbackPrompt = customerRes.rows[0]?.system_prompt ?? "You are a helpful assistant.";
 
   if (agentRes.rows.length === 0) {
-    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt, greetingText: null, errorText: null };
+    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt, greetingText: null, errorText: null, ttsProvider: null };
   }
   return {
     chatSessionId,
@@ -255,6 +316,7 @@ async function resolveInitialAgentAndChatSession(customerId: string): Promise<{
     systemPrompt: agentRes.rows[0].system_prompt || fallbackPrompt,
     greetingText: agentRes.rows[0].greeting_text || null,
     errorText: agentRes.rows[0].error_text || null,
+    ttsProvider: agentRes.rows[0].tts_provider || null,
   };
 }
 
@@ -337,7 +399,8 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   );
   session.currentLanguageCode = session.defaultLanguageCode;
 
-  const { chatSessionId, agentId, systemPrompt, greetingText, errorText } = await resolveInitialAgentAndChatSession(customerId);
+  const { chatSessionId, agentId, systemPrompt, greetingText, errorText, ttsProvider: agentTtsProvider } =
+    await resolveInitialAgentAndChatSession(customerId, event.toNumber);
   session.chatSessionId = chatSessionId;
   session.agentId = agentId;
   session.errorText = errorText ?? undefined;
@@ -371,8 +434,15 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
     }
   }
 
+  // Feature 1 (§8.1) — agent-level TTS provider override (agents.tts_provider,
+  // added by migration 011): takes precedence over the tenant's own
+  // customer_settings.tts_provider when the agent sets one.
+  const effectiveTtsProvider =
+    (agentTtsProvider as "sarvam" | "elevenlabs" | "cartesia" | null) ??
+    (customerSettings?.tts_provider as "sarvam" | "elevenlabs" | "cartesia" | undefined) ??
+    "sarvam";
   const ttsConfig = await resolveTtsConfig(
-    (customerSettings?.tts_provider as "sarvam" | "elevenlabs" | "cartesia") ?? "sarvam",
+    effectiveTtsProvider,
     agentId,
     customerSettings,
     session.defaultLanguageCode ?? "en-IN"

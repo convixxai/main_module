@@ -3,15 +3,21 @@ import { z } from "zod";
 import { pool } from "../config/db";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 
+// voice_id is a convenience alias for tts_speaker: pick an entry from
+// GET /voices and send its `voice_id` here (plus `tts_provider`/`tts_model`
+// from that same entry) instead of having to already know the column name.
+// Both are accepted; if both are given, tts_speaker wins.
 const createAgentSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional().default(""),
   system_prompt: z.string().optional().default("You are a helpful assistant."),
   greeting_text: z.string().optional().nullable(),
   error_text: z.string().optional().nullable(),
+  tts_provider: z.enum(["sarvam", "elevenlabs", "cartesia"]).optional().nullable(),
   tts_pace: z.number().min(0.5).max(2.0).optional().nullable(),
   tts_model: z.string().optional().nullable(),
   tts_speaker: z.string().optional().nullable(),
+  voice_id: z.string().optional().nullable(),
   tts_sample_rate: z.number().optional().nullable(),
   avatar_id: z.string().uuid().optional().nullable(),
   elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
@@ -24,9 +30,11 @@ const updateAgentSchema = z.object({
   system_prompt: z.string().optional(),
   greeting_text: z.string().optional().nullable(),
   error_text: z.string().optional().nullable(),
+  tts_provider: z.enum(["sarvam", "elevenlabs", "cartesia"]).optional().nullable(),
   tts_pace: z.number().min(0.5).max(2.0).optional().nullable(),
   tts_model: z.string().optional().nullable(),
   tts_speaker: z.string().optional().nullable(),
+  voice_id: z.string().optional().nullable(),
   tts_sample_rate: z.number().optional().nullable(),
   avatar_id: z.string().uuid().optional().nullable(),
   elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
@@ -50,23 +58,26 @@ export async function agentRoutes(app: FastifyInstance) {
         system_prompt,
         greeting_text,
         error_text,
+        tts_provider,
         tts_pace,
         tts_model,
         tts_speaker,
+        voice_id,
         tts_sample_rate,
         avatar_id,
         elevenlabs_avatar_id,
         cartesia_avatar_id,
       } = body.data;
+      const resolvedTtsSpeaker = tts_speaker ?? voice_id ?? null;
 
       const result = await pool.query(
         `INSERT INTO agents (
            customer_id, name, description, system_prompt, greeting_text, error_text,
-           tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
+           tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id, cartesia_avatar_id
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          RETURNING id, customer_id, name, description, system_prompt, greeting_text, error_text,
-                   tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id, cartesia_avatar_id,
+                   tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate, avatar_id, elevenlabs_avatar_id, cartesia_avatar_id,
                    is_active, created_at, updated_at`,
         [
           customerId,
@@ -75,9 +86,10 @@ export async function agentRoutes(app: FastifyInstance) {
           system_prompt,
           greeting_text,
           error_text,
+          tts_provider ?? null,
           tts_pace,
           tts_model,
-          tts_speaker,
+          resolvedTtsSpeaker,
           tts_sample_rate,
           avatar_id ?? null,
           elevenlabs_avatar_id ?? null,
@@ -96,7 +108,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const customerId = request.customerId!;
 
       const result = await pool.query(
-        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate,
                 avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at
          FROM agents
          WHERE customer_id = $1
@@ -116,7 +128,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const { id } = request.params as { id: string };
 
       const result = await pool.query(
-        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+        `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate,
                 avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at
          FROM agents
          WHERE id = $1 AND customer_id = $2`,
@@ -148,14 +160,18 @@ export async function agentRoutes(app: FastifyInstance) {
         system_prompt,
         greeting_text,
         error_text,
+        tts_provider,
         tts_pace,
         tts_model,
         tts_speaker,
+        voice_id,
         tts_sample_rate,
         avatar_id,
         elevenlabs_avatar_id,
         cartesia_avatar_id,
       } = body.data;
+      // voice_id is a convenience alias for tts_speaker (see createAgentSchema's comment).
+      const resolvedTtsSpeaker = tts_speaker !== undefined ? tts_speaker : voice_id;
 
       if (
         !name &&
@@ -163,9 +179,10 @@ export async function agentRoutes(app: FastifyInstance) {
         system_prompt === undefined &&
         greeting_text === undefined &&
         error_text === undefined &&
+        tts_provider === undefined &&
         tts_pace === undefined &&
         tts_model === undefined &&
-        tts_speaker === undefined &&
+        resolvedTtsSpeaker === undefined &&
         tts_sample_rate === undefined &&
         avatar_id === undefined &&
         elevenlabs_avatar_id === undefined &&
@@ -209,6 +226,10 @@ export async function agentRoutes(app: FastifyInstance) {
         sets.push(`error_text = $${idx++}`);
         values.push(error_text);
       }
+      if (tts_provider !== undefined) {
+        sets.push(`tts_provider = $${idx++}`);
+        values.push(tts_provider);
+      }
       if (tts_pace !== undefined) {
         sets.push(`tts_pace = $${idx++}`);
         values.push(tts_pace);
@@ -217,9 +238,9 @@ export async function agentRoutes(app: FastifyInstance) {
         sets.push(`tts_model = $${idx++}`);
         values.push(tts_model);
       }
-      if (tts_speaker !== undefined) {
+      if (resolvedTtsSpeaker !== undefined) {
         sets.push(`tts_speaker = $${idx++}`);
-        values.push(tts_speaker);
+        values.push(resolvedTtsSpeaker);
       }
       if (tts_sample_rate !== undefined) {
         sets.push(`tts_sample_rate = $${idx++}`);
@@ -245,7 +266,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const result = await pool.query(
         `UPDATE agents SET ${sets.join(", ")}
          WHERE id = $${idx++} AND customer_id = $${idx}
-         RETURNING id, name, description, system_prompt, greeting_text, error_text, tts_pace, tts_model, tts_speaker, tts_sample_rate,
+         RETURNING id, name, description, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_model, tts_speaker, tts_sample_rate,
                    avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at`,
         values
       );
