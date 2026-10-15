@@ -66,7 +66,11 @@
     },
     {
       "name": "Vodafone Voicebot",
-      "description": "Vodafone (VI) Voicebot WebSocket system. Admin CRUD for per-tenant Vodafone settings (**x-admin-token**). Vodafone connects out to us (inbound-only, no outbound trigger API exists yet), so the settings response returns the `wss://` URL to configure on Vodafone's own Streaming Object."
+      "description": "Vodafone (VI) Voicebot WebSocket system. Admin CRUD for per-tenant Vodafone settings (**x-admin-token**), including `vi_flow_id` (used by **Vodafone Outbound Campaign**, see that tag). Vodafone connects out to us for live calls (inbound-only — there is still no single-ad-hoc-outbound-call trigger API), so the settings response returns the `wss://` URL to configure on Vodafone's own Streaming Object."
+    },
+    {
+      "name": "Vodafone Outbound Campaign",
+      "description": "Vodafone-specific slice of the **Outbound Campaigns** endpoints: driving VI's OBD Campaign API (\"With Flow\") instead of Exotel's per-lead `Calls/connect`. Requires `vi_flow_id` already configured via **Vodafone Voicebot**'s `PUT /customers/{customerId}/vodafone-settings` (one Flow per tenant, containing a Streaming node bound to that tenant's Vodafone WS endpoint — set up once in VI's portal). `POST /outbound/campaigns`, `.../leads`, `.../trigger` and `DELETE .../{id}` are shared with Exotel and listed under both tags; `.../pause` and `.../status` are Vodafone-only. Requires `x-api-key`."
     },
     {
       "name": "Admin logs",
@@ -5985,7 +5989,8 @@
       },
       "post": {
         "tags": [
-          "Outbound Campaigns"
+          "Outbound Campaigns",
+          "Vodafone Outbound Campaign"
         ],
         "summary": "Create campaign",
         "description": "Creates an outbound campaign and generates script audio using TTS. Audio is stored temporarily until campaign is deleted. If this customer's telephony provider is Vodafone, also creates a matching VI OBD campaign (API With Flow) using fromdate/todate/fromtime/totime (required in that case) plus the tenant's vi_flow_id already configured via PUT /customers/{customerId}/vodafone-settings, and caches VI's expected base-record variable names.",
@@ -6085,10 +6090,11 @@
     "/outbound/campaigns/{id}": {
       "delete": {
         "tags": [
-          "Outbound Campaigns"
+          "Outbound Campaigns",
+          "Vodafone Outbound Campaign"
         ],
         "summary": "Delete campaign",
-        "description": "Soft deletes the campaign and removes the generated audio file from the server.",
+        "description": "Soft deletes the campaign and removes the generated audio file from the server. For a Vodafone campaign, also pauses it on VI (StartorStop(P)) first, best-effort, before the local soft-delete.",
         "security": [
           {
             "ApiKey": []
@@ -6125,7 +6131,8 @@
     "/outbound/campaigns/{id}/leads": {
       "post": {
         "tags": [
-          "Outbound Campaigns"
+          "Outbound Campaigns",
+          "Vodafone Outbound Campaign"
         ],
         "summary": "Add leads to campaign",
         "description": "Adds one or more phone numbers to the campaign lead list. For a Vodafone campaign, also pushes the base to VI (staticCampaignDataIngestion) so VI will actually dial these numbers; for Exotel, numbers are only dialed later by POST .../trigger.",
@@ -6175,7 +6182,8 @@
     "/outbound/campaigns/{id}/trigger": {
       "post": {
         "tags": [
-          "Outbound Campaigns"
+          "Outbound Campaigns",
+          "Vodafone Outbound Campaign"
         ],
         "summary": "Trigger campaign calls",
         "description": "Exotel: initiates outbound calls to all leads in the campaign that are in 'pending' status, one REST call per lead. Vodafone: pushes any provided phone_numbers to VI's base then calls VI's StartorStop(S) once — VI dials the whole base itself, so the response only confirms the campaign was started, not per-lead results. Optionally accepts a list of phone numbers to add as leads before triggering.",
@@ -6230,7 +6238,7 @@
     "/outbound/campaigns/{id}/pause": {
       "post": {
         "tags": [
-          "Outbound Campaigns"
+          "Vodafone Outbound Campaign"
         ],
         "summary": "Pause a Vodafone OBD campaign",
         "description": "Vodafone only — calls VI's StartorStop(P) to pause a running OBD campaign. 400 if this campaign isn't on Vodafone. Exotel has no campaign-level pause since its calls are already individually triggered.",
@@ -6276,7 +6284,7 @@
     "/outbound/campaigns/{id}/status": {
       "get": {
         "tags": [
-          "Outbound Campaigns"
+          "Vodafone Outbound Campaign"
         ],
         "summary": "Live status for a Vodafone OBD campaign",
         "description": "Vodafone only — proxies VI's campaignstatus API (dial counts, success rate, campaign window). 400 if this campaign isn't on Vodafone.",
