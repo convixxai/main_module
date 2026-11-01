@@ -79,6 +79,7 @@ export interface OpenAIUsageResult {
 const PRICING: Record<string, { input: number; output: number }> = {
   "gpt-4o-mini": { input: 0.15, output: 0.6 },
   "gpt-4o": { input: 2.5, output: 10 },
+  "gpt-5-mini": { input: 0.25, output: 2 },
 };
 
 function estimateCost(
@@ -86,7 +87,9 @@ function estimateCost(
   promptTokens: number,
   completionTokens: number
 ): number {
-  const price = PRICING[model] || PRICING["gpt-4o-mini"];
+  // The API reports dated snapshots (e.g. gpt-5-mini-2025-08-07).
+  const baseModel = model.replace(/-\d{4}-\d{2}-\d{2}$/, "");
+  const price = PRICING[baseModel] || PRICING["gpt-4o-mini"];
   return (
     (promptTokens / 1_000_000) * price.input +
     (completionTokens / 1_000_000) * price.output
@@ -100,6 +103,31 @@ export type ChatOpenAIRagOptions = {
   model?: string | null;
 };
 
+/**
+ * Generation params for a chat completion. The GPT-5 family rejects `max_tokens`,
+ * `top_p` and any non-default `temperature`. Its reasoning tokens also count against
+ * `max_completion_tokens`, so effort stays minimal to keep voice replies fast and
+ * stop reasoning from using up small token budgets.
+ */
+function openAiGenerationParams(
+  model: string,
+  maxTokens: number,
+  temperature: number,
+  top_p?: number | null
+) {
+  if (/^gpt-5/i.test(model)) {
+    return {
+      max_completion_tokens: maxTokens,
+      reasoning_effort: "minimal" as const,
+    };
+  }
+  return {
+    max_tokens: maxTokens,
+    temperature,
+    ...(top_p != null && top_p !== 1 ? { top_p } : {}),
+  };
+}
+
 export async function chatOpenAI(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
   maxTokens = 150,
@@ -110,21 +138,18 @@ export async function chatOpenAI(
     ragOptions?.temperature ?? env.openai.ragTemperature;
   const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
   const model = (ragOptions?.model?.trim() || env.openai.model).trim();
+  const generationParams = openAiGenerationParams(model, maxTokens, temperature, top_p);
 
   trace?.("openai_chat_request", {
     provider: "openai",
     model,
-    max_tokens: maxTokens,
-    temperature,
-    top_p: top_p ?? null,
+    ...generationParams,
     messages,
   });
   const res = await openaiClient.chat.completions.create({
     model,
     messages,
-    temperature,
-    ...(top_p != null && top_p !== 1 ? { top_p } : {}),
-    max_tokens: maxTokens,
+    ...generationParams,
   });
 
   const promptTokens = res.usage?.prompt_tokens || 0;
@@ -165,22 +190,19 @@ export async function streamChatOpenAI(
     ragOptions?.temperature ?? env.openai.ragTemperature;
   const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
   const model = (ragOptions?.model?.trim() || env.openai.model).trim();
+  const generationParams = openAiGenerationParams(model, maxTokens, temperature, top_p);
 
   trace?.("openai_chat_stream_request", {
     provider: "openai",
     model,
-    max_tokens: maxTokens,
-    temperature,
-    top_p: top_p ?? null,
+    ...generationParams,
     messages,
   });
 
   const stream = await openaiClient.chat.completions.create({
     model,
     messages,
-    temperature,
-    ...(top_p != null && top_p !== 1 ? { top_p } : {}),
-    max_tokens: maxTokens,
+    ...generationParams,
     stream: true,
     stream_options: { include_usage: true },
   });
@@ -489,13 +511,12 @@ export async function streamChatOpenAIWithLanguageDetection(
   const temperature = ragOptions?.temperature ?? env.openai.ragTemperature;
   const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
   const model = (ragOptions?.model?.trim() || env.openai.model).trim();
+  const generationParams = openAiGenerationParams(model, maxTokens, temperature, top_p);
 
   trace?.("openai_chat_stream_lang_detect_request", {
     provider: "openai",
     model,
-    max_tokens: maxTokens,
-    temperature,
-    top_p: top_p ?? null,
+    ...generationParams,
     language_detection: true,
     fallback_language: fallbackLanguage,
   });
@@ -503,9 +524,7 @@ export async function streamChatOpenAIWithLanguageDetection(
   const stream = await openaiClient.chat.completions.create({
     model,
     messages,
-    temperature,
-    ...(top_p != null && top_p !== 1 ? { top_p } : {}),
-    max_tokens: maxTokens,
+    ...generationParams,
     stream: true,
     stream_options: { include_usage: true },
   });
@@ -611,8 +630,7 @@ export async function detectVoiceUtteranceLanguageOpenAI(params: {
   try {
     const res = await openaiClient.chat.completions.create({
       model: env.openai.languageDetectModel,
-      temperature: 0,
-      max_tokens: 64,
+      ...openAiGenerationParams(env.openai.languageDetectModel, 64, 0),
       response_format: { type: "json_object" },
       messages: [
         {
