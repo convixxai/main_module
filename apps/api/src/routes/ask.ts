@@ -224,17 +224,15 @@ async function resolveAgent(
   try {
     // Multi-agent routing runs once per conversation (the pick sticks via
     // chat_sessions.agent_id), but on a live call it sits in front of the
-    // first answer, so use the fast OpenAI classifier model with a tight
-    // timeout. Self-hosted only when OpenAI isn't configured.
-    const chosen = env.openai.apiKey
-      ? await withTimeout(
-          chatOpenAI(routerMessages, 64, undefined, {
-            model: env.openai.agentRouterModel,
-            temperature: 0,
-          }).then((r) => r.answer),
-          2500
-        )
-      : await withTimeout(chatSelfHosted(routerMessages, 60), 3000);
+    // first answer, so use OpenAI with a tight timeout.
+    // OpenAI only (never self-hosted); on timeout/error we fall back to the first agent.
+    const chosen = await withTimeout(
+      chatOpenAI(routerMessages, 64, undefined, {
+        model: env.openai.agentRouterModel,
+        temperature: 0,
+      }).then((r) => r.answer),
+      2500
+    );
     if (chosen) {
       const trimmed = chosen.trim();
       // Router answers with the list number; UUID / name match kept as fallbacks.
@@ -572,8 +570,13 @@ export async function runAskPipeline(params: {
     additionalSystemPrompt,
     onLlmTextDelta,
   } = params;
-  /** Streaming requires a guaranteed single-provider path - see onLlmTextDelta doc above. */
-  const ragOpenaiOnly = onLlmTextDelta ? true : params.ragOpenaiOnly;
+  // Answers ALWAYS come from OpenAI (product decision 2026-11-05): the
+  // self-hosted LLM is never used for answering, whatever the request /
+  // customer_settings.rag_use_openai_only / llm_fallback_to_openai say. The
+  // `ragOpenaiOnly` param is kept for API compatibility only. (Embeddings for
+  // KB search are unchanged: they must match the stored KB vectors.)
+  void params.ragOpenaiOnly;
+  const ragOpenaiOnly = true;
   const start = Date.now();
 
   trace?.("pipeline_start", {
