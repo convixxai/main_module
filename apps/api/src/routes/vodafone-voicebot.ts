@@ -94,8 +94,13 @@ const VAD_ENERGY_THRESHOLD = 200;
  * exotel-voicebot.ts's already-proven VAD_SILENCE_TIMEOUT_MS default (1500ms)
  * - notably, customer_settings.vad_silence_timeout_ms for this very customer
  * was already set to 1500 in the database; this bot just wasn't reading it.
+ *
+ * 2026-11-05: back to 800ms by product decision (response speed: 1500ms of the
+ * caller's wait was this timer alone). The cut-off risk above still applies;
+ * raise customer_settings.vad_silence_timeout_ms per tenant if callers get
+ * interrupted mid-sentence.
  */
-const DEFAULT_VAD_SILENCE_MS = 1500;
+const DEFAULT_VAD_SILENCE_MS = 800;
 const MIN_UTTERANCE_BYTES = 1600; // ~100ms @ 8kHz 16-bit mono
 const MAX_UTTERANCE_BYTES = 5 * 1024 * 1024;
 /** Grace period added on top of estimated playback duration before we give up

@@ -119,6 +119,12 @@ function openAiGenerationParams(
     return {
       max_completion_tokens: maxTokens,
       reasoning_effort: "minimal" as const,
+      // Measured on the real voice RAG prompt (2026-11-05, gpt-5-mini, median
+      // time-to-first-token): 1179ms default -> 891ms with verbosity "low" ->
+      // 768ms adding service_tier "priority". Voice replies are one or two
+      // sentences, so "low" verbosity costs nothing in answer quality.
+      ...(env.openai.verbosity ? { verbosity: env.openai.verbosity } : {}),
+      ...(env.openai.serviceTier ? { service_tier: env.openai.serviceTier } : {}),
     };
   }
   return {

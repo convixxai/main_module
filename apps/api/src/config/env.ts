@@ -49,6 +49,19 @@ export const env = {
       (process.env.OPENAI_LANGUAGE_DETECT_MODEL || "gpt-5-mini").trim(),
     /** Multi-agent router (picks which agent answers a conversation; one tiny call per conversation). */
     agentRouterModel: (process.env.OPENAI_AGENT_ROUTER_MODEL || "gpt-5-mini").trim(),
+    /** gpt-5 family only. "low" | "medium" | "high"; empty string = API default. */
+    verbosity: ((process.env.OPENAI_VERBOSITY ?? "low").trim() || undefined) as "low" | "medium" | "high" | undefined,
+    /**
+     * gpt-5 family only. "priority" = OpenAI Priority processing (lower, steadier
+     * latency; billed at a higher per-token rate). Set OPENAI_SERVICE_TIER=default
+     * (or empty) to turn it off.
+     */
+    serviceTier: ((process.env.OPENAI_SERVICE_TIER ?? "priority").trim() || undefined) as
+      | "auto"
+      | "default"
+      | "flex"
+      | "priority"
+      | undefined,
     /**
      * Used only for RAG chat completions (`chatOpenAI` in ask pipeline).
      * Slightly above 0 helps with transliteration/typo alignment (e.g. Chhavani vs Chavni).

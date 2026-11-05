@@ -159,8 +159,8 @@ import {
 // Constants
 // ============================================================
 
-/** Silence detection: if no media for this many ms, treat as end of utterance. */
-const VAD_SILENCE_TIMEOUT_MS = 1500;
+/** Silence detection: if no media for this many ms, treat as end of utterance (2026-11-05: 1500 -> 800 for speed; per-tenant override via customer_settings.vad_silence_timeout_ms). */
+const VAD_SILENCE_TIMEOUT_MS = 800;
 
 /** Maximum inbound PCM buffer before force-processing (avoid OOM). */
 const MAX_INBOUND_BUFFER_BYTES = 5 * 1024 * 1024; // 5 MB ≈ ~160s at 16kHz
