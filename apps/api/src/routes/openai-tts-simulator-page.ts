@@ -279,8 +279,8 @@ export const OPENAI_TTS_SIMULATOR_PAGE_HTML = `<!DOCTYPE html>
         <h2>LLM humanizer</h2>
         <div class="grid-2">
           <div>
-            <label>Model (blank = tenant default — gpt-4o-mini is fastest)</label>
-            <input type="text" id="llmModel" placeholder="gpt-4o-mini" />
+            <label>Model (blank = tenant default, gpt-5-mini)</label>
+            <input type="text" id="llmModel" placeholder="gpt-5-mini" />
           </div>
           <div>
             <label class="chk" style="margin-top:1.4rem">

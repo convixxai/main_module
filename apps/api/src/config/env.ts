@@ -43,12 +43,12 @@ export const env = {
 
   openai: {
     apiKey: process.env.OPENAI_API_KEY!,
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    model: process.env.OPENAI_MODEL || "gpt-5-mini",
     /** Fast model for voice utterance language classification (Cartesia STT path). */
     languageDetectModel:
-      (process.env.OPENAI_LANGUAGE_DETECT_MODEL || "gpt-4o-mini").trim(),
+      (process.env.OPENAI_LANGUAGE_DETECT_MODEL || "gpt-5-mini").trim(),
     /** Multi-agent router (picks which agent answers a conversation; one tiny call per conversation). */
-    agentRouterModel: (process.env.OPENAI_AGENT_ROUTER_MODEL || "gpt-4.1-mini").trim(),
+    agentRouterModel: (process.env.OPENAI_AGENT_ROUTER_MODEL || "gpt-5-mini").trim(),
     /**
      * Used only for RAG chat completions (`chatOpenAI` in ask pipeline).
      * Slightly above 0 helps with transliteration/typo alignment (e.g. Chhavani vs Chavni).

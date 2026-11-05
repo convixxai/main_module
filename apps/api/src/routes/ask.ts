@@ -228,7 +228,7 @@ async function resolveAgent(
     // timeout. Self-hosted only when OpenAI isn't configured.
     const chosen = env.openai.apiKey
       ? await withTimeout(
-          chatOpenAI(routerMessages, 16, undefined, {
+          chatOpenAI(routerMessages, 64, undefined, {
             model: env.openai.agentRouterModel,
             temperature: 0,
           }).then((r) => r.answer),
