@@ -139,6 +139,8 @@ import {
 } from "../services/voicebot-trace";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
+import { loadCallToolset, looksPersonalQuestion, type CallToolset } from "../services/crm-tools/toolset";
+import { holdMessageFor } from "../services/crm-tools/hold-messages";
 import { createRagTrace } from "../services/rag-trace";
 import { relaxAgentPrompt, RAG_MULTILINGUAL_GRAMMAR_RULE, RAG_STT_ENTITY_INTEGRITY_RULE } from "../services/rag-prompt-utils";
 import {
@@ -2738,7 +2740,7 @@ async function runVoicebotReplyPipelineAfterTranscriptReady(
     });
   }
 
-  const askResult = await runVoicebotAskPipeline(session, transcript, log, streamToCall);
+  const askResult = await runVoicebotAskPipeline(session, transcript, log, streamToCall, { ws, ttsLanguage });
   const tAfterAsk = Date.now();
 
   if (!askResult || !askResult.answer) {
@@ -3653,7 +3655,9 @@ async function runVoicebotAskPipeline(
   session: VoicebotSession,
   question: string,
   log?: FastifyRequest["log"],
-  streamCall?: { ws: WebSocket; ttsLanguage: string }
+  streamCall?: { ws: WebSocket; ttsLanguage: string },
+  /** Always passed by the live call: used to speak the CRM-tool "please hold" line in batch mode. */
+  holdCall?: { ws: WebSocket; ttsLanguage: string }
 ): Promise<{
   answer: string;
   source: string;
@@ -3670,8 +3674,12 @@ async function runVoicebotAskPipeline(
       chatOpenAI,
       streamChatOpenAI,
       streamChatOpenAIWithLanguageDetection,
+      streamChatOpenAIWithTools,
       getLlmLanguageDetectionPrompt,
     } = await import("../services/llm");
+    // Mid-call CRM tools (native CRM + verified custom API tools); null for
+    // tenants without any, in which case this whole pipeline is unchanged.
+    const toolsetP: Promise<CallToolset | null> = loadCallToolset(session.customerId).catch(() => null);
 
     // Re-fetched fresh every turn - matches ask.ts's runAskPipeline (used by
     // Vodafone/QA console/production /ask), none of which cache this across
@@ -3824,7 +3832,11 @@ async function runVoicebotAskPipeline(
       matches: kbMatchesForLog,
     });
 
-    if (kbResult.rows.length === 0) {
+    // With CRM tools the KB shortcuts (no match / out-of-scope gate / kb_direct)
+    // are skipped so a personal question reaches the model and its tools.
+    const toolset = await toolsetP;
+
+    if (kbResult.rows.length === 0 && !toolset) {
       const noKbAnswer = allowRelatedGeneralAnswersVoice(session)
         ? outOfScopeMessageVoice(session)
         : "I don't have enough information to answer that question.";
@@ -3852,7 +3864,7 @@ async function runVoicebotAskPipeline(
       };
     }
 
-    const top = kbResult.rows[0] as {
+    const top = (kbResult.rows[0] ?? { question: "", answer: "", distance: 2 }) as {
       question: string;
       answer: string;
       distance: number | string;
@@ -3861,6 +3873,7 @@ async function runVoicebotAskPipeline(
     const relatedScopeTh = relatedScopeDistanceThresholdVoice(session);
     const isShortQuery = question.trim().length < 20;
     if (
+      !toolset &&
       allowRelatedGeneralAnswersVoice(session) &&
       !isShortQuery &&
       Number.isFinite(dist) &&
@@ -3889,7 +3902,7 @@ async function runVoicebotAskPipeline(
     // so follow-up phrasing/context ("what about that", pronouns, etc.) is handled
     // correctly instead of returning a raw KB row that ignores the conversation so far.
     const canDirectKb =
-      history.length === 0 && Number.isFinite(dist) && dist < directTh;
+      (!toolset || !looksPersonalQuestion(question)) && history.length === 0 && Number.isFinite(dist) && dist < directTh;
 
     if (canDirectKb) {
       const direct = String(top.answer).trim();
@@ -4046,6 +4059,29 @@ async function runVoicebotAskPipeline(
         : [{ role: "user" as const, content: question }]),
     ];
 
+    if (toolset && messages[0]?.role === "system") {
+      messages[0] = { ...messages[0], content: `${messages[0].content}
+
+${toolset.promptBlock}` };
+    }
+    const toolCtx = {
+      customerId: session.customerId,
+      customerPhone: (session.mode === "outbound" ? session.to : session.from) || null,
+      callId: session.callSid || session.streamSid,
+      userUtterance: question,
+      lastAssistantMessage: [...history].reverse().find((h: { role: string }) => h.role === "assistant")?.content ?? null,
+      log,
+    };
+    let toolHeld = false;
+    const toolHoldNeeded = (names: string[], textAlreadyEmitted: boolean): boolean => {
+      // "Please hold" only while READING data, once per turn, and only if the
+      // model has not already started speaking this turn.
+      if (!toolset || toolHeld || textAlreadyEmitted || !names.some((n) => toolset.isReadTool(n))) return false;
+      toolHeld = true;
+      return true;
+    };
+    const holdText = () => holdMessageFor(session.currentLanguageCode || session.defaultLanguageCode);
+
     voiceTrace(log, "pipeline.rag.llm_request", {
       customerId: session.customerId,
       stream_sid: session.streamSid,
@@ -4089,8 +4125,24 @@ async function runVoicebotAskPipeline(
       let llmDetectedLanguage: string | null = null;
       let llmLanguageConfidence: "high" | "low" = "low";
 
-      // Use LLM-integrated language detection when enabled
-      const llmResult = useLlmLanguageDetection
+      // Use LLM-integrated language detection when enabled (not combined with
+      // tools: that detection is logging-only, see the callback comment below).
+      const llmResult = toolset
+        ? await streamChatOpenAIWithTools({
+            messages,
+            maxTokens: maxTok,
+            tools: toolset.tools,
+            onTextDelta: (d) => ttsq.pushDelta(d),
+            onToolCallsStart: async ({ names, textAlreadyEmitted }) => {
+              if (!toolHoldNeeded(names, textAlreadyEmitted)) return;
+              await ttsq.pushDelta(holdText() + " ");
+              log?.info({ stream_sid: session.streamSid }, "voicebot: tool hold message spoken");
+            },
+            executeTool: (name, args) => toolset.execute(name, args, toolCtx),
+            trace: ragTrace,
+            ragOptions: voiceRagOpts,
+          })
+        : useLlmLanguageDetection
         ? await streamChatOpenAIWithLanguageDetection(
             messages,
             maxTok,
@@ -4169,12 +4221,29 @@ async function runVoicebotAskPipeline(
       };
     }
 
-    const llmResult = await chatOpenAI(
-      messages,
-      maxTok,
-      ragTrace,
-      voiceRagOpts
-    );
+    const llmResult = toolset
+      ? await streamChatOpenAIWithTools({
+          messages,
+          maxTokens: maxTok,
+          tools: toolset.tools,
+          onToolCallsStart: async ({ names, textAlreadyEmitted }) => {
+            if (!holdCall || !toolHoldNeeded(names, textAlreadyEmitted)) return;
+            // Batch mode speaks the answer only at the end: say the hold line now.
+            const holdQ = createStreamingVoiceTts(holdCall.ws, session, holdCall.ttsLanguage, log);
+            await holdQ.pushDelta(holdText() + " ");
+            await holdQ.flushRest();
+            log?.info({ stream_sid: session.streamSid }, "voicebot: tool hold message spoken");
+          },
+          executeTool: (name, args) => toolset.execute(name, args, toolCtx),
+          trace: ragTrace,
+          ragOptions: voiceRagOpts,
+        })
+      : await chatOpenAI(
+          messages,
+          maxTok,
+          ragTrace,
+          voiceRagOpts
+        );
     const rawAnswer =
       llmResult.answer.trim() || "I'm sorry, I couldn't find an answer.";
     const scopedAnswer = allowRelatedGeneralAnswersVoice(session) &&

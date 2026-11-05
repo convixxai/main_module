@@ -255,6 +255,136 @@ export async function streamChatOpenAI(
   };
 }
 
+/**
+ * Streaming chat with OpenAI tool calling (mid-call CRM data, see
+ * services/crm-tools/toolset.ts). Same contract as streamChatOpenAI - text
+ * deltas go to `onTextDelta`, the final text comes back as `answer` - plus:
+ * when the model asks for tools, `onToolCallsStart` fires once per round
+ * (before execution, so the caller can say "please hold" for read tools),
+ * the tools run in parallel via `executeTool`, and the model is called again
+ * with their results. At most `maxToolRounds` tool rounds, then a final
+ * round with tool_choice "none" so a reply is always produced.
+ */
+export async function streamChatOpenAIWithTools(params: {
+  messages: OpenAI.Chat.ChatCompletionMessageParam[];
+  maxTokens: number;
+  tools: OpenAI.Chat.ChatCompletionTool[];
+  executeTool: (name: string, argsJson: string) => Promise<{ content: string; ok: boolean; latencyMs: number }>;
+  onTextDelta?: (token: string) => void | Promise<void>;
+  onToolCallsStart?: (info: { names: string[]; textAlreadyEmitted: boolean }) => void | Promise<void>;
+  trace?: RagTraceFn;
+  ragOptions?: ChatOpenAIRagOptions;
+  maxToolRounds?: number;
+}): Promise<OpenAIUsageResult & { toolCalls: { name: string; ok: boolean; latencyMs: number }[] }> {
+  const { tools, executeTool, onTextDelta, onToolCallsStart, trace, ragOptions } = params;
+  const maxToolRounds = params.maxToolRounds ?? 2;
+  const temperature = ragOptions?.temperature ?? env.openai.ragTemperature;
+  const top_p = ragOptions?.top_p ?? env.openai.ragTopP;
+  const model = (ragOptions?.model?.trim() || env.openai.model).trim();
+  // Tool-call arguments count against the completion budget too.
+  const generationParams = openAiGenerationParams(model, Math.max(params.maxTokens, 200), temperature, top_p);
+  const messages = [...params.messages];
+
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let modelUsed = model;
+  let finalText = "";
+  let emitted = false;
+  const toolCallsLog: { name: string; ok: boolean; latencyMs: number }[] = [];
+
+  for (let round = 0; round <= maxToolRounds; round++) {
+    const allowTools = round < maxToolRounds;
+    trace?.("openai_chat_tools_request", { model, round, tool_count: tools.length, allow_tools: allowTools });
+    const stream = await openaiClient.chat.completions.create({
+      model,
+      messages,
+      ...generationParams,
+      tools,
+      tool_choice: allowTools ? "auto" : "none",
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+
+    let text = "";
+    const calls: { id: string; name: string; args: string }[] = [];
+    // Fired as soon as the first tool name streams in (not after the full
+    // arguments), so "please hold" starts earlier.
+    let earlyHold: Promise<void> | null = null;
+    for await (const part of stream) {
+      if (part.usage) {
+        promptTokens += part.usage.prompt_tokens ?? 0;
+        completionTokens += part.usage.completion_tokens ?? 0;
+      }
+      if (part.model) modelUsed = part.model;
+      const delta = part.choices[0]?.delta;
+      if (delta?.content) {
+        text += delta.content;
+        emitted = true;
+        if (onTextDelta) await onTextDelta(delta.content);
+      }
+      for (const tc of delta?.tool_calls ?? []) {
+        const i = tc.index ?? 0;
+        calls[i] ??= { id: "", name: "", args: "" };
+        if (tc.id) calls[i].id = tc.id;
+        if (tc.function?.name) calls[i].name += tc.function.name;
+        if (tc.function?.arguments) calls[i].args += tc.function.arguments;
+        if (!earlyHold && onToolCallsStart && allowTools && calls[i].name) {
+          earlyHold = Promise.resolve(
+            onToolCallsStart({ names: [calls[i].name], textAlreadyEmitted: emitted })
+          ).catch(() => undefined);
+        }
+      }
+    }
+
+    const realCalls = calls.filter((c) => c && c.name);
+    if (realCalls.length === 0 || !allowTools) {
+      finalText += text;
+      break;
+    }
+
+    finalText += text;
+    trace?.("openai_tool_calls", { round, calls: realCalls.map((c) => ({ name: c.name, args: c.args })) });
+    if (earlyHold) await earlyHold;
+    if (onToolCallsStart) {
+      // Callers make this idempotent per turn; covers a read tool that was not
+      // the first name streamed.
+      await onToolCallsStart({ names: realCalls.map((c) => c.name), textAlreadyEmitted: emitted && !earlyHold });
+    }
+    const results = await Promise.all(realCalls.map((c) => executeTool(c.name, c.args)));
+    results.forEach((r, i) => toolCallsLog.push({ name: realCalls[i].name, ok: r.ok, latencyMs: r.latencyMs }));
+    trace?.("openai_tool_results", {
+      round,
+      results: results.map((r, i) => ({ name: realCalls[i].name, ok: r.ok, latency_ms: r.latencyMs, content: r.content.slice(0, 500) })),
+    });
+
+    messages.push({
+      role: "assistant",
+      content: text || null,
+      tool_calls: realCalls.map((c, i) => ({
+        id: c.id || `call_${round}_${i}`,
+        type: "function" as const,
+        function: { name: c.name, arguments: c.args || "{}" },
+      })),
+    });
+    realCalls.forEach((c, i) => {
+      messages.push({ role: "tool", tool_call_id: c.id || `call_${round}_${i}`, content: results[i].content });
+    });
+  }
+
+  const answer = finalText.trim();
+  if (promptTokens === 0 && completionTokens === 0) completionTokens = Math.ceil(answer.length / 4);
+  trace?.("openai_chat_tools_response", { model: modelUsed, raw_reply: answer, tool_calls: toolCallsLog });
+  return {
+    answer,
+    promptTokens,
+    completionTokens,
+    totalTokens: promptTokens + completionTokens,
+    model: modelUsed,
+    costUsd: estimateCost(modelUsed, promptTokens, completionTokens),
+    toolCalls: toolCallsLog,
+  };
+}
+
 export async function generateEmbedding(
   text: string,
   trace?: RagTraceFn

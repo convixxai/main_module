@@ -8,6 +8,7 @@ import {
   prepareQuestionForKbEmbedding,
   chatSelfHosted,
   chatOpenAI,
+  streamChatOpenAIWithTools,
   streamChatOpenAI,
   formatOpenAIClientError,
 } from "../services/llm";
@@ -30,6 +31,8 @@ import {
   cartesiaSttToSarvamShape,
 } from "../services/cartesia";
 import { cartesiaSpeechToTextWebsocket } from "../services/cartesia-stt-ws";
+import { loadCallToolset, looksPersonalQuestion, type CallToolset } from "../services/crm-tools/toolset";
+import { holdMessageFor } from "../services/crm-tools/hold-messages";
 import { parseWavPcm16Mono } from "../services/pcm-audio";
 import {
   elevenLabsSpeechToText,
@@ -556,6 +559,20 @@ export async function runAskPipeline(params: {
    * before - only the branch that actually calls OpenAI is affected.
    */
   onLlmTextDelta?: (delta: string) => void | Promise<void>;
+  /**
+   * Live-call CRM tool calling (services/crm-tools). Passed only by the voice
+   * routes. When the tenant has native CRM records or active custom tools, the
+   * model may fetch data mid-conversation; `onToolHold` is called with the
+   * "please hold" line (call language) only when a READ tool runs. When the
+   * tenant has no tools, nothing below changes.
+   */
+  toolContext?: {
+    customerPhone: string | null;
+    callId?: string | null;
+    languageCode?: string | null;
+    onToolHold?: (holdText: string) => void | Promise<void>;
+    log?: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void };
+  };
 }): Promise<AskPipelineResult> {
   const {
     customerId,
@@ -569,7 +586,12 @@ export async function runAskPipeline(params: {
     embeddingLanguageHint,
     additionalSystemPrompt,
     onLlmTextDelta,
+    toolContext,
   } = params;
+  // Loaded in parallel with the session/agent/embedding work below.
+  const toolsetP: Promise<CallToolset | null> = toolContext
+    ? loadCallToolset(customerId).catch(() => null)
+    : Promise.resolve(null);
   // Answers ALWAYS come from OpenAI (product decision 2026-11-05): the
   // self-hosted LLM is never used for answering, whatever the request /
   // customer_settings.rag_use_openai_only / llm_fallback_to_openai say. The
@@ -698,6 +720,11 @@ export async function runAskPipeline(params: {
 
   saveMessage(sessionId, "user", question);
 
+  // With CRM tools, the KB shortcuts below (no_kb / out-of-scope gate /
+  // kb_direct) are skipped: a personal question ("where is my order?") must
+  // reach the model so it can fetch the caller's data.
+  const toolset = await toolsetP;
+
   const baseTimings = (): AskPipelineTimings => ({
     parallel_init_ms: parallelInitMs,
     resolve_agent_ms: resolveAgentMs,
@@ -706,7 +733,7 @@ export async function runAskPipeline(params: {
     branch: "no_kb",
   });
 
-  if (matches.length === 0) {
+  if (matches.length === 0 && !toolset) {
     const noKbAnswer = allowRelatedGeneralAnswers
       ? outOfScopeMessage
       : "No knowledgebase entries found for this customer.";
@@ -726,10 +753,11 @@ export async function runAskPipeline(params: {
     };
   }
 
-  const topMatch = matches[0];
+  const topMatch = matches[0] ?? { question: "", answer: "", distance: 2 };
   const topDistance = Number(topMatch.distance);
   const isShortQuery = question.trim().length < 20;
   const definitelyOutOfScope =
+    !toolset &&
     allowRelatedGeneralAnswers &&
     !isShortQuery &&
     Number.isFinite(topDistance) &&
@@ -768,7 +796,7 @@ export async function runAskPipeline(params: {
   // prompting the caller to ask "can you speak in Marathi?" on their next
   // turn. For a single-language tenant this is safe (the caller and the KB
   // are always the same language), so the latency/cost win is kept there.
-  if (topMatch.distance < directTh && history.length === 0 && !multilingual) {
+  if ((!toolset || !looksPersonalQuestion(question)) && topMatch.distance < directTh && history.length === 0 && !multilingual) {
     trace?.("pipeline_exit", {
       branch: "kb_direct",
       distance: topMatch.distance,
@@ -817,6 +845,12 @@ export async function runAskPipeline(params: {
   const selfHostedOnly =
     custSettings?.llm_fallback_to_openai === false && ragOpenaiOnly !== true;
 
+  if (toolset && ragMessages[0]?.role === "system") {
+    ragMessages[0] = { ...ragMessages[0], content: `${ragMessages[0].content}
+
+${toolset.promptBlock}` };
+  }
+
   trace?.("rag_prompt_built", {
     context_chars: context.length,
     context_full: context,
@@ -831,9 +865,43 @@ export async function runAskPipeline(params: {
   if (ragOpenaiOnly) {
     trace?.("rag_llm_mode", { mode: onLlmTextDelta ? "openai_only_streaming" : "openai_only" });
     try {
-      openaiResult = onLlmTextDelta
-        ? await streamChatOpenAI(ragMessages, maxTok, onLlmTextDelta, trace, openaiOpts)
-        : await chatOpenAI(ragMessages, maxTok, trace, openaiOpts);
+      if (toolset && toolContext) {
+        const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? null;
+        const ctx = {
+          customerId,
+          customerPhone: toolContext.customerPhone,
+          callId: toolContext.callId,
+          userUtterance: question,
+          lastAssistantMessage: lastAssistant,
+          log: toolContext.log,
+        };
+        let held = false;
+        const r = await streamChatOpenAIWithTools({
+          messages: ragMessages,
+          maxTokens: maxTok,
+          tools: toolset.tools,
+          onTextDelta: onLlmTextDelta,
+          onToolCallsStart: async ({ names, textAlreadyEmitted }) => {
+            // "Please hold" only while READING data, once per turn, and not
+            // if the model already started speaking.
+            if (held || textAlreadyEmitted || !toolContext.onToolHold) return;
+            if (!names.some((n) => toolset.isReadTool(n))) return;
+            held = true;
+            await toolContext.onToolHold(holdMessageFor(toolContext.languageCode));
+          },
+          executeTool: (name, args) => toolset.execute(name, args, ctx),
+          trace,
+          ragOptions: openaiOpts,
+        });
+        if (r.toolCalls.length > 0) {
+          toolContext.log?.info({ tools: r.toolCalls, held }, "crm-tools: tools used this turn");
+        }
+        openaiResult = r;
+      } else {
+        openaiResult = onLlmTextDelta
+          ? await streamChatOpenAI(ragMessages, maxTok, onLlmTextDelta, trace, openaiOpts)
+          : await chatOpenAI(ragMessages, maxTok, trace, openaiOpts);
+      }
     } catch (e) {
       openaiCallError = formatOpenAIClientError(e);
       trace?.("openai_chat_exception", { error: openaiCallError });

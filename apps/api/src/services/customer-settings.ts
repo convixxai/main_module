@@ -53,6 +53,10 @@ export interface CustomerSettings {
   cartesia_normalization: string | null;
 
   // D. RAG / LLM
+  /** Mid-call CRM tool calling kill switch (migration 024). */
+  tool_calling_enabled?: boolean;
+  /** Optional instructions for when to call CRM tools (migration 024). */
+  tool_calling_prompt?: string | null;
   rag_use_openai_only: boolean;
   rag_top_k: number;
   rag_use_history: boolean;

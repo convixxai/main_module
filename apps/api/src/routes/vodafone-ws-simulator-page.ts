@@ -185,6 +185,15 @@ product=radio"></textarea>
   function newRoomId() { return 'SIM_' + Date.now() + '_' + Math.floor(Math.random() * 1000); }
   roomIdEl.value = newRoomId();
 
+  // Shareable prefill: ?customerId=...&cli=...&dni=...&params=k=v;k2=v2
+  (function prefillFromQuery() {
+    const q = new URLSearchParams(location.search);
+    if (q.get('customerId')) customerIdEl.value = q.get('customerId');
+    if (q.get('cli')) cliEl.value = q.get('cli');
+    if (q.get('dni')) dniEl.value = q.get('dni');
+    if (q.get('params')) customParamsEl.value = q.get('params').split(';').join('\\n');
+  })();
+
   customerPresetEl.addEventListener('change', () => {
     if (customerPresetEl.value) customerIdEl.value = customerPresetEl.value;
   });
@@ -312,6 +321,14 @@ product=radio"></textarea>
       } else if (msg.event === 'mark') {
         log('recv', 'mark: ' + msg.mark.name, msg);
         if (mMark.textContent === '—') mMark.textContent = (Date.now() - connectStartedAt) + ' ms';
+        // Exactly like VI: echo the mark back once all audio queued before it
+        // has finished playing (the server uses this to know the bot stopped talking).
+        const ctxNow = getAudioCtx().currentTime;
+        const waitMs = Math.max(0, (playCursor - ctxNow) * 1000);
+        const markName = msg.mark.name;
+        setTimeout(() => {
+          send({ event: 'mark', sequence_number: seq++, room_id: roomId, mark: { name: markName } });
+        }, waitMs);
       } else if (msg.event === 'stop') {
         log('recv', 'stop (server ended the stream)', msg);
       } else if (msg.event === 'clear') {
@@ -410,7 +427,7 @@ product=radio"></textarea>
   btnMic.addEventListener('click', async () => {
     if (recording) { stopMic(); return; }
     try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     } catch (e) {
       log('err', 'Microphone access denied/unavailable: ' + e.message);
       return;

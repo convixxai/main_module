@@ -156,6 +156,11 @@ interface VodafoneCallState {
    * the best agent (multi-agent), which then sticks for the call.
    */
   agentPinned: boolean;
+  /**
+   * The customer on the line (inbound: VI `cli`; outbound campaign: the lead),
+   * used by mid-call CRM tools to look the caller up.
+   */
+  customerPhone: string | null;
   processing: boolean;
   mediaFrameCount: number;
 }
@@ -628,6 +633,9 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
     processing: false,
     mediaFrameCount: 0,
     agentPinned,
+    customerPhone: campaign
+      ? pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber) || null
+      : event.fromNumber || null,
   };
   calls.set(event.streamId, state);
 
@@ -1030,6 +1038,18 @@ async function answerUtteranceBatch(
     additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE + buildLanguageRule(session, state),
     includeTimings: true,
     trace,
+    toolContext: {
+      customerPhone: state.customerPhone,
+      callId: session.callSid || streamId,
+      languageCode: session.currentLanguageCode || session.defaultLanguageCode,
+      log: app.log,
+      onToolHold: async (holdText) => {
+        // Batch mode speaks the answer only at the end, so say the hold line now.
+        const pcm = await synthesizeSpeechToPcm8k(holdText, state.ttsConfig);
+        if (!session.isClosing) sendFrames(ws, adapter.buildAudioFrame(streamId, pcm));
+        app.log.info({ streamId, holdText }, "vodafone-voicebot: tool hold message spoken");
+      },
+    },
   });
   noteRoutedAgent(app, streamId, state, askResult.agent_id);
   app.log.info(
@@ -1155,6 +1175,18 @@ async function answerUtteranceStreaming(
       sentences.push(delta);
     },
     trace,
+    toolContext: {
+      customerPhone: state.customerPhone,
+      callId: session.callSid || streamId,
+      languageCode: session.currentLanguageCode || session.defaultLanguageCode,
+      log: app.log,
+      onToolHold: async (holdText) => {
+        // Nothing has been streamed yet this turn (the pipeline checks), so the
+        // hold line is the first thing the caller hears, then the answer follows.
+        await speakSentence(holdText);
+        app.log.info({ streamId, holdText }, "vodafone-voicebot: tool hold message spoken");
+      },
+    },
   });
   noteRoutedAgent(app, streamId, state, askResult.agent_id);
   app.log.info(

@@ -35,6 +35,8 @@ import { voiceCartesiaTestConsoleRoutes } from "./routes/voice-cartesia-test-con
 import { qaTestConsoleRoutes } from "./routes/qa-test-console";
 import { kbAdminGaneshotsavRoutes } from "./routes/kb-admin-ganeshotsav";
 import { vodafoneWsSimulatorRoutes } from "./routes/vodafone-ws-simulator";
+import { toolCallingSettingsRoutes } from "./routes/tool-calling-settings";
+import { qaMockCrmRoutes } from "./routes/qa-mock-crm";
 import { createRootLogger } from "./config/logger-factory";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
@@ -95,6 +97,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(outboundCampaignRoutes);         // Outbound Campaign management & triggering
   app.register(kbAdminGaneshotsavRoutes);       // Temporary username/password-protected KB admin page (Ganeshotsav project)
   app.register(vodafoneWsSimulatorRoutes);      // Standalone VI WebSocket simulator page - does not touch the live Vodafone route
+  app.register(toolCallingSettingsRoutes);    // GET/PUT/DELETE tool-calling prompt (mid-call CRM tools)
+  app.register(qaMockCrmRoutes);              // QA-only mock customer CRM API for the tool-calling demo
 
   return app;
 }

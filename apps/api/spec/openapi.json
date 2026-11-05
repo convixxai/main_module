@@ -99,6 +99,10 @@
     {
       "name": "Simulator Utilities",
       "description": "Cross-simulator helpers: email a saved simulator character (settings + last audio output) and check/test SMTP configuration. Requires x-api-key."
+    },
+    {
+      "name": "Tool Calling (CRM)",
+      "description": "Mid-call CRM tool calling on Vodafone and Exotel calls. The model can fetch live data from the native Convixx CRM (crm_records, custom fields, custom tables, activities; when crm_settings.provider = 'native' and records exist) and from the customer's own verified + active API tools (crm_tools, defined in the SaaS). While a READ tool runs, the caller hears a short 'please hold' line in the call's current language and voice; WRITE tools (POST/PUT/PATCH/DELETE) run without it, only after the caller explicitly confirms, and at most once per call. The optional tool_calling_prompt tells the model WHEN to call tools."
     }
   ],
   "components": {
@@ -9851,6 +9855,592 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/customers/{customerId}/tool-calling": {
+      "get": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Get tool-calling prompt and active tools",
+        "description": "Returns the prompt, the kill switch and the tools a live call would get right now.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Set tool-calling prompt (optional) / enable or disable",
+        "description": "Send tool_calling_prompt (string, or null to clear) and/or tool_calling_enabled. Takes effect on the next call turn.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tool_calling_prompt": {
+                    "type": "string",
+                    "nullable": true,
+                    "maxLength": 4000,
+                    "example": "Use crm_lookup_customer when the caller asks about their own plan, service visit or account. Use the Order status tool for any order or delivery question. Use Schedule callback only after the caller confirms a time."
+                  },
+                  "tool_calling_enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Clear the tool-calling prompt",
+        "description": "Sets tool_calling_prompt to null (built-in default rules only). Tools stay enabled.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
+          }
+        }
+      }
+    },
+    "/tool-calling": {
+      "get": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Get tool-calling prompt and active tools",
+        "description": "Returns the prompt, the kill switch and the tools a live call would get right now.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Set tool-calling prompt (optional) / enable or disable",
+        "description": "Send tool_calling_prompt (string, or null to clear) and/or tool_calling_enabled. Takes effect on the next call turn.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tool_calling_prompt": {
+                    "type": "string",
+                    "nullable": true,
+                    "maxLength": 4000,
+                    "example": "Use crm_lookup_customer when the caller asks about their own plan, service visit or account. Use the Order status tool for any order or delivery question. Use Schedule callback only after the caller confirms a time."
+                  },
+                  "tool_calling_enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Clear the tool-calling prompt",
+        "description": "Sets tool_calling_prompt to null (built-in default rules only). Tools stay enabled.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
           }
         }
       }
