@@ -67,6 +67,28 @@ export async function companyPhoneNumbersRoutes(app: FastifyInstance): Promise<v
         }
       }
 
+      // UNIQUE(phone_number) only compares exact strings, so "+918898442005" and
+      // "8898442005" could both be saved. Calls are routed by the dialed number
+      // (VI's dni / Exotel's To) matched on its last 10 digits, so the same
+      // number twice would make routing ambiguous: reject it up front.
+      const last10 = body.data.phone_number.replace(/\D/g, "").slice(-10);
+      if (last10.length < 10) {
+        return reply.status(400).send({ error: "phone_number must contain at least 10 digits" });
+      }
+      const dup = await pool.query(
+        `SELECT customer_id FROM company_phone_numbers
+          WHERE RIGHT(regexp_replace(phone_number, '\\D', '', 'g'), 10) = $1 LIMIT 1`,
+        [last10]
+      );
+      if (dup.rows.length > 0) {
+        return reply.status(409).send({
+          error:
+            dup.rows[0].customer_id === customerId
+              ? "This number is already added to this company (in another format)"
+              : "This phone number is already assigned to a company",
+        });
+      }
+
       try {
         const created = await createPhoneNumber({
           customerId,

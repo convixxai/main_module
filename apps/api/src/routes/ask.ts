@@ -216,18 +216,35 @@ async function resolveAgent(
   const routerMessages: { role: "system" | "user"; content: string }[] = [
     {
       role: "system",
-      content: `You are an agent router. Given a user query and a list of available agents, respond with ONLY the UUID of the best agent to handle the query. Do not explain.\n\nAvailable agents:\n${agentList}`,
+      content: `You are an agent router. Given a user query and a list of available agents, respond with ONLY the number (1, 2, ...) of the best agent to handle the query. Do not explain.\n\nAvailable agents:\n${agentList}`,
     },
     { role: "user", content: question },
   ];
 
   try {
-    const chosen = await withTimeout(chatSelfHosted(routerMessages, 60), 3000);
+    // Multi-agent routing runs once per conversation (the pick sticks via
+    // chat_sessions.agent_id), but on a live call it sits in front of the
+    // first answer, so use the fast OpenAI classifier model with a tight
+    // timeout. Self-hosted only when OpenAI isn't configured.
+    const chosen = env.openai.apiKey
+      ? await withTimeout(
+          chatOpenAI(routerMessages, 16, undefined, {
+            model: env.openai.agentRouterModel,
+            temperature: 0,
+          }).then((r) => r.answer),
+          2500
+        )
+      : await withTimeout(chatSelfHosted(routerMessages, 60), 3000);
     if (chosen) {
       const trimmed = chosen.trim();
-      const matched = agents.rows.find(
-        (a: any) => trimmed.includes(a.id) || trimmed.toLowerCase().includes(a.name.toLowerCase())
-      );
+      // Router answers with the list number; UUID / name match kept as fallbacks.
+      const num = /^\D*(\d{1,3})\b/.exec(trimmed);
+      const byIndex = num ? agents.rows[Number(num[1]) - 1] : undefined;
+      const matched =
+        byIndex ??
+        agents.rows.find(
+          (a: any) => trimmed.includes(a.id) || trimmed.toLowerCase().includes(a.name.toLowerCase())
+        );
       if (matched) {
         return {
           id: matched.id,

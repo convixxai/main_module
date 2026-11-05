@@ -3737,6 +3737,9 @@ async function runVoicebotAskPipeline(
       );
       if (agentResult.rows.length === 0) return null;
       const row = agentResult.rows[0];
+      // Voice is fixed for the call once the greeting voice was applied:
+      // only the prompt is refreshed per turn, never the TTS fields.
+      if (!session.ttsVoiceLocked) {
       applyAgentTtsProviderOverride(session, row.tts_provider as string | null);
       session.ttsPace = row.tts_pace != null ? Number(row.tts_pace) : null;
       session.ttsPitch = row.tts_pitch != null ? Number(row.tts_pitch) : null;
@@ -3749,6 +3752,7 @@ async function runVoicebotAskPipeline(
         : null;
       session.ttsSpeaker = row.tts_speaker;
       session.ttsSampleRate = row.tts_sample_rate != null ? Number(row.tts_sample_rate) : null;
+      }
       await applyAgentVoicePersonaToSession(session, {
         avatarId: row.avatar_id as string | null,
         elevenlabsAvatarId: row.elevenlabs_avatar_id as string | null,
@@ -4601,6 +4605,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                 await applyAgentVoicePersonaToSession(session, {
                   customerSettings: session.customerSettingsSnapshot,
                 });
+                // From here on the caller hears this voice for the whole call.
+                session.ttsVoiceLocked = true;
                 if (outboundLinkedId) {
                   const patch = JSON.stringify({
                     voicebot_bridge: true,

@@ -139,7 +139,18 @@ interface VodafoneCallState {
   ws: WebSocket;
   silenceTimer: ReturnType<typeof setTimeout> | null;
   customerSettings: CustomerSettings | null;
+  /**
+   * Voice for the whole call: resolved once at start from the first agent and
+   * never re-resolved, even if multi-agent routing hands later turns to a
+   * different agent. Only `.language` changes, on a confirmed language switch.
+   */
   ttsConfig: VodafoneTtsConfig & { voiceGender: "male" | "female" | null };
+  /**
+   * Agent fixed by campaign / Streaming Object agentId / number default. When
+   * false and the tenant has several agents, the first question is routed to
+   * the best agent (multi-agent), which then sticks for the call.
+   */
+  agentPinned: boolean;
   processing: boolean;
   mediaFrameCount: number;
 }
@@ -304,11 +315,12 @@ async function resolveInitialAgentAndChatSession(
   greetingText: string | null;
   errorText: string | null;
   ttsProvider: string | null;
+  /** True when the agent was chosen explicitly (campaign, Streaming Object agentId, or the number's default agent). */
+  pinned: boolean;
 }> {
-  const chatRes = await pool.query(`INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`, [
-    customerId,
-  ]);
-  const chatSessionId = chatRes.rows[0].id as string;
+  // Independent of agent resolution: run in parallel to shave call-setup time.
+  const chatP = pool.query(`INSERT INTO chat_sessions (customer_id) VALUES ($1) RETURNING id`, [customerId]);
+  const customerP = pool.query(`SELECT system_prompt FROM customers WHERE id = $1`, [customerId]);
 
   const agentSelectColumns = `id, system_prompt, greeting_text, error_text, tts_provider`;
   const oldestActiveAgentQuery = `SELECT ${agentSelectColumns}
@@ -331,17 +343,26 @@ async function resolveInitialAgentAndChatSession(
       )
     : await pool.query(oldestActiveAgentQuery, [customerId]);
 
+  let pinned = numberDefaultAgentId != null && agentRes.rows.length > 0;
   if (agentRes.rows.length === 0 && numberDefaultAgentId) {
     agentRes = await pool.query(oldestActiveAgentQuery, [customerId]);
   }
 
-  const customerRes = await pool.query(`SELECT system_prompt FROM customers WHERE id = $1`, [customerId]);
+  const [chatRes, customerRes] = await Promise.all([chatP, customerP]);
+  const chatSessionId = chatRes.rows[0].id as string;
   const fallbackPrompt = customerRes.rows[0]?.system_prompt ?? "You are a helpful assistant.";
 
   if (agentRes.rows.length === 0) {
-    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt, greetingText: null, errorText: null, ttsProvider: null };
+    return { chatSessionId, agentId: null, systemPrompt: fallbackPrompt, greetingText: null, errorText: null, ttsProvider: null, pinned: false };
+  }
+  if (pinned) {
+    // Pinned agent owns the whole conversation (ask pipeline reads chat_sessions.agent_id).
+    await pool
+      .query(`UPDATE chat_sessions SET agent_id = $1 WHERE id = $2`, [agentRes.rows[0].id, chatSessionId])
+      .catch(() => {});
   }
   return {
+    pinned,
     chatSessionId,
     agentId: agentRes.rows[0].id as string,
     systemPrompt: agentRes.rows[0].system_prompt || fallbackPrompt,
@@ -558,7 +579,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   const paramAgentId = String(event.customParameters?.agentId ?? event.customParameters?.agent_id ?? "").trim();
   const preferredAgentId = campaign?.agentId ?? (UUID_RE.test(paramAgentId) ? paramAgentId : null);
 
-  const { chatSessionId, agentId, systemPrompt, greetingText, errorText, ttsProvider: agentTtsProvider } =
+  const { chatSessionId, agentId, systemPrompt, greetingText, errorText, ttsProvider: agentTtsProvider, pinned: agentPinned } =
     await resolveInitialAgentAndChatSession(customerId, event.toNumber, preferredAgentId, [
       campaign?.callerNumber,
       campaign ? event.fromNumber : null,
@@ -601,6 +622,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
     ttsConfig,
     processing: false,
     mediaFrameCount: 0,
+    agentPinned,
   };
   calls.set(event.streamId, state);
 
@@ -612,6 +634,8 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
       mode: session.mode ?? "inbound",
       campaignId: campaign?.id ?? null,
       agentId,
+      agentPinned,
+      voice: `${ttsConfig.provider}/${ttsConfig.speaker ?? "default"}`,
       languageCode: session.defaultLanguageCode,
     },
     "vodafone-voicebot: call started"
@@ -736,6 +760,8 @@ async function handleLanguageSwitchFlow(
     const explicitTarget = detectExplicitLanguageSwitchRequest(transcript, allowedNorm);
     if (explicitTarget && explicitTarget !== activeBcp) {
       const n = persistSessionActiveLanguage(session, explicitTarget);
+      // Same voice for the whole call: only the spoken language changes.
+      state.ttsConfig = { ...state.ttsConfig, language: n };
       session.pendingLanguageSwitch = null;
       session.discrepantLanguageCount = 0;
       session.discrepantLanguageTarget = null;
@@ -762,6 +788,7 @@ async function handleLanguageSwitchFlow(
 
     if (chosenTarget) {
       const n = persistSessionActiveLanguage(session, chosenTarget);
+      state.ttsConfig = { ...state.ttsConfig, language: n };
       session.pendingLanguageSwitch = null;
       app.log.info({ streamId, from: activeBcp, to: n, via: choice.kind }, "vodafone-voicebot: pending language switch confirmed");
       // If the caller packed a real question in with the confirmation
@@ -958,6 +985,23 @@ function buildLanguageRule(session: VoicebotSession, state: VodafoneCallState): 
   return primary && primary !== "en" ? rule + RAG_MULTILINGUAL_GRAMMAR_RULE : rule;
 }
 
+/**
+ * Multi-agent: once the ask pipeline has routed an unpinned call to an agent,
+ * keep that agent for the rest of the call (pin it). The voice is NOT
+ * touched: state.ttsConfig stays the first agent's voice for the whole call.
+ */
+function noteRoutedAgent(app: FastifyInstance, streamId: string, state: VodafoneCallState, routedAgentId: string | null | undefined): void {
+  if (!routedAgentId || state.agentPinned) return;
+  if (routedAgentId !== state.session.agentId) {
+    app.log.info(
+      { streamId, from: state.session.agentId, to: routedAgentId },
+      "vodafone-voicebot: multi-agent routed call to agent (voice unchanged)"
+    );
+  }
+  state.session.agentId = routedAgentId;
+  state.agentPinned = true;
+}
+
 /** Original batch turn loop: wait for the full answer, then synthesize and send it in one shot. */
 async function answerUtteranceBatch(
   app: FastifyInstance,
@@ -975,15 +1019,16 @@ async function answerUtteranceBatch(
     customerPrompt: systemPrompt,
     question: transcript,
     inputSessionId: session.chatSessionId,
-    inputAgentId: session.agentId,
+    inputAgentId: state.agentPinned ? session.agentId : null,
     sequentialLlm: true,
     embeddingLanguageHint: sttLanguageCode,
     additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE + buildLanguageRule(session, state),
     includeTimings: true,
     trace,
   });
+  noteRoutedAgent(app, streamId, state, askResult.agent_id);
   app.log.info(
-    { streamId, askMs: askResult.response_time_ms, pipelineTimings: askResult.pipeline_timings ?? null },
+    { streamId, askMs: askResult.response_time_ms, agentId: session.agentId, voice: `${state.ttsConfig.provider}/${state.ttsConfig.speaker ?? "default"}`, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (batch)"
   );
   logSuggestedKbEntryIfNoAnswer({
@@ -1090,7 +1135,7 @@ async function answerUtteranceStreaming(
     customerPrompt: systemPrompt,
     question: transcript,
     inputSessionId: session.chatSessionId,
-    inputAgentId: session.agentId,
+    inputAgentId: state.agentPinned ? session.agentId : null,
     embeddingLanguageHint: sttLanguageCode,
     additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE + buildLanguageRule(session, state),
     includeTimings: true,
@@ -1106,8 +1151,9 @@ async function answerUtteranceStreaming(
     },
     trace,
   });
+  noteRoutedAgent(app, streamId, state, askResult.agent_id);
   app.log.info(
-    { streamId, askMs: askResult.response_time_ms, pipelineTimings: askResult.pipeline_timings ?? null },
+    { streamId, askMs: askResult.response_time_ms, agentId: session.agentId, voice: `${state.ttsConfig.provider}/${state.ttsConfig.speaker ?? "default"}`, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (streaming)"
   );
   logSuggestedKbEntryIfNoAnswer({

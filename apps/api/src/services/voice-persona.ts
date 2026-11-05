@@ -96,6 +96,7 @@ export function applyAgentTtsProviderOverride(
   session: VoicebotSession,
   agentTtsProvider: string | null | undefined
 ): void {
+  if (session.ttsVoiceLocked) return; // one voice per call
   const p = (agentTtsProvider ?? "").trim();
   if (!p) return;
   const base = session.customerSettingsSnapshot;
@@ -121,6 +122,7 @@ export async function applyAgentVoicePersonaToSession(
     agentVoiceSettings?: Record<string, unknown> | null;
   }
 ): Promise<void> {
+  if (session.ttsVoiceLocked) return; // one voice per call (language changes don't swap it)
   const cs = prefetched?.customerSettings ?? session.customerSettingsSnapshot ?? null;
   const ttsProvider = cs?.tts_provider ?? "sarvam";
   if (!session.agentId) return;

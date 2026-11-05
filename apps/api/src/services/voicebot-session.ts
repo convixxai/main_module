@@ -54,6 +54,12 @@ export interface VoicebotSession {
   ttsSpeaker?: string | null;
   /** TTS sample rate override for this session. */
   ttsSampleRate?: number | null;
+  /**
+   * Set once the call's first voice (provider/speaker/model/settings) has been
+   * applied. While true, later agent loads and language switches never change
+   * the voice: the caller hears one voice for the whole call.
+   */
+  ttsVoiceLocked?: boolean;
   /** ElevenLabs `voice_settings` when using an elevenlabs avatar / persona. */
   elevenlabsVoiceSettings?: ElevenLabsVoiceSettingsPayload | null;
   /** Cartesia `generation_config` from cartesia avatar / tenant defaults. */
