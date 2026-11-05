@@ -1154,6 +1154,7 @@ async function answerUtteranceStreaming(
   }
 
   const sentences = new SentenceStreamBuffer((sentence) => speakSentence(sentence));
+  let pushChain: Promise<void> = Promise.resolve();
 
   const askResult = await runAskPipeline({
     customerId: session.customerId,
@@ -1172,7 +1173,14 @@ async function answerUtteranceStreaming(
           "vodafone-voicebot: first LLM token"
         );
       }
-      sentences.push(delta);
+      // Serialized: each sentence's TTS + send completes in order, and the
+      // turn awaits the whole chain before flushing and sending its mark.
+      // Previously pushes ran unawaited, so the mark (= "bot finished
+      // talking") could go out while answer audio was still being sent; the
+      // bot then listened to, transcribed and answered its own voice.
+      pushChain = pushChain.then(() => sentences.push(delta)).catch((err) => {
+        app.log.warn({ err, streamId }, "vodafone-voicebot: sentence synthesis failed");
+      });
     },
     trace,
     toolContext: {
@@ -1183,7 +1191,8 @@ async function answerUtteranceStreaming(
       onToolHold: async (holdText) => {
         // Nothing has been streamed yet this turn (the pipeline checks), so the
         // hold line is the first thing the caller hears, then the answer follows.
-        await speakSentence(holdText);
+        pushChain = pushChain.then(() => speakSentence(holdText)).catch(() => undefined);
+        await pushChain;
         app.log.info({ streamId, holdText }, "vodafone-voicebot: tool hold message spoken");
       },
     },
@@ -1202,6 +1211,7 @@ async function answerUtteranceStreaming(
     log: app.log,
   });
 
+  await pushChain;
   await sentences.flush();
 
   if (isCartesia && cartesia.reply) {

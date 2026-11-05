@@ -212,7 +212,10 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
     const isWrite = !["GET", "HEAD"].includes((row.method || "GET").toUpperCase());
     const properties: Record<string, { type: "string"; description: string }> = {};
     for (const p of llmParams) {
-      properties[p] = { type: "string", description: `Value for "${p}" taken from the conversation (empty if the caller did not say it).` };
+      properties[p] = {
+        type: "string",
+        description: `Optional "${p}" if the caller already said it; otherwise leave it empty and call the tool anyway (the caller's own record is used). Do NOT ask the caller for it first.`,
+      };
     }
     tools.push({
       type: "function",

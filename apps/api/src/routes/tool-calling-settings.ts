@@ -108,6 +108,12 @@ export async function toolCallingSettingsRoutes(app: FastifyInstance): Promise<v
     { preHandler: adminAuth },
     async (request, reply) => writeState(request.params.customerId, request.body, reply)
   );
+  // "Add" alias: same upsert as PUT (one prompt per customer).
+  app.post<{ Params: { customerId: string } }>(
+    "/customers/:customerId/tool-calling",
+    { preHandler: adminAuth },
+    async (request, reply) => writeState(request.params.customerId, request.body, reply)
+  );
   app.delete<{ Params: { customerId: string } }>(
     "/customers/:customerId/tool-calling",
     { preHandler: adminAuth },
@@ -120,6 +126,9 @@ export async function toolCallingSettingsRoutes(app: FastifyInstance): Promise<v
     return state ? reply.send(state) : reply.status(404).send({ error: "Customer settings not found" });
   });
   app.put("/tool-calling", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) =>
+    writeState(request.customerId!, request.body, reply)
+  );
+  app.post("/tool-calling", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) =>
     writeState(request.customerId!, request.body, reply)
   );
   app.delete("/tool-calling", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) =>

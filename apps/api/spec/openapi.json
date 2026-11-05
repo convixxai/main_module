@@ -9955,12 +9955,12 @@
           }
         }
       },
-      "put": {
+      "post": {
         "tags": [
           "Tool Calling (CRM)"
         ],
-        "summary": "Set tool-calling prompt (optional) / enable or disable",
-        "description": "Send tool_calling_prompt (string, or null to clear) and/or tool_calling_enabled. Takes effect on the next call turn.",
+        "summary": "Add tool-calling prompt",
+        "description": "Adds the customer's tool-calling prompt (one per customer; if one exists it is replaced, same as PUT). The prompt tells the model WHEN to call tools for both the native Convixx CRM and the customer's custom CRM API tools. Optional: without a prompt the built-in rules apply. Takes effect on the next call turn.",
         "security": [
           {
             "AdminToken": []
@@ -10066,6 +10066,150 @@
                     "type": "boolean"
                   }
                 }
+              },
+              "examples": {
+                "add": {
+                  "summary": "Add a prompt",
+                  "value": {
+                    "tool_calling_prompt": "When the caller asks about their own order, delivery or tracking, use the Order status tool. When they ask about their plan, service visit or account, use crm_lookup_customer. Use Schedule callback only after the caller confirms a day and time."
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Edit tool-calling prompt / enable or disable",
+        "description": "Edits the prompt (send the new text, or null to clear it) and/or turns mid-call tool calling on or off with tool_calling_enabled. Fields you leave out are unchanged.",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tool_calling_prompt": {
+                    "type": "string",
+                    "nullable": true,
+                    "maxLength": 4000,
+                    "example": "Use crm_lookup_customer when the caller asks about their own plan, service visit or account. Use the Order status tool for any order or delivery question. Use Schedule callback only after the caller confirms a time."
+                  },
+                  "tool_calling_enabled": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "examples": {
+                "edit": {
+                  "summary": "Change the prompt",
+                  "value": {
+                    "tool_calling_prompt": "Only use tools for order and delivery questions."
+                  }
+                },
+                "disable": {
+                  "summary": "Turn tool calling off (prompt kept)",
+                  "value": {
+                    "tool_calling_enabled": false
+                  }
+                },
+                "enable": {
+                  "summary": "Turn tool calling back on",
+                  "value": {
+                    "tool_calling_enabled": true
+                  }
+                }
               }
             }
           }
@@ -10075,8 +10219,8 @@
         "tags": [
           "Tool Calling (CRM)"
         ],
-        "summary": "Clear the tool-calling prompt",
-        "description": "Sets tool_calling_prompt to null (built-in default rules only). Tools stay enabled.",
+        "summary": "Delete tool-calling prompt",
+        "description": "Deletes the prompt (sets it to null): the built-in default rules apply again. Tool calling itself stays enabled; use PUT with tool_calling_enabled=false to switch it off.",
         "security": [
           {
             "AdminToken": []
@@ -10253,12 +10397,12 @@
           }
         }
       },
-      "put": {
+      "post": {
         "tags": [
           "Tool Calling (CRM)"
         ],
-        "summary": "Set tool-calling prompt (optional) / enable or disable",
-        "description": "Send tool_calling_prompt (string, or null to clear) and/or tool_calling_enabled. Takes effect on the next call turn.",
+        "summary": "Add tool-calling prompt",
+        "description": "Adds the customer's tool-calling prompt (one per customer; if one exists it is replaced, same as PUT). The prompt tells the model WHEN to call tools for both the native Convixx CRM and the customer's custom CRM API tools. Optional: without a prompt the built-in rules apply. Takes effect on the next call turn.",
         "security": [
           {
             "ApiKey": []
@@ -10354,6 +10498,140 @@
                     "type": "boolean"
                   }
                 }
+              },
+              "examples": {
+                "add": {
+                  "summary": "Add a prompt",
+                  "value": {
+                    "tool_calling_prompt": "When the caller asks about their own order, delivery or tracking, use the Order status tool. When they ask about their plan, service visit or account, use crm_lookup_customer. Use Schedule callback only after the caller confirms a day and time."
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Tool Calling (CRM)"
+        ],
+        "summary": "Edit tool-calling prompt / enable or disable",
+        "description": "Edits the prompt (send the new text, or null to clear it) and/or turns mid-call tool calling on or off with tool_calling_enabled. Fields you leave out are unchanged.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "customer_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "tool_calling_enabled": {
+                      "type": "boolean",
+                      "description": "Kill switch. Default true."
+                    },
+                    "tool_calling_prompt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Optional instructions telling the model when to call tools (native + custom)."
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "active_tools": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "What a live call gets right now; null = no tools (calls behave exactly as before).",
+                      "properties": {
+                        "native_crm_lookup": {
+                          "type": "boolean"
+                        },
+                        "custom_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "read_tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "saas_company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "custom_tool_secrets_readable": {
+                      "type": "boolean",
+                      "description": "False when the engine has no SAAS_APP_KEY; custom tools that need a secret are then skipped."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer settings not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tool_calling_prompt": {
+                    "type": "string",
+                    "nullable": true,
+                    "maxLength": 4000,
+                    "example": "Use crm_lookup_customer when the caller asks about their own plan, service visit or account. Use the Order status tool for any order or delivery question. Use Schedule callback only after the caller confirms a time."
+                  },
+                  "tool_calling_enabled": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "examples": {
+                "edit": {
+                  "summary": "Change the prompt",
+                  "value": {
+                    "tool_calling_prompt": "Only use tools for order and delivery questions."
+                  }
+                },
+                "disable": {
+                  "summary": "Turn tool calling off (prompt kept)",
+                  "value": {
+                    "tool_calling_enabled": false
+                  }
+                },
+                "enable": {
+                  "summary": "Turn tool calling back on",
+                  "value": {
+                    "tool_calling_enabled": true
+                  }
+                }
               }
             }
           }
@@ -10363,8 +10641,8 @@
         "tags": [
           "Tool Calling (CRM)"
         ],
-        "summary": "Clear the tool-calling prompt",
-        "description": "Sets tool_calling_prompt to null (built-in default rules only). Tools stay enabled.",
+        "summary": "Delete tool-calling prompt",
+        "description": "Deletes the prompt (sets it to null): the built-in default rules apply again. Tool calling itself stays enabled; use PUT with tool_calling_enabled=false to switch it off.",
         "security": [
           {
             "ApiKey": []
