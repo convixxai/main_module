@@ -136,15 +136,28 @@ export function invalidateObdTokenCache(customerId: string): void {
 }
 
 async function authedObdFetch<T>(customerId: string, path: string, body: unknown): Promise<T> {
-  const token = await getObdAuthToken(customerId);
-  return obdFetch<T>(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const send = async () => {
+    const token = await getObdAuthToken(customerId);
+    return obdFetch<T>(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+  };
+  try {
+    return await send();
+  } catch (err) {
+    // Token revoked/expired early on VI's side (or credentials rotated):
+    // re-authenticate once and retry.
+    if (err instanceof VodafoneObdError && err.httpStatus === 401) {
+      invalidateObdTokenCache(customerId);
+      return send();
+    }
+    throw err;
+  }
 }
 
 export interface CreateObdCampaignWithFlowParams {

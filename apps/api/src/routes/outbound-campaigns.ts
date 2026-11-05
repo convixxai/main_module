@@ -65,9 +65,57 @@ async function resolveObdDni(
 ): Promise<string> {
   if (phoneNumberId) {
     const number = await resolvePhoneNumberById(customerId, phoneNumberId);
-    if (number) return number.phone_number;
+    if (number) return digitsOnly(number.phone_number);
   }
-  return tenantDni ?? "";
+  if (tenantDni && digitsOnly(tenantDni)) return digitsOnly(tenantDni);
+  // Last resort: the tenant's primary enabled number (the SaaS treats the
+  // primary number as the default outbound DNI when no campaign number and no
+  // tenant-wide DNI are set).
+  const primary = await pool.query(
+    `SELECT phone_number FROM company_phone_numbers
+      WHERE customer_id = $1 AND is_enabled = TRUE
+      ORDER BY is_primary DESC, created_at ASC LIMIT 1`,
+    [customerId]
+  );
+  const fallback = primary.rows[0]?.phone_number as string | undefined;
+  if (fallback && digitsOnly(fallback)) return digitsOnly(fallback);
+  throw new VodafoneObdError(
+    "No outbound DNI for this campaign: set phone_number_id on the campaign, a `dni` in the Vodafone credentials, or add a phone number",
+    400
+  );
+}
+
+/** VI's OBD base wants plain digit strings (no "+", spaces or dashes). */
+function digitsOnly(phone: string): string {
+  return String(phone ?? "").replace(/\D/g, "");
+}
+
+/** Default base variables when getSampleBaseHeads is unavailable for a Flow. */
+const DEFAULT_OBD_BASE_VARIABLES = ["msisdn", "dni", "call_type", "campaign_id"];
+
+/** Pushes leads to VI's OBD base for a vodafone campaign row (shared by /leads and /trigger). */
+async function pushLeadsToVodafone(
+  customerId: string,
+  campaignRow: Record<string, any>,
+  phoneNumbers: string[]
+): Promise<void> {
+  if (!campaignRow.vi_campaign_id) {
+    throw new VodafoneObdError("This Vodafone campaign has no VI campaign id (creation on VI failed)", 400);
+  }
+  const creds = await getVodafoneObdCredentials(customerId);
+  const dni = await resolveObdDni(customerId, campaignRow.phone_number_id, creds.dni);
+  const variableNames: string[] =
+    Array.isArray(campaignRow.vi_base_variable_names) && campaignRow.vi_base_variable_names.length > 0
+      ? campaignRow.vi_base_variable_names
+      : DEFAULT_OBD_BASE_VARIABLES;
+  const records = phoneNumbers
+    .map((phone) => digitsOnly(phone))
+    .filter((phone) => phone.length >= 10)
+    .map((phone) => buildObdBaseRecord(variableNames, phone, dni, String(campaignRow.id)));
+  if (records.length === 0) {
+    throw new VodafoneObdError("No valid phone numbers to push to Vodafone (need at least 10 digits each)", 400);
+  }
+  await staticCampaignBaseLoad(customerId, campaignRow.vi_campaign_id, records);
 }
 
 /**
@@ -108,6 +156,8 @@ const createCampaignSchema = z.object({
   script_text: z.string().min(1),
   language_code: z.string().default("en-IN"),
   phone_number_id: z.string().uuid().optional(),
+  /** Agent that handles this campaign's calls; omitted = caller number's default agent, else oldest active agent. */
+  agent_id: z.string().uuid().optional(),
   /**
    * Vodafone-only fields below — required when this customer's telephony
    * provider resolves to 'vodafone' (checked in the handler, not here,
@@ -158,6 +208,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         script_text,
         language_code,
         phone_number_id,
+        agent_id,
         fromdate,
         todate,
         fromtime,
@@ -172,6 +223,15 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         const number = await resolvePhoneNumberById(customerId, phone_number_id);
         if (!number) {
           return reply.status(400).send({ error: "phone_number_id does not belong to this customer or is disabled" });
+        }
+      }
+      if (agent_id) {
+        const agent = await pool.query(
+          `SELECT id FROM agents WHERE id = $1 AND customer_id = $2 AND is_active = TRUE`,
+          [agent_id, customerId]
+        );
+        if (agent.rows.length === 0) {
+          return reply.status(400).send({ error: "agent_id does not belong to this customer or is inactive" });
         }
       }
 
@@ -232,9 +292,11 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
               retryintervalvalue: retry_interval_value ?? 60,
               retrycount: retry_count ?? 0,
             });
-            viCampaignId = created.campainKey;
-            viCampaignRefId = created.campaign_Ref_ID;
-            viBaseVariableNames = await getSampleBaseHeads(customerId, viCampaignId);
+            viCampaignId = created?.campainKey ?? null;
+            viCampaignRefId = created?.campaign_Ref_ID ?? null;
+            if (!viCampaignId) {
+              throw new VodafoneObdError("VI createCampaign returned no campainKey", 502, created);
+            }
           } catch (viErr) {
             fs.unlinkSync(filePath);
             const status = viErr instanceof VodafoneObdError ? viErr.httpStatus : 502;
@@ -244,14 +306,27 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
               details: viErr instanceof VodafoneObdError ? viErr.body : String(viErr),
             });
           }
+          // Non-fatal: the VI campaign already exists at this point, so failing
+          // here would orphan it on VI's side. Fall back to the default base
+          // variables (msisdn/dni/call_type/campaign_id) instead.
+          try {
+            const heads = await getSampleBaseHeads(customerId, viCampaignId);
+            viBaseVariableNames = heads.length > 0 ? heads : null;
+          } catch (headsErr) {
+            app.log.warn(
+              { err: headsErr, viCampaignId },
+              "VI getsampleBaseHeads failed; using default OBD base variables"
+            );
+          }
         }
 
         const result = await pool.query(
           `INSERT INTO outbound_campaigns (
              id, customer_id, name, script_text, language_code, audio_file_path, status, phone_number_id,
-             telephony_provider_id, vi_flow_id, vi_campaign_id, vi_campaign_ref_id, vi_base_variable_names
+             telephony_provider_id, vi_flow_id, vi_campaign_id, vi_campaign_ref_id, vi_base_variable_names,
+             agent_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            RETURNING *`,
           [
             campaignId,
@@ -267,6 +342,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
             viCampaignId,
             viCampaignRefId,
             viBaseVariableNames,
+            agent_id ?? null,
           ]
         );
 
@@ -324,13 +400,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       // these numbers (Exotel campaigns dial per-lead later, at /trigger).
       if (campaignRow.telephony_provider_id === "vodafone") {
         try {
-          const creds = await getVodafoneObdCredentials(customerId);
-          const dni = await resolveObdDni(customerId, campaignRow.phone_number_id, creds.dni);
-          const variableNames: string[] = campaignRow.vi_base_variable_names ?? ["msisdn", "dni", "call_type", "campaign_id"];
-          const records = phone_numbers.map((phone) =>
-            buildObdBaseRecord(variableNames, phone, dni, id)
-          );
-          await staticCampaignBaseLoad(customerId, campaignRow.vi_campaign_id, records);
+          await pushLeadsToVodafone(customerId, campaignRow, phone_numbers);
         } catch (viErr) {
           app.log.error({ err: viErr, campaignId: id }, "Failed to push lead base to VI OBD campaign");
           return reply.status(viErr instanceof VodafoneObdError ? viErr.httpStatus : 502).send({
@@ -350,7 +420,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
     { preHandler: apiKeyAuth },
     async (request: AuthenticatedRequest, reply) => {
       const { id } = request.params as { id: string };
-      const body = triggerCampaignSchema.safeParse(request.body);
+      // Body is optional: the SaaS (and resume-after-pause) POSTs with no body at all.
+      const body = triggerCampaignSchema.safeParse(request.body ?? {});
       if (!body.success) {
         return reply.status(400).send({ error: body.error.flatten() });
       }
@@ -393,13 +464,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
 
         if (campaign.telephony_provider_id === "vodafone") {
           try {
-            const creds = await getVodafoneObdCredentials(customerId);
-            const dni = await resolveObdDni(customerId, campaign.phone_number_id, creds.dni);
-            const variableNames: string[] = campaign.vi_base_variable_names ?? ["msisdn", "dni", "call_type", "campaign_id"];
-            const records = phone_numbers.map((phone) =>
-              buildObdBaseRecord(variableNames, phone, dni, id)
-            );
-            await staticCampaignBaseLoad(customerId, campaign.vi_campaign_id, records);
+            await pushLeadsToVodafone(customerId, campaign, phone_numbers);
           } catch (viErr) {
             app.log.error({ err: viErr, campaignId: id }, "Failed to push lead base to VI OBD campaign at trigger time");
             return reply.status(viErr instanceof VodafoneObdError ? viErr.httpStatus : 502).send({
@@ -410,15 +475,17 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         }
       }
 
-      // Update status to running
-      await pool.query("UPDATE outbound_campaigns SET status = 'running' WHERE id = $1", [id]);
-
       // Vodafone: VI dials the whole base itself once the campaign is
       // started — there is no per-lead REST call to loop over like Exotel's
-      // Calls/connect below. Hand off to StartorStop and return.
+      // Calls/connect below. Hand off to StartorStop and return. Status only
+      // flips to 'running' once VI accepted the start.
       if (campaign.telephony_provider_id === "vodafone") {
+        if (!campaign.vi_campaign_id) {
+          return reply.status(400).send({ error: "This Vodafone campaign has no VI campaign id; recreate it" });
+        }
         try {
           await startOrStopObdCampaign(customerId, campaign.vi_campaign_id, "S");
+          await pool.query("UPDATE outbound_campaigns SET status = 'running', updated_at = NOW() WHERE id = $1", [id]);
         } catch (viErr) {
           app.log.error({ err: viErr, campaignId: id }, "Failed to start VI OBD campaign");
           return reply.status(viErr instanceof VodafoneObdError ? viErr.httpStatus : 502).send({
@@ -434,6 +501,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       if (!settings || !settings.is_enabled) {
         return reply.status(400).send({ error: "Exotel not configured" });
       }
+
+      await pool.query("UPDATE outbound_campaigns SET status = 'running', updated_at = NOW() WHERE id = $1", [id]);
 
       // Get pending leads
       const leadsRes = await pool.query(

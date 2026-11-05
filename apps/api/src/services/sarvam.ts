@@ -86,6 +86,9 @@ export async function sarvamTextToSpeech(
   payload: SarvamTtsBody
 ): Promise<{ status: number; body: unknown }> {
   const key = requireSarvamKey();
+  const tts = upgradeDeprecatedSarvamTts(payload.model, payload.speaker);
+  const outgoing: SarvamTtsBody = { ...payload, model: tts.model, speaker: tts.speaker ?? undefined };
+  if (!outgoing.speaker) delete outgoing.speaker;
 
   const res = await fetch(`${SARVAM_BASE}/text-to-speech`, {
     method: "POST",
@@ -93,11 +96,31 @@ export async function sarvamTextToSpeech(
       "api-subscription-key": key,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(outgoing),
   });
 
   const body = await readJsonBody(res);
   return { status: res.status, body };
+}
+
+/**
+ * Sarvam retired bulbul:v2 (2026-09; API now answers 400 "Model 'bulbul:v2'
+ * has been deprecated"). Old rows (customer_settings.tts_model's column
+ * default was 'bulbul:v2') would otherwise make every TTS call fail, so map
+ * it to bulbul:v3 here; v2-only speakers are dropped so v3 uses its default
+ * voice instead of rejecting the request.
+ */
+const SARVAM_V2_ONLY_SPEAKERS = new Set(["anushka", "manisha", "vidya", "arya", "abhilash", "karun", "hitesh"]);
+function upgradeDeprecatedSarvamTts(model: string | undefined, speaker: string | null | undefined): {
+  model: string;
+  speaker: string | null | undefined;
+} {
+  const m = (model ?? "").trim();
+  if (!m || /^bulbul:v[12]$/i.test(m)) {
+    const sp = speaker && SARVAM_V2_ONLY_SPEAKERS.has(speaker.trim().toLowerCase()) ? null : speaker;
+    return { model: "bulbul:v3", speaker: sp };
+  }
+  return { model: m, speaker };
 }
 
 /**
@@ -128,10 +151,11 @@ export async function sarvamTextToSpeechStream(payload: {
   const body: Record<string, unknown> = {
     text: payload.text.slice(0, 3500),
     target_language_code: payload.target_language_code,
-    model: payload.model ?? "bulbul:v3",
     output_audio_codec: payload.output_audio_codec ?? "wav",
   };
-  if (payload.speaker) body.speaker = payload.speaker;
+  const tts = upgradeDeprecatedSarvamTts(payload.model, payload.speaker);
+  body.model = tts.model;
+  if (tts.speaker) body.speaker = tts.speaker;
   if (payload.speech_sample_rate != null) {
     body.speech_sample_rate = payload.speech_sample_rate;
   }
@@ -200,10 +224,11 @@ export async function* sarvamTtsStreamIncremental(payload: {
   const body: Record<string, unknown> = {
     text: payload.text.slice(0, 3500),
     target_language_code: payload.target_language_code,
-    model: payload.model ?? "bulbul:v3",
     output_audio_codec: payload.output_audio_codec ?? "linear16",
   };
-  if (payload.speaker) body.speaker = payload.speaker;
+  const tts = upgradeDeprecatedSarvamTts(payload.model, payload.speaker);
+  body.model = tts.model;
+  if (tts.speaker) body.speaker = tts.speaker;
   if (payload.speech_sample_rate != null) {
     body.speech_sample_rate = payload.speech_sample_rate;
   }

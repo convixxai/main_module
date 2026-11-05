@@ -55,8 +55,22 @@ export async function resolveDefaultAgentForNumber(
       WHERE customer_id = $1 AND phone_number = $2 AND is_enabled = TRUE`,
     [customerId, dialedNumber.trim()]
   );
-  const agentId = result.rows[0]?.default_agent_id as string | null | undefined;
-  return agentId ?? null;
+  if (result.rows.length > 0) {
+    return (result.rows[0]?.default_agent_id as string | null | undefined) ?? null;
+  }
+  // Carriers format numbers differently ("+918898442005" stored vs VI's
+  // "8898442005" / "918898442005" / Exotel's "08898442005"): fall back to
+  // matching on the last 10 digits when the exact string doesn't match.
+  const last10 = dialedNumber.replace(/\D/g, "").slice(-10);
+  if (last10.length < 10) return null;
+  const fuzzy = await pool.query(
+    `SELECT default_agent_id FROM company_phone_numbers
+      WHERE customer_id = $1 AND is_enabled = TRUE
+        AND RIGHT(regexp_replace(phone_number, '\\D', '', 'g'), 10) = $2
+      ORDER BY is_primary DESC, created_at ASC LIMIT 1`,
+    [customerId, last10]
+  );
+  return (fuzzy.rows[0]?.default_agent_id as string | null | undefined) ?? null;
 }
 
 export async function createPhoneNumber(params: {

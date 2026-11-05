@@ -24,9 +24,10 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import { adminAuth } from "../middleware/auth";
-import { encrypt } from "../services/crypto";
+import { encrypt, decrypt } from "../services/crypto";
 import { invalidateTelephonySettingsCache } from "../services/telephony-settings";
 import { vodafoneVoicebotUrlForCustomer } from "../services/vodafone-voice-urls";
+import { invalidateObdTokenCache } from "../services/vodafone-obd";
 
 const upsertVodafoneSettingsSchema = z.object({
   is_enabled: z.boolean().optional(),
@@ -102,7 +103,27 @@ export async function vodafoneSettingsRoutes(app: FastifyInstance): Promise<void
       const previousProviderId: string | null = existing?.provider_id ?? null;
 
       const d = body.data;
-      const credentialsEnc = d.credentials ? encrypt(JSON.stringify(d.credentials)) : null;
+      // Merge new credential fields over the stored ones, so e.g. rotating the
+      // OBD password without re-sending `dni` doesn't silently drop the DNI.
+      let credentialsEnc: string | null = null;
+      if (d.credentials) {
+        let previous: Record<string, string> = {};
+        if (existing?.provider_id === "vodafone") {
+          const prevRow = await pool.query(
+            `SELECT credentials_enc FROM company_telephony_settings WHERE customer_id = $1`,
+            [customerId]
+          );
+          const enc = prevRow.rows[0]?.credentials_enc as string | null | undefined;
+          if (enc) {
+            try {
+              previous = JSON.parse(decrypt(enc)) as Record<string, string>;
+            } catch {
+              previous = {};
+            }
+          }
+        }
+        credentialsEnc = encrypt(JSON.stringify({ ...previous, ...d.credentials }));
+      }
 
       // vi_flow_id lives inside the generic metadata jsonb column
       // (metadata.vi_flow_id), merged with any `metadata` also given in this
@@ -143,6 +164,7 @@ export async function vodafoneSettingsRoutes(app: FastifyInstance): Promise<void
       );
 
       invalidateTelephonySettingsCache(customerId);
+      if (d.credentials) invalidateObdTokenCache(customerId);
 
       const row = result.rows[0];
       const urls = vodafoneVoicebotUrlForCustomer(customerId, request);

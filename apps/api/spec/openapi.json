@@ -1567,7 +1567,13 @@
             "type": "string",
             "format": "uuid",
             "nullable": true,
-            "description": "FK to company_phone_numbers. Null falls back to customer_exotel_settings.default_outbound_caller_id || inbound_phone_number when triggering calls. Unused for Vodafone campaigns."
+            "description": "FK to company_phone_numbers. Exotel: caller ID; null falls back to default_outbound_caller_id || inbound_phone_number. Vodafone: the dni pushed to VI OBD; null falls back to the tenant-wide credentials.dni, then the primary enabled number."
+          },
+          "agent_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Agent that handles this campaign's calls. Null = the caller number's default agent, else the oldest active agent."
           },
           "telephony_provider_id": {
             "type": "string",
@@ -1626,7 +1632,12 @@
           "phone_number_id": {
             "type": "string",
             "format": "uuid",
-            "description": "Optional. Must reference an enabled number owned by this customer (see /customers/{customerId}/phone-numbers). On Exotel, used as the caller ID for every triggered call. On Vodafone, used as the dni (outbound caller CLI) in the base records pushed to VI OBD instead of the tenant-wide credentials.dni — falls back to that tenant-wide dni when omitted."
+            "description": "Optional. Must reference an enabled number owned by this customer (see /customers/{customerId}/phone-numbers). On Exotel, used as the caller ID for every triggered call. On Vodafone, used as the dni (outbound caller CLI, sent digits-only) in the base records pushed to VI OBD instead of the tenant-wide credentials.dni — falls back to that tenant-wide dni, then the primary enabled number, when omitted."
+          },
+          "agent_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional. Active agent owned by this customer that handles the campaign's calls (system prompt, KB, voice). On Vodafone calls the campaign's language_code also sets the call language."
           },
           "fromdate": {
             "type": "string",

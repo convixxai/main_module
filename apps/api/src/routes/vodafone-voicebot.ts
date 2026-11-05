@@ -38,6 +38,7 @@ import { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import { env } from "../config/env";
 import { pool } from "../config/db";
+import { encrypt } from "../services/crypto";
 import { getTelephonySettings } from "../services/telephony-settings";
 import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
@@ -293,7 +294,9 @@ function ttsModelLooksLikeProvider(
 
 async function resolveInitialAgentAndChatSession(
   customerId: string,
-  dialedNumber: string | null | undefined
+  dialedNumber: string | null | undefined,
+  preferredAgentId?: string | null,
+  extraNumbers: Array<string | null | undefined> = []
 ): Promise<{
   chatSessionId: string;
   agentId: string | null;
@@ -313,7 +316,14 @@ async function resolveInitialAgentAndChatSession(
 
   // Feature 3 (one company, many numbers): prefer the dialed number's
   // configured default agent, same as exotel-voicebot.ts's resolution order.
-  const numberDefaultAgentId = await resolveDefaultAgentForNumber(customerId, dialedNumber ?? "");
+  // Outbound campaign calls pass the campaign's own agent first, then the
+  // campaign's caller number(s) as extra lookups (on an OBD call VI's `dni`
+  // may be the lead, not our number).
+  let numberDefaultAgentId: string | null = preferredAgentId ?? null;
+  for (const n of [dialedNumber, ...extraNumbers]) {
+    if (numberDefaultAgentId) break;
+    numberDefaultAgentId = await resolveDefaultAgentForNumber(customerId, n ?? "");
+  }
   let agentRes = numberDefaultAgentId
     ? await pool.query(
         `SELECT ${agentSelectColumns} FROM agents WHERE id = $1 AND customer_id = $2 AND is_active = TRUE LIMIT 1`,
@@ -390,6 +400,75 @@ function resolveDefaultErrorText(defaultLanguageCode: string, voiceGender: "male
   return pair[voiceGender === "female" ? "female" : "male"];
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface CampaignCallInfo {
+  id: string;
+  scriptText: string | null;
+  languageCode: string | null;
+  agentId: string | null;
+  /** The campaign's caller number (company_phone_numbers via phone_number_id), if set. */
+  callerNumber: string | null;
+}
+
+/** streamId -> campaign lead being called, so stop/close can mark it completed. */
+const campaignCalls = new Map<string, { campaignId: string; leadDigits: string }>();
+
+function last10(phone: string | null | undefined): string {
+  return String(phone ?? "").replace(/\D/g, "").slice(-10);
+}
+
+/**
+ * On a VI OBD call one side is our DNI and the other is the lead. Which of
+ * cli/dni is which isn't pinned down by VI's doc, so prefer the side that
+ * isn't the campaign's caller number; default to `dni` (the dialed party).
+ */
+function pickLeadNumber(cli: string, dni: string, callerNumber: string | null): string {
+  const caller = last10(callerNumber);
+  if (caller && last10(dni) === caller) return last10(cli);
+  if (caller && last10(cli) === caller) return last10(dni);
+  return last10(dni) || last10(cli);
+}
+
+async function markCampaignLead(
+  app: FastifyInstance,
+  campaignId: string,
+  leadDigits: string,
+  status: "calling" | "completed",
+  viCallId?: string
+): Promise<void> {
+  if (leadDigits.length < 10) return;
+  try {
+    const res = await pool.query(
+      `UPDATE outbound_campaign_leads
+          SET status = $3,
+              vi_call_id = COALESCE($4, vi_call_id),
+              attempts = attempts + CASE WHEN $3 = 'calling' THEN 1 ELSE 0 END,
+              last_attempt_at = NOW()
+        WHERE id = (
+          SELECT id FROM outbound_campaign_leads
+           WHERE campaign_id = $1
+             AND RIGHT(regexp_replace(phone_number, '\\D', '', 'g'), 10) = $2
+           ORDER BY (status = 'calling') DESC, (status = 'pending') DESC, created_at DESC
+           LIMIT 1
+        )`,
+      [campaignId, leadDigits, status, viCallId ?? null]
+    );
+    if (res.rowCount === 0) {
+      app.log.warn({ campaignId, leadLast10: leadDigits }, "vodafone-voicebot: no campaign lead matched this call");
+    }
+  } catch (err) {
+    app.log.warn({ err, campaignId }, "vodafone-voicebot: failed to update campaign lead status");
+  }
+}
+
+function finishCampaignCall(app: FastifyInstance, streamId: string): void {
+  const info = campaignCalls.get(streamId);
+  if (!info) return;
+  campaignCalls.delete(streamId);
+  void markCampaignLead(app, info.campaignId, info.leadDigits, "completed");
+}
+
 async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: string, event: Extract<CallEvent, { type: "start" }>): Promise<void> {
   const telephony = await getTelephonySettings(customerId);
   if (!telephony || telephony.provider_id !== "vodafone" || !telephony.is_enabled) {
@@ -420,39 +499,82 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   );
   session.currentLanguageCode = session.defaultLanguageCode;
 
+  // Outbound OBD campaign call (routes/outbound-campaigns.ts): VI's portal
+  // Flow forwards these as custom_parameters on the `start` event, per the
+  // "With Flow" design in services/vodafone-obd.ts. Mirrors how
+  // exotel-voicebot.ts flags session.mode = "outbound" for a campaign-linked
+  // call — no dual-leg/wait-for-speech state machine. A campaign call
+  // differs from an inbound one in: the first line spoken (the campaign
+  // script, also seeded into chat history so the LLM knows what it asked),
+  // the agent (campaign.agent_id, else the campaign number's default agent),
+  // the call language (campaign.language_code), and lead status tracking.
+  const campaignIdParam = String(event.customParameters?.campaign_id ?? "").trim();
+  let campaign: CampaignCallInfo | null = null;
+  if (event.customParameters?.call_type === "outbound" && UUID_RE.test(campaignIdParam)) {
+    session.mode = "outbound";
+    try {
+      const campaignRes = await pool.query(
+        `SELECT c.id, c.script_text, c.language_code, c.agent_id, p.phone_number AS caller_number
+           FROM outbound_campaigns c
+           LEFT JOIN company_phone_numbers p ON p.id = c.phone_number_id
+          WHERE c.id = $1 AND c.customer_id = $2 AND c.status != 'deleted'`,
+        [campaignIdParam, customerId]
+      );
+      const row = campaignRes.rows[0];
+      if (row) {
+        campaign = {
+          id: row.id,
+          scriptText: row.script_text ?? null,
+          languageCode: row.language_code ?? null,
+          agentId: row.agent_id ?? null,
+          callerNumber: row.caller_number ?? null,
+        };
+      } else {
+        app.log.warn({ customerId, campaignId: campaignIdParam }, "vodafone-voicebot: campaign_id not found for this customer");
+      }
+    } catch (err) {
+      app.log.error(
+        { err, customerId, campaignId: campaignIdParam },
+        "vodafone-voicebot: failed to load campaign, falling back to default greeting"
+      );
+    }
+  }
+
+  // The campaign was scripted in one language: run the whole call in it
+  // (STT hint, LLM reply language, TTS voice language).
+  if (campaign?.languageCode) {
+    const lang = normalizeBcp47Tag(campaign.languageCode);
+    session.defaultLanguageCode = lang;
+    session.currentLanguageCode = lang;
+    if (!session.allowedLanguageCodes?.some((l) => languagesLooselyEqual(l, lang))) {
+      session.allowedLanguageCodes = [lang, ...(session.allowedLanguageCodes ?? [])];
+    }
+  }
+
+  // Streaming Object custom parameter (configured from the SaaS Telecom page,
+  // e.g. {"agentId": "<uuid>"}) pins an agent for inbound calls; ignored when
+  // blank or not a UUID. resolveInitialAgentAndChatSession still checks the
+  // agent belongs to this customer and is active.
+  const paramAgentId = String(event.customParameters?.agentId ?? event.customParameters?.agent_id ?? "").trim();
+  const preferredAgentId = campaign?.agentId ?? (UUID_RE.test(paramAgentId) ? paramAgentId : null);
+
   const { chatSessionId, agentId, systemPrompt, greetingText, errorText, ttsProvider: agentTtsProvider } =
-    await resolveInitialAgentAndChatSession(customerId, event.toNumber);
+    await resolveInitialAgentAndChatSession(customerId, event.toNumber, preferredAgentId, [
+      campaign?.callerNumber,
+      campaign ? event.fromNumber : null,
+    ]);
   session.chatSessionId = chatSessionId;
   session.agentId = agentId;
   session.errorText = errorText ?? undefined;
   session.greetingText = greetingText ?? undefined;
   session.voiceRagCustomerCache = { systemPrompt, defaultNoKb: null };
+  const campaignGreetingText = campaign?.scriptText?.trim() || null;
 
-  // Outbound OBD campaign call (routes/outbound-campaigns.ts): VI's portal
-  // Flow forwards these as custom_parameters on the `start` event, per the
-  // "With Flow" design in services/vodafone-obd.ts. Mirrors how
-  // exotel-voicebot.ts flags session.mode = "outbound" for a campaign-linked
-  // call today — no dual-leg/wait-for-speech state machine (that was removed
-  // 2026-09 as purposeless without a second leg to coordinate with); the
-  // only difference from a normal inbound call is which text is spoken
-  // first: the campaign's own script instead of the tenant's default
-  // greeting. The rest of the call (RAG pipeline, language handling, etc.)
-  // proceeds exactly like any inbound call.
-  let campaignGreetingText: string | null = null;
-  if (event.customParameters?.call_type === "outbound" && event.customParameters?.campaign_id) {
-    session.mode = "outbound";
-    try {
-      const campaignRes = await pool.query(
-        `SELECT script_text FROM outbound_campaigns WHERE id = $1 AND customer_id = $2 AND status != 'deleted'`,
-        [event.customParameters.campaign_id, customerId]
-      );
-      campaignGreetingText = campaignRes.rows[0]?.script_text ?? null;
-    } catch (err) {
-      app.log.error(
-        { err, customerId, campaignId: event.customParameters.campaign_id },
-        "vodafone-voicebot: failed to load campaign script_text, falling back to default greeting"
-      );
-    }
+  if (campaign) {
+    // The lead VI dialed is whichever side of the call isn't our number.
+    const leadDigits = pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber);
+    campaignCalls.set(event.streamId, { campaignId: campaign.id, leadDigits });
+    void markCampaignLead(app, campaign.id, leadDigits, "calling", event.callId);
   }
 
   // Feature 1 (§8.1) — agent-level TTS provider override (agents.tts_provider,
@@ -482,12 +604,35 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   };
   calls.set(event.streamId, state);
 
-  app.log.info({ customerId, streamId: event.streamId, callId: event.callId }, "vodafone-voicebot: call started");
+  app.log.info(
+    {
+      customerId,
+      streamId: event.streamId,
+      callId: event.callId,
+      mode: session.mode ?? "inbound",
+      campaignId: campaign?.id ?? null,
+      agentId,
+      languageCode: session.defaultLanguageCode,
+    },
+    "vodafone-voicebot: call started"
+  );
 
   const greeting =
     campaignGreetingText ||
     session.greetingText ||
     resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
+  if (campaignGreetingText) {
+    // runAskPipeline loads history from chat_messages: without this, the
+    // lead's first reply ("yes, confirmed") reaches the LLM with no idea
+    // what the bot just asked.
+    pool
+      .query(`INSERT INTO chat_messages (session_id, role, content, source) VALUES ($1, 'assistant', $2, $3)`, [
+        chatSessionId,
+        encrypt(campaignGreetingText),
+        "vodafone-obd-script",
+      ])
+      .catch((err) => app.log.warn({ err, chatSessionId }, "vodafone-voicebot: failed to seed campaign script into chat history"));
+  }
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
     sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
@@ -1188,6 +1333,7 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
 
             case "stop": {
               const state = streamId ? calls.get(streamId) : undefined;
+              finishCampaignCall(app, event.streamId);
               if (state) {
                 state.session.isClosing = true;
                 if (state.silenceTimer) clearTimeout(state.silenceTimer);
@@ -1206,6 +1352,7 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
 
       socket.on("close", () => {
         if (!streamId) return;
+        finishCampaignCall(app, streamId);
         const state = calls.get(streamId);
         if (state) {
           if (state.silenceTimer) clearTimeout(state.silenceTimer);
