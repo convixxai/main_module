@@ -11428,6 +11428,45 @@
           }
         }
       }
+    },
+    "/vodafone/active-dnis": {
+      "get": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "Active calling numbers (DNIs) for Vodafone campaigns",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "The DNIs Vodafone accepts on this customer's Flow (VI `getActiveDNIList`), each with the matching company phone number if one exists. Only these can be a campaign's calling number: pass that `phone_number_id` to POST /vodafone/campaigns, or omit it and the engine picks an active DNI.",
+        "responses": {
+          "200": {
+            "description": "Active DNIs",
+            "content": {
+              "application/json": {
+                "example": {
+                  "active_dnis": [
+                    {
+                      "dni": "9112002517",
+                      "phone_number_id": "3f2b9a10-1c2d-4e5f-8a9b-0c1d2e3f4a5b",
+                      "phone_number": "+919112002517",
+                      "label": "Main"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not on Vodafone or no vi_flow_id"
+          },
+          "502": {
+            "description": "VI unreachable"
+          }
+        }
+      }
     }
   }
 }

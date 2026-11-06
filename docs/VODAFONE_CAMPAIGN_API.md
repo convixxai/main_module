@@ -44,6 +44,7 @@ The provider must be `vodafone` and enabled.
 |---|---|---|
 | POST | `/vodafone/campaigns` | Create, upload the numbers and start, in one call |
 | GET | `/vodafone/campaigns` | List Vodafone campaigns |
+| GET | `/vodafone/active-dnis` | Calling numbers Vodafone accepts on the Flow, with matching `phone_number_id` |
 | GET | `/vodafone/campaigns/{id}` | Status: local lead counts and VI's live counts |
 | POST | `/vodafone/campaigns/{id}/leads` | Add numbers: `{ "phone_numbers": [...] }` |
 | POST | `/vodafone/campaigns/{id}/start` | Start, or resume after a pause |

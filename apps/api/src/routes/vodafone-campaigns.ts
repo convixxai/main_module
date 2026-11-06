@@ -437,6 +437,34 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     });
   });
 
+  // The calling numbers (DNIs) VI accepts for this customer's Flow, with the
+  // matching company phone numbers: the only valid outbound numbers.
+  app.get("/vodafone/active-dnis", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+    const customerId = request.customerId!;
+    const telephony = await getTelephonySettings(customerId);
+    if (!telephony || telephony.provider_id !== "vodafone" || !telephony.is_enabled) {
+      return reply.status(400).send({ error: "Vodafone is not the enabled telephony provider for this customer" });
+    }
+    const flowId = (telephony.metadata as Record<string, unknown> | undefined)?.vi_flow_id as string | undefined;
+    if (!flowId) return reply.status(400).send({ error: "No vi_flow_id set for this customer" });
+    let active: string[];
+    try {
+      active = await getActiveDniList(customerId, flowId);
+    } catch (err) {
+      return viErrorReply(reply, err, "Could not read the active DNIs from Vodafone");
+    }
+    const nums = await pool.query(
+      `SELECT id, phone_number, label, is_primary FROM company_phone_numbers WHERE customer_id = $1 AND is_enabled = TRUE`,
+      [customerId]
+    );
+    return reply.send({
+      active_dnis: active.map((dni) => {
+        const n = nums.rows.find((r) => digitsOnly(r.phone_number).slice(-10) === dni);
+        return { dni, phone_number_id: n?.id ?? null, phone_number: n?.phone_number ?? null, label: n?.label ?? null };
+      }),
+    });
+  });
+
   // List this customer's Vodafone campaigns.
   app.get("/vodafone/campaigns", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
     const res = await pool.query(
