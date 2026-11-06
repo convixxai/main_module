@@ -10733,7 +10733,7 @@
           "Vodafone Campaigns (VI OBD)"
         ],
         "summary": "Create, load and start a Vodafone campaign (one call)",
-        "description": "Runs the campaign on Vodafone's own OBD Campaign API (never Exotel, never per-lead calls): VI `createCampaign` with the tenant's Flow -> `getsampleBaseHeads` -> `staticCampaignDataIngestion` (numbers in chunks of 1000) -> `StartorStop(S)`. VI then dials the numbers itself inside the window; each answered call reaches the bot on the tenant's Vodafone WebSocket with `call_type=outbound` + `campaign_id`, and the bot opens with `script_text`.\n\n**Prerequisites:** the customer's telephony provider is Vodafone and enabled, OBD `credentials` (username/password, optional dni) and `vi_flow_id` are set with `PUT /customers/{customerId}/vodafone-settings`.\n\n**Partial failure:** if VI accepted the campaign but the upload or the start failed, the response is 502 and still carries `campaign.id`. Retry the remaining numbers with `/leads` and/or call `/start`; numbers are saved locally only after VI accepted them.",
+        "description": "Runs the campaign on Vodafone's own OBD Campaign API (never Exotel, never per-lead calls): VI `createCampaign` with the tenant's Flow -> `getsampleBaseHeads` -> `staticCampaignDataIngestion` (numbers in chunks of 1000) -> `StartorStop(S)`. VI then dials the numbers itself inside the window; each answered call reaches the bot on the tenant's Vodafone WebSocket with `call_type=outbound` + `campaign_id`, and the bot opens with `script_text`.\n\n**Prerequisites:** the customer's telephony provider is Vodafone and enabled, OBD `credentials` (username/password, optional dni) and `vi_flow_id` are set with `PUT /customers/{customerId}/vodafone-settings`.\n\n**Partial failure:** if VI accepted the campaign but the upload or the start failed, the response is 502 and still carries `campaign.id`. Retry the remaining numbers with `/leads` and/or call `/start`; numbers are saved locally only after VI accepted them.\n\n**Calling number (DNI):** must be an active DNI on the tenant's VI Flow (VI `getActiveDNIList`), sent in VI's 10-digit format; a record with any other DNI is silently dropped by VI (\"Base not loaded\"). The engine uses the campaign's `phone_number_id` number if VI lists it (400 with the active DNIs if not), else the tenant `dni` / primary number if listed, else the Flow's first active DNI. The response's `dni` shows the number used, and `vi_status.baseDetails.totalBaseReceived` shows how many numbers VI actually loaded.\n\n**Start:** VI may refuse `StartorStop` for a With-Flow campaign it already runs on its window; the engine then reads VI's status and treats any live state as started.",
         "security": [
           {
             "ApiKey": []
@@ -11168,7 +11168,7 @@
             }
           }
         ],
-        "description": "Uploads more numbers to the VI campaign base (chunks of 1000). If the campaign is running VI dials them inside the window. If a chunk fails the response is 502 and `leads.pushed` says how many were accepted.",
+        "description": "Uploads more numbers to the VI campaign base (chunks of 1000). If the campaign is running VI dials them inside the window. If a chunk fails the response is 502 and `leads.pushed` says how many were accepted. Numbers already in the campaign are skipped (`leads.already_in_campaign`), so a retry never makes VI dial anyone twice; if VI reports an empty base (nothing was loaded), every number is uploaded again.",
         "requestBody": {
           "required": true,
           "content": {
@@ -11290,7 +11290,7 @@
             }
           }
         ],
-        "description": "VI `StartorStop(S)`. Use after `start: false`, after a pause, or to retry a failed start. 400 if the campaign has no numbers yet.",
+        "description": "VI `StartorStop(S)`. Use after `start: false`, after a pause, or to retry a failed start. 400 if the campaign has no numbers yet. If VI refuses because the campaign already runs on its window, the response has `already_active: true` and VI's `vi_status`.",
         "responses": {
           "200": {
             "description": "Started",

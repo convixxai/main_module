@@ -571,6 +571,49 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
     }
   }
 
+  // Fallback when VI's Flow forwards no campaign_id (its base schema may only
+  // carry msisdn): match the call to a pending/calling number of one of this
+  // customer's live Vodafone campaigns. Our DNI is never a lead, so whichever
+  // side matches is the person VI dialed.
+  let matchedLeadDigits: string | null = null;
+  if (!campaign && !UUID_RE.test(campaignIdParam)) {
+    const sides = [last10(event.fromNumber), last10(event.toNumber)].filter((x) => x.length === 10);
+    if (sides.length > 0) {
+      try {
+        const m = await pool.query(
+          `SELECT c.id, c.script_text, c.language_code, c.agent_id, p.phone_number AS caller_number,
+                  RIGHT(regexp_replace(l.phone_number, '\\D', '', 'g'), 10) AS lead_digits
+             FROM outbound_campaign_leads l
+             JOIN outbound_campaigns c ON c.id = l.campaign_id
+             LEFT JOIN company_phone_numbers p ON p.id = c.phone_number_id
+            WHERE c.customer_id = $1
+              AND c.telephony_provider_id = 'vodafone'
+              AND c.status IN ('running', 'ready')
+              AND l.status IN ('pending', 'calling')
+              AND RIGHT(regexp_replace(l.phone_number, '\\D', '', 'g'), 10) = ANY($2::text[])
+            ORDER BY (l.status = 'calling') DESC, c.updated_at DESC
+            LIMIT 1`,
+          [customerId, sides]
+        );
+        const row = m.rows[0];
+        if (row) {
+          session.mode = "outbound";
+          campaign = {
+            id: row.id,
+            scriptText: row.script_text ?? null,
+            languageCode: row.language_code ?? null,
+            agentId: row.agent_id ?? null,
+            callerNumber: row.caller_number ?? null,
+          };
+          matchedLeadDigits = row.lead_digits;
+          app.log.info({ customerId, campaignId: row.id }, "vodafone-voicebot: call matched to a campaign by phone number");
+        }
+      } catch (err) {
+        app.log.warn({ err, customerId }, "vodafone-voicebot: campaign match by phone number failed");
+      }
+    }
+  }
+
   // The campaign was scripted in one language: run the whole call in it
   // (STT hint, LLM reply language, TTS voice language).
   if (campaign?.languageCode) {
@@ -603,7 +646,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
 
   if (campaign) {
     // The lead VI dialed is whichever side of the call isn't our number.
-    const leadDigits = pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber);
+    const leadDigits = matchedLeadDigits ?? pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber);
     campaignCalls.set(event.streamId, { campaignId: campaign.id, leadDigits });
     void markCampaignLead(app, campaign.id, leadDigits, "calling", event.callId);
   }

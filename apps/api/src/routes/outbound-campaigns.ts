@@ -135,7 +135,9 @@ export function buildObdBaseRecord(
   dni: string,
   campaignId: string
 ): StaticObdBaseRecord {
-  const record: StaticObdBaseRecord = { dni, msisdn: phoneNumber };
+  // VI's format is 10 digits for both (its doc: "97xxxxxx42"; its active
+  // DNI list: ["9112002517"]). With a 91 prefix VI silently drops the record.
+  const record: StaticObdBaseRecord = { dni: digitsOnly(dni).slice(-10), msisdn: digitsOnly(phoneNumber).slice(-10) };
   for (const varName of variableNames) {
     if (varName === "msisdn" || varName === "dni") continue;
     if (varName === "call_type") record[varName] = "outbound";
@@ -489,7 +491,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
         }
         try {
           // VI refuses Start for a With-Flow campaign it already runs on its window; that counts as started.
-          await startObdCampaignOrConfirmActive(customerId, campaign.vi_campaign_id);
+          await startObdCampaignOrConfirmActive(customerId, campaign.vi_campaign_id, campaign.vi_campaign_ref_id);
           await pool.query("UPDATE outbound_campaigns SET status = 'running', updated_at = NOW() WHERE id = $1", [id]);
         } catch (viErr) {
           app.log.error({ err: viErr, campaignId: id }, "Failed to start VI OBD campaign");
@@ -699,7 +701,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       }
 
       try {
-        const status = await getObdCampaignStatus(customerId, campaign.vi_campaign_id);
+        const status = await getObdCampaignStatus(customerId, String(campaign.vi_campaign_ref_id ?? campaign.vi_campaign_id));
         return reply.send(status);
       } catch (viErr) {
         app.log.error({ err: viErr, campaignId: id }, "Failed to fetch VI OBD campaign status");

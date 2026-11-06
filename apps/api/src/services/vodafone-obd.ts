@@ -220,12 +220,37 @@ export async function staticCampaignBaseLoad(
   campaignId: string,
   records: StaticObdBaseRecord[]
 ): Promise<{ status: string }> {
-  const res = await authedObdFetch<{ data: { status: string } }>(
+  const res = await authedObdFetch<{ data?: { status?: string }; status?: string | number; message?: string }>(
     customerId,
     "staticCampaignDataIngestion",
     { campaign_ID: campaignId, Records: records }
   );
-  return res.data;
+  // HTTP 200 alone is not proof: only data.status "success" means VI took the records.
+  const status = String(res?.data?.status ?? "");
+  if (status.toLowerCase() !== "success") {
+    throw new VodafoneObdError("VI did not accept the campaign base", 502, res);
+  }
+  return { status };
+}
+
+const activeDniCache = new Map<string, { at: number; list: string[] }>();
+const ACTIVE_DNI_TTL_MS = 5 * 60_000;
+
+/**
+ * The calling numbers (DNIs) VI allows for this Flow, as 10-digit strings
+ * (VI's own format, e.g. ["9112002517"]). A base record whose dni is not one
+ * of these is silently dropped by VI ("Base not loaded", Active DNI 0).
+ */
+export async function getActiveDniList(customerId: string, flowId: string): Promise<string[]> {
+  const key = `${customerId}|${flowId}`;
+  const hit = activeDniCache.get(key);
+  if (hit && Date.now() - hit.at < ACTIVE_DNI_TTL_MS) return hit.list;
+  const res = await authedObdFetch<{ dniList?: unknown[] }>(customerId, "getActiveDNIList", { flowId });
+  const list = (Array.isArray(res?.dniList) ? res.dniList : [])
+    .map((d) => String(d ?? "").replace(/\D/g, "").slice(-10))
+    .filter((d) => d.length === 10);
+  activeDniCache.set(key, { at: Date.now(), list });
+  return list;
 }
 
 export async function startOrStopObdCampaign(
@@ -258,6 +283,10 @@ export interface ObdCampaignStatus {
   deletedOn: string | null;
 }
 
+/**
+ * `campaignId` here is VI's numeric campaign_Ref_ID (what VI's portal shows
+ * as "ID"): VI answers "invalid campaign_ID" for the campainKey.
+ */
 export async function getObdCampaignStatus(
   customerId: string,
   campaignId: string
@@ -283,7 +312,9 @@ const TERMINAL_STATUS_RE = /finish|complet|delet|expir|stop|cancel|reject/i;
  */
 export async function startObdCampaignOrConfirmActive(
   customerId: string,
-  campaignId: string
+  campaignId: string,
+  /** campaignstatus takes VI's numeric campaign_Ref_ID, not the campainKey. */
+  statusId: string | number | null | undefined
 ): Promise<{ alreadyActive: boolean; viStatus: ObdCampaignStatus | null }> {
   try {
     await startOrStopObdCampaign(customerId, campaignId, "S");
@@ -292,7 +323,7 @@ export async function startObdCampaignOrConfirmActive(
     if (!(err instanceof VodafoneObdError) || err.httpStatus !== 400) throw err;
     let status: ObdCampaignStatus | null = null;
     try {
-      status = await getObdCampaignStatus(customerId, campaignId);
+      status = await getObdCampaignStatus(customerId, String(statusId ?? campaignId));
     } catch {
       throw err; // cannot confirm the campaign is live: report VI's original refusal
     }

@@ -34,6 +34,7 @@ import {
   startObdCampaignOrConfirmActive,
   getObdCampaignStatus,
   getVodafoneObdCredentials,
+  getActiveDniList,
   VodafoneObdError,
 } from "../services/vodafone-obd";
 import { resolveObdDni, digitsOnly, buildObdBaseRecord, DEFAULT_OBD_BASE_VARIABLES } from "./outbound-campaigns";
@@ -136,6 +137,54 @@ async function leadCounts(campaignId: string): Promise<Record<string, number>> {
   return counts;
 }
 
+/** VI's campaignstatus wants the numeric campaign_Ref_ID; the campainKey is refused. */
+function statusIdOf(campaign: Record<string, any>): string {
+  return String(campaign.vi_campaign_ref_id ?? campaign.vi_campaign_id);
+}
+
+/**
+ * The calling number (DNI, 10 digits) for this campaign's base records. It
+ * must be one of the Flow's active DNIs, or VI drops every record ("Base not
+ * loaded"). The configured number (campaign phone_number_id, else the tenant
+ * dni, else the primary number) is used when VI lists it; a number picked
+ * explicitly for the campaign that VI does not list is an error; otherwise
+ * the Flow's first active DNI is used.
+ */
+async function pickDni(
+  customerId: string,
+  flowId: string | null | undefined,
+  phoneNumberId: string | null | undefined
+): Promise<string> {
+  const creds = await getVodafoneObdCredentials(customerId);
+  let configured: string | null = null;
+  try {
+    configured = (await resolveObdDni(customerId, phoneNumberId ?? null, creds.dni)).slice(-10);
+  } catch (err) {
+    if (phoneNumberId) throw err;
+  }
+  let active: string[] = [];
+  if (flowId) {
+    try {
+      active = await getActiveDniList(customerId, flowId);
+    } catch {
+      active = []; // VI list unavailable: fall back to the configured number
+    }
+  }
+  if (active.length === 0) {
+    if (configured) return configured;
+    throw new VodafoneObdError("No outbound DNI: VI lists no active DNI for this Flow and none is configured", 400);
+  }
+  if (configured && active.includes(configured)) return configured;
+  if (phoneNumberId) {
+    throw new VodafoneObdError(
+      `The campaign number ${configured} is not an active DNI on this Vodafone Flow. Active DNIs: ${active.join(", ")}`,
+      400,
+      { active_dnis: active }
+    );
+  }
+  return active[0];
+}
+
 /**
  * Uploads numbers to the VI campaign base in chunks and records each chunk
  * as local leads only after VI accepted it, so the local list always matches
@@ -145,21 +194,31 @@ async function pushNumbers(
   customerId: string,
   campaign: Record<string, any>,
   numbers: string[]
-): Promise<{ pushed: number; alreadyInCampaign: number; error?: unknown }> {
+): Promise<{ pushed: number; alreadyInCampaign: number; dni?: string; error?: unknown }> {
   // A retry re-sends the whole list: never upload a number VI already has
-  // (it would be dialed twice). Matched on the last 10 digits.
+  // (it would be dialed twice). Matched on the last 10 digits. Exception: if
+  // VI reports an empty base, nothing local ever reached it (e.g. records it
+  // dropped), so everything is uploaded again.
   const existing = await pool.query(
     `SELECT DISTINCT RIGHT(regexp_replace(phone_number, '\\D', '', 'g'), 10) AS d
        FROM outbound_campaign_leads WHERE campaign_id = $1`,
     [campaign.id]
   );
-  const have = new Set<string>(existing.rows.map((r) => r.d));
-  const fresh = numbers.filter((n) => !have.has(n.slice(-10)));
+  const local = new Set<string>(existing.rows.map((r) => r.d));
+  let viBaseEmpty = false;
+  if (local.size > 0) {
+    try {
+      const st = await getObdCampaignStatus(customerId, statusIdOf(campaign));
+      viBaseEmpty = Number(st?.baseDetails?.totalBaseReceived ?? -1) === 0;
+    } catch {
+      viBaseEmpty = false; // unknown: keep the safe no-double-dial rule
+    }
+  }
+  const fresh = viBaseEmpty ? numbers : numbers.filter((n) => !local.has(n.slice(-10)));
   const alreadyInCampaign = numbers.length - fresh.length;
   numbers = fresh;
   if (numbers.length === 0) return { pushed: 0, alreadyInCampaign };
-  const creds = await getVodafoneObdCredentials(customerId);
-  const dni = await resolveObdDni(customerId, campaign.phone_number_id, creds.dni);
+  const dni = await pickDni(customerId, campaign.vi_flow_id, campaign.phone_number_id);
   const variableNames: string[] =
     Array.isArray(campaign.vi_base_variable_names) && campaign.vi_base_variable_names.length > 0
       ? campaign.vi_base_variable_names
@@ -172,16 +231,19 @@ async function pushNumbers(
     try {
       await staticCampaignBaseLoad(customerId, campaign.vi_campaign_id, records);
     } catch (error) {
-      return { pushed, alreadyInCampaign, error };
+      return { pushed, alreadyInCampaign, dni, error };
     }
-    await pool.query(
-      `INSERT INTO outbound_campaign_leads (campaign_id, phone_number)
-       SELECT $1, UNNEST($2::text[])`,
-      [campaign.id, chunk]
-    );
+    const newLocal = chunk.filter((n) => !local.has(n.slice(-10)));
+    if (newLocal.length > 0) {
+      await pool.query(
+        `INSERT INTO outbound_campaign_leads (campaign_id, phone_number)
+         SELECT $1, UNNEST($2::text[])`,
+        [campaign.id, newLocal]
+      );
+    }
     pushed += chunk.length;
   }
-  return { pushed, alreadyInCampaign };
+  return { pushed, alreadyInCampaign, dni };
 }
 
 function publicCampaign(row: Record<string, any>) {
@@ -258,12 +320,13 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "None of phone_numbers is a valid number (10-13 digits)" });
     }
 
-    // Resolve the DNI before creating anything on VI, so a missing number fails cleanly.
+    // Pick the calling number before creating anything on VI: it must be an
+    // active DNI on the Flow, or VI loads no numbers at all.
+    let dni: string;
     try {
-      const creds = await getVodafoneObdCredentials(customerId);
-      await resolveObdDni(customerId, d.phone_number_id ?? null, creds.dni);
+      dni = await pickDni(customerId, viFlowId, d.phone_number_id ?? null);
     } catch (err) {
-      return viErrorReply(reply, err, "No outbound DNI for this campaign");
+      return viErrorReply(reply, err, "No usable outbound DNI for this campaign");
     }
 
     let viCampaignId: string;
@@ -326,7 +389,7 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     let viStatus: unknown = null;
     if (d.start !== false && leads.pushed > 0) {
       try {
-        const res = await startObdCampaignOrConfirmActive(customerId, viCampaignId);
+        const res = await startObdCampaignOrConfirmActive(customerId, viCampaignId, viCampaignRefId);
         viStatus = res.viStatus;
         if (res.alreadyActive) {
           app.log.info({ campaignId: id, viCampaignId, viStatus: res.viStatus?.currentStatus }, "vodafone-campaigns: VI already runs the campaign on its window");
@@ -348,7 +411,17 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
       }
     }
 
-    app.log.info({ customerId, campaignId: id, viCampaignId, leads, started }, "vodafone-campaigns: campaign created");
+    if (leads.pushed > 0 && !viStatus) {
+      try {
+        viStatus = await getObdCampaignStatus(customerId, String(viCampaignRefId ?? viCampaignId));
+      } catch {
+        viStatus = null;
+      }
+    }
+    app.log.info(
+      { customerId, campaignId: id, viCampaignId, viCampaignRefId, dni, leads, started, viStatus },
+      "vodafone-campaigns: campaign created"
+    );
     return reply.status(201).send({
       message: started
         ? "Vodafone campaign started; VI dials the numbers inside the window"
@@ -357,6 +430,7 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
           : "Vodafone campaign created; add numbers with POST /vodafone/campaigns/{id}/leads",
       started,
       window,
+      dni,
       leads,
       campaign: publicCampaign(campaign),
       vi_status: viStatus,
@@ -385,7 +459,7 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     let vi: unknown = null;
     let viError: string | null = null;
     try {
-      vi = await getObdCampaignStatus(request.customerId!, campaign.vi_campaign_id);
+      vi = await getObdCampaignStatus(request.customerId!, statusIdOf(campaign));
     } catch (err) {
       viError = err instanceof VodafoneObdError ? err.message : String(err);
     }
@@ -438,7 +512,7 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     if (counts.total === 0) return reply.status(400).send({ error: "This campaign has no numbers yet; add them with POST /vodafone/campaigns/{id}/leads" });
     let res: Awaited<ReturnType<typeof startObdCampaignOrConfirmActive>>;
     try {
-      res = await startObdCampaignOrConfirmActive(customerId, campaign.vi_campaign_id);
+      res = await startObdCampaignOrConfirmActive(customerId, campaign.vi_campaign_id, campaign.vi_campaign_ref_id);
     } catch (err) {
       app.log.error({ err, campaignId: id }, "vodafone-campaigns: VI start failed");
       return viErrorReply(reply, err, "Vodafone could not start the campaign");

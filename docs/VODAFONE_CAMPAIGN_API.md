@@ -25,6 +25,19 @@ The engine never falls back to Exotel and never renders an audio file.
 
 The provider must be `vodafone` and enabled.
 
+## How numbers are sent to VI
+
+- **10 digits for both `dni` and `msisdn`.** That is VI's own format (`"9112002517"`). With a `91` prefix, VI silently drops the record and the portal shows "Campaign Active: Base not loaded".
+- **The DNI must be an active DNI on the Flow** (VI `getActiveDNIList`). The engine picks the DNI in this order:
+  1. The campaign's `phone_number_id`, if VI lists it. If VI doesn't list it, the request fails with `400`, which names the active DNIs.
+  2. Otherwise, the tenant `dni` or primary number, if VI lists it.
+  3. Otherwise, the Flow's first active DNI.
+- **Only the Flow's base variables are sent.** VI reports them through `getsampleBaseHeads`, for example only `msisdn`. When the Flow forwards no `campaign_id`, the bot recognises a campaign call by matching the dialled number to a pending number of a live campaign. It then speaks that campaign's script with the campaign's agent.
+- **Check VI's count.** The create response's `dni` field shows the DNI used, and `vi_status.baseDetails.totalBaseReceived` shows what VI actually loaded.
+- **Retries never dial anyone twice.** `/leads` skips numbers already in the campaign (`already_in_campaign`). The exception is when VI reports an empty base: then everything is uploaded again.
+- **Status uses VI's numeric campaign ID.** The engine reads VI status with `campaign_Ref_ID` (the "ID" shown in VI's portal). VI rejects the `campainKey` for status.
+- **A refused start can still count as started.** VI may refuse a start for a With-Flow campaign it already runs on its window. The engine then reads VI's status: any live state counts as started (`already_active: true`).
+
 ## Endpoints
 
 | Method | Endpoint | Purpose |
