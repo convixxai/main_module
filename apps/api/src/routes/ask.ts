@@ -550,6 +550,14 @@ export async function runAskPipeline(params: {
   /** When set (e.g. voice simulator), prepended above agent/customer prompt and overrides on conflict. */
   additionalSystemPrompt?: string | null;
   /**
+   * Short system message placed right before the caller's message (after the
+   * history), for rules that must win over the agent prompt on THIS turn,
+   * e.g. the voice call's reply language. A rule only at the top of a long
+   * agent prompt lost to the agent's own "if they speak English, continue in
+   * English" lines (2026-11-06). Unset: messages unchanged.
+   */
+  turnSystemNote?: string | null;
+  /**
    * Opt-in token streaming for incremental TTS (e.g. voicebot low-latency mode). When
    * provided, the pipeline is FORCED into OpenAI-only mode regardless of `ragOpenaiOnly`
    * or tenant settings, because self-hosted has no streaming implementation and racing it
@@ -585,6 +593,7 @@ export async function runAskPipeline(params: {
     trace,
     embeddingLanguageHint,
     additionalSystemPrompt,
+    turnSystemNote,
     onLlmTextDelta,
     toolContext,
   } = params;
@@ -849,6 +858,10 @@ export async function runAskPipeline(params: {
     ragMessages[0] = { ...ragMessages[0], content: `${ragMessages[0].content}
 
 ${toolset.promptBlock}` };
+  }
+  const turnNote = turnSystemNote?.trim();
+  if (turnNote && ragMessages.length > 0 && ragMessages[ragMessages.length - 1].role === "user") {
+    ragMessages.splice(ragMessages.length - 1, 0, { role: "system", content: turnNote });
   }
 
   trace?.("rag_prompt_built", {

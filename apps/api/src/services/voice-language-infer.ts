@@ -119,6 +119,33 @@ export function isConversationalOpener(raw: string): boolean {
   );
 }
 
+// Words Indian callers say on the phone in every language: "Hello" or "Yes"
+// from a Marathi speaker is not English. Latin and Devanagari spellings, as
+// STT renders them.
+const LANGUAGE_NEUTRAL_WORDS = new Set([
+  "hello", "helo", "hallo", "hi", "hey", "yes", "yeah", "yep", "ya", "no", "nope", "ok", "okay", "oke",
+  "sure", "right", "thanks", "thank", "you", "sorry", "bye", "please", "hmm", "hm", "mm", "uh", "um",
+  "haan", "han", "ha", "ho", "hoy", "ji", "jee", "nahi", "na", "achha", "acha", "theek", "thik", "hai",
+  "हॅलो", "हेलो", "हलो", "हैलो", "हाय", "येस", "ओके", "ओक्के", "ओकेय", "थँक", "थैंक", "यू", "सॉरी", "बाय",
+  "हो", "होय", "हां", "हाँ", "हा", "जी", "नाही", "नहीं", "ना", "हम्म", "हं", "अच्छा", "ठीक", "है", "आहे",
+]);
+
+/**
+ * True when the utterance carries no real evidence of the caller's language:
+ * a single word, or only universal phone words ("Hello", "Yes", "OK thank
+ * you", "हो", "जी"). Such turns must neither count toward a language switch
+ * offer nor make the bot change language.
+ */
+export function isLanguageNeutralUtterance(raw: string): boolean {
+  const words = raw
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length <= 1) return true;
+  return words.length <= 5 && words.every((w) => LANGUAGE_NEUTRAL_WORDS.has(w));
+}
+
 /** Fast-path spoken reply — neutral tone, feminine wording. */
 export function conversationalOpenerReply(
   languageBcp47: string,

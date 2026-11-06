@@ -65,6 +65,7 @@ import {
   languagesLooselyEqual,
   isLanguageInAllowedList,
   decideLanguageSwitchAction,
+  isLanguageNeutralUtterance,
   languageSwitchOptionsPrompt,
   parseLanguageChoice,
   persistSessionActiveLanguage,
@@ -451,15 +452,16 @@ function last10(phone: string | null | undefined): string {
 }
 
 /**
- * On a VI OBD call one side is our DNI and the other is the lead. Which of
- * cli/dni is which isn't pinned down by VI's doc, so prefer the side that
- * isn't the campaign's caller number; default to `dni` (the dialed party).
+ * On a VI OBD call one side is our DNI and the other is the lead. Prefer the
+ * side that isn't the campaign's caller number; otherwise `cli`: production
+ * OBD calls arrive with cli = the lead and dni = our DNI, the same as inbound
+ * (seen 2026-11-06, dni "9112002517" on every campaign call).
  */
 function pickLeadNumber(cli: string, dni: string, callerNumber: string | null): string {
   const caller = last10(callerNumber);
   if (caller && last10(dni) === caller) return last10(cli);
   if (caller && last10(cli) === caller) return last10(dni);
-  return last10(dni) || last10(cli);
+  return last10(cli) || last10(dni);
 }
 
 async function markCampaignLead(
@@ -530,6 +532,12 @@ async function routeVodafoneCall(
 ): Promise<VodafoneCallRoute> {
   const byUrl: VodafoneCallRoute = { customerId: urlCustomerId, campaignId: null, leadDigits: null, how: "url" };
   const param = String(event.customParameters?.campaign_id ?? "").trim();
+  // A campaign_id custom parameter can be stale: a value typed into the VI
+  // Flow's Streaming node stays the same for every campaign on that Flow
+  // (seen 2026-11-06: a call of "New Test (copy) 2" arrived with the id of
+  // the older "New Test"). The dialed number is the stronger signal, so the
+  // parameter is used only when no live campaign has this number pending.
+  let byParam: VodafoneCallRoute | null = null;
   try {
     if (UUID_RE.test(param)) {
       const r = await pool.query(
@@ -538,11 +546,11 @@ async function routeVodafoneCall(
         [param]
       );
       const row = r.rows[0];
-      return row ? { customerId: row.customer_id, campaignId: row.id, leadDigits: null, how: "campaign_id" } : byUrl;
+      if (row) byParam = { customerId: row.customer_id, campaignId: row.id, leadDigits: null, how: "campaign_id" };
     }
 
     const sides = [last10(event.fromNumber), last10(event.toNumber)].filter((x) => x.length === 10);
-    if (sides.length === 0) return byUrl;
+    if (sides.length === 0) return byParam ?? byUrl;
     const urlTelephony = await getTelephonySettings(urlCustomerId);
     const urlFlow = ((urlTelephony?.metadata as Record<string, unknown> | undefined)?.vi_flow_id as string | undefined) ?? null;
 
@@ -562,6 +570,16 @@ async function routeVodafoneCall(
       [sides, urlCustomerId]
     );
     for (const row of m.rows) {
+      if (byParam) {
+        // Only the campaign_id's own tenant: the parameter still names the tenant.
+        if (row.customer_id !== byParam.customerId) continue;
+        return {
+          customerId: row.customer_id,
+          campaignId: row.id,
+          leadDigits: row.lead_digits,
+          how: row.id === byParam.campaignId ? "campaign_id" : "lead_match",
+        };
+      }
       const sameTenant = row.customer_id === urlCustomerId;
       let ok = sameTenant || (!!urlFlow && row.vi_flow_id === urlFlow);
       const ourSide = sides.find((x) => x !== row.lead_digits) ?? null;
@@ -584,14 +602,22 @@ async function routeVodafoneCall(
   } catch (err) {
     app.log.warn({ err, urlCustomerId }, "vodafone-voicebot: call routing lookup failed, using the URL tenant");
   }
-  return byUrl;
+  return byParam ?? byUrl;
 }
 
 async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: string, event: Extract<CallEvent, { type: "start" }>): Promise<void> {
   const route = await routeVodafoneCall(app, urlCustomerId, event);
   const customerId = route.customerId;
   app.log.info(
-    { urlCustomerId, customerId, how: route.how, campaignId: route.campaignId, streamId: event.streamId, callId: event.callId },
+    {
+      urlCustomerId,
+      customerId,
+      how: route.how,
+      campaignId: route.campaignId,
+      paramCampaignId: event.customParameters?.campaign_id ?? null,
+      streamId: event.streamId,
+      callId: event.callId,
+    },
     "vodafone-voicebot: call routed"
   );
   const telephony = await getTelephonySettings(customerId);
@@ -728,7 +754,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
     mediaFrameCount: 0,
     agentPinned,
     customerPhone: campaign
-      ? pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber) || null
+      ? matchedLeadDigits || pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber) || null
       : event.fromNumber || null,
   };
   calls.set(event.streamId, state);
@@ -936,6 +962,13 @@ async function handleLanguageSwitchFlow(
   if (!sttLanguageCode) {
     return { action: "continue", transcript };
   }
+  // "Hello" / "Yes" / "हो" say nothing about the caller's language (Exotel
+  // has the same guard as isShortAmbiguous). Seen 2026-11-06: a Marathi
+  // campaign call heard "Hello" then "Yes", STT tagged both en-IN, and the
+  // two "English" turns made the bot offer English and switch on "हो".
+  if (isLanguageNeutralUtterance(transcript)) {
+    return { action: "continue", transcript };
+  }
   const clamped = clampLanguageToAllowed(sttLanguageCode, allowedNorm, activeBcp);
   const decision = decideLanguageSwitchAction(session, state.customerSettings, {
     multilingual: true,
@@ -1085,11 +1118,39 @@ function buildLanguageRule(session: VoicebotSession, state: VodafoneCallState): 
     activeLang = current;
     rule = `\n- This call is currently being handled in **${current}** (${label}) per tenant language policy.\n- MANDATORY: Reply ONLY in ${label} using the correct script for that language, regardless of the script the transcript happens to render the caller's words in — do NOT switch language based on a single ambiguous word.\n`;
   }
+  // gpt-5-mini followed an agent prompt line "If they speak English, continue
+  // in English" over the rule above when a Marathi caller said "Hello", and
+  // replayed the opening in English (2026-11-06). The system owns the call
+  // language: it switches it after the caller confirms, and then this rule
+  // names the new language.
+  const activeLabel = LANGUAGE_DISPLAY_NAME[activeLang] ?? activeLang;
+  rule += `- The reply language is decided by the system, not by you. This overrides any agent-prompt instruction to follow or mirror the caller's language (such as "if they speak English, continue in English"): keep replying in ${activeLabel} until this line names another language.\n- Words like "Hello", "Yes", "OK", "Thank you", "Sorry", "Haan", "Ho" are used in every Indian language on a phone call: they never mean the caller wants English or another language.\n- Never restate a line you already said in another language (see the conversation so far). If the caller only says "Hello", they are just answering the phone: reply briefly in ${activeLabel} and carry on from where the conversation is.\n`;
 
   rule += buildVoiceGenderRule(activeLang.split("-")[0]?.toLowerCase() ?? "", state.ttsConfig.voiceGender);
 
   const primary = def.split("-")[0]?.toLowerCase() ?? "";
   return primary && primary !== "en" ? rule + RAG_MULTILINGUAL_GRAMMAR_RULE : rule;
+}
+
+/**
+ * The reply language, repeated right before the caller's message (see
+ * runAskPipeline turnSystemNote). Tested on the production prompt of
+ * 2026-11-06: with the rule only at the top, gpt-5-mini answered a Marathi
+ * call's "Hello" in English 9 times out of 10; with this note, 0 out of 12.
+ */
+function buildLanguageTurnNote(session: VoicebotSession, state: VodafoneCallState): string {
+  const def = normalizeBcp47Tag(session.defaultLanguageCode || "en-IN");
+  const lang =
+    state.customerSettings?.voicebot_multilingual === true
+      ? normalizeBcp47Tag(session.currentLanguageCode || def)
+      : def;
+  const label = LANGUAGE_DISPLAY_NAME[lang] ?? lang;
+  return (
+    `Reply language for this turn: ${label} (${lang}), in the same script as your earlier ${label} lines. ` +
+    `The caller's words do not change it: "Hello", "Yes", "OK" are said in every Indian language. ` +
+    `Do not use lines the agent prompt gives for other languages. ` +
+    `Never restate a line you already said in another language; if the caller only says "Hello", reply briefly in ${label} and carry on.`
+  );
 }
 
 /**
@@ -1130,6 +1191,7 @@ async function answerUtteranceBatch(
     sequentialLlm: true,
     embeddingLanguageHint: sttLanguageCode,
     additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE + buildLanguageRule(session, state),
+    turnSystemNote: buildLanguageTurnNote(session, state),
     includeTimings: true,
     trace,
     toolContext: {
@@ -1258,6 +1320,7 @@ async function answerUtteranceStreaming(
     inputAgentId: state.agentPinned ? session.agentId : null,
     embeddingLanguageHint: sttLanguageCode,
     additionalSystemPrompt: VOICE_SPOKEN_REPLY_STYLE_RULE + buildLanguageRule(session, state),
+    turnSystemNote: buildLanguageTurnNote(session, state),
     includeTimings: true,
     onLlmTextDelta: (delta) => {
       if (firstLlmDeltaAt === null) {
