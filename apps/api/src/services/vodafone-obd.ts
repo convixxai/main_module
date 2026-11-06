@@ -339,3 +339,134 @@ export async function startObdCampaignOrConfirmActive(
     return { alreadyActive: true, viStatus: status };
   }
 }
+
+// ============================================================
+// Pull Report API (vendor doc "Call history and report api", REPORTS ->
+// Pull Report API). Separate login from the campaign API: the token is
+// issued per DNI. Read-only: nothing here places or changes a call.
+//
+//   POST pullcalldetails/authenticatepullreport {username, password, dni}
+//   POST pullcalldetails/pullreport {dni, fromdate, todate, calltype,
+//        campaignid?, call_id?}   dates "DD/MM/YYYY"
+//   calltype 1 inbound, 2 outbound (campaignid), 3 click-to-call,
+//            4 outbound summary (campaignid, no dates)
+//
+// VI's doc shows the reply only as {"report": "report JSON will be out"}, so
+// the row fields are not documented: the reply is normalized to a list of
+// rows (report may be an array, an object, or a JSON string) and returned
+// as-is, with the raw body kept for anything that does not fit.
+// ============================================================
+
+const REPORT_API_BASE = "https://cts.myvi.in:8443/Cpaas/api/v1/pullcalldetails";
+const reportTokenCache = new Map<string, { idToken: string; expiresAt: number }>();
+
+export type PullReportCallType = 1 | 2 | 3 | 4;
+
+async function reportFetch<T>(path: string, init: RequestInit): Promise<T> {
+  const response = await fetch(`${REPORT_API_BASE}/${path}`, init);
+  const text = await response.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
+  if (!response.ok) {
+    throw new VodafoneObdError(`VI Pull Report API ${path} returned HTTP ${response.status}`, response.status, body);
+  }
+  return body as T;
+}
+
+async function getPullReportToken(customerId: string, dni: string): Promise<string> {
+  const key = `${customerId}|${dni}`;
+  const cached = reportTokenCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.idToken;
+  const creds = await getVodafoneObdCredentials(customerId);
+  if (!creds.username || !creds.password) {
+    throw new VodafoneObdError("Vodafone credentials are missing username/password", 400);
+  }
+  const res = await reportFetch<{ idToken?: string; expiresIn?: number }>("authenticatepullreport", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: creds.username, password: creds.password, dni }),
+  });
+  if (!res?.idToken) throw new VodafoneObdError("VI Pull Report login returned no token", 502, res);
+  const ttl = Number(res.expiresIn) > 0 ? Number(res.expiresIn) * 1000 : 3_600_000;
+  reportTokenCache.set(key, { idToken: res.idToken, expiresAt: Date.now() + Math.max(60_000, ttl - TOKEN_SAFETY_MARGIN_MS) });
+  return res.idToken;
+}
+
+/** YYYY-MM-DD -> DD/MM/YYYY (VI's report date format). */
+export function toViReportDate(isoDate: string): string {
+  const [y, m, d] = isoDate.split("-");
+  return `${d}/${m}/${y}`;
+}
+
+function normalizeReportRows(body: unknown): Record<string, unknown>[] {
+  let r: unknown = body && typeof body === "object" && "report" in (body as object) ? (body as { report: unknown }).report : body;
+  if (r && typeof r === "object" && !Array.isArray(r) && "data" in (r as object)) r = (r as { data: unknown }).data;
+  if (typeof r === "string") {
+    try {
+      r = JSON.parse(r);
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(r)) return r.filter((x) => x && typeof x === "object") as Record<string, unknown>[];
+  if (r && typeof r === "object") {
+    // a single record, or {something: [rows]}
+    const arr = Object.values(r as object).find((v) => Array.isArray(v));
+    return Array.isArray(arr) ? (arr.filter((x) => x && typeof x === "object") as Record<string, unknown>[]) : [r as Record<string, unknown>];
+  }
+  return [];
+}
+
+export interface PullReportResult {
+  rows: Record<string, unknown>[];
+  /** VI's reply as received (field names are not documented by VI). */
+  raw: unknown;
+}
+
+export async function pullViCallReport(
+  customerId: string,
+  params: {
+    dni: string;
+    calltype: PullReportCallType;
+    /** YYYY-MM-DD; not used for calltype 4. */
+    fromdate?: string;
+    todate?: string;
+    /** VI's numeric campaign ID (campaign_Ref_ID); required for calltype 2 and 4. */
+    campaignid?: string | number | null;
+    call_id?: string | number | null;
+  }
+): Promise<PullReportResult> {
+  const body: Record<string, string> = { dni: params.dni, calltype: String(params.calltype) };
+  if (params.calltype !== 4) {
+    if (!params.fromdate || !params.todate) throw new VodafoneObdError("fromdate and todate are required", 400);
+    body.fromdate = toViReportDate(params.fromdate);
+    body.todate = toViReportDate(params.todate);
+  }
+  if (params.campaignid != null && params.campaignid !== "") body.campaignid = String(params.campaignid);
+  if (params.call_id != null && params.call_id !== "") body.call_id = String(params.call_id);
+
+  const send = async () => {
+    const token = await getPullReportToken(customerId, params.dni);
+    return reportFetch<unknown>("pullreport", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+  };
+  let raw: unknown;
+  try {
+    raw = await send();
+  } catch (err) {
+    if (err instanceof VodafoneObdError && err.httpStatus === 401) {
+      reportTokenCache.delete(`${customerId}|${params.dni}`);
+      raw = await send();
+    } else {
+      throw err;
+    }
+  }
+  return { rows: normalizeReportRows(raw), raw };
+}

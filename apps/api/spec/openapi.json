@@ -107,6 +107,10 @@
     {
       "name": "Vodafone Campaigns (VI OBD)",
       "description": "**Use these for Vodafone outbound campaigns.** Vodafone campaigns run on VI's own OBD Campaign API: the engine creates the campaign on VI, uploads the numbers and starts it, and VI dials them inside the window (no Exotel, no per-lead calls, no pre-rendered audio). Answered calls come to the bot on the tenant's Vodafone WebSocket. `POST /vodafone/campaigns` does everything in one call; the other endpoints add numbers, start/resume, pause, read status and delete. Requires `x-api-key`; setup (`credentials`, `vi_flow_id`) is done once with `PUT /customers/{customerId}/vodafone-settings`."
+    },
+    {
+      "name": "Vodafone Reports (VI)",
+      "description": "Vodafone only, read only. Live campaign status, a campaign's call report and summary, and call history (inbound / outbound / click-to-call), read from VI's campaignstatus and Pull Report APIs. Nothing here dials or changes a campaign. Exotel and /outbound/campaigns are not affected. VI does not document the report row fields: `calls` rows are passed through exactly as VI sends them; add `raw=1` to also get VI's reply as received."
     }
   ],
   "components": {
@@ -11464,6 +11468,426 @@
           },
           "502": {
             "description": "VI unreachable"
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}/status": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "Campaign status (live counts from VI)",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "VI `campaignstatus` for this campaign (asked by VI's numeric campaign ID), flattened into simple fields, plus the engine's own lead counts. Cheap enough to poll every 1-2 minutes. If VI is unreachable the call still returns 200 with `vi_status_error` set and the VI fields null.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Engine campaign id (from POST /vodafone/campaigns)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campaign status",
+            "content": {
+              "application/json": {
+                "example": {
+                  "campaign": {
+                    "id": "5b7e0ffe-0477-4fec-8a29-72605515d901",
+                    "name": "New Test (copy) 2",
+                    "status": "running",
+                    "provider": "vodafone",
+                    "vi_campaign_ref_id": 771719,
+                    "...": "..."
+                  },
+                  "status": {
+                    "engine_status": "running",
+                    "vi_status": "Active",
+                    "window": "10:00:00 - 19:00:00",
+                    "end_date": "07-11-2026",
+                    "numbers_on_vi": 1,
+                    "calls_placed": 1,
+                    "connected": 1,
+                    "not_connected": 0,
+                    "remaining": 0,
+                    "success_rate_percent": 100,
+                    "retry": {
+                      "interval": "Minutes",
+                      "within": 60,
+                      "attempts": 1
+                    }
+                  },
+                  "leads": {
+                    "total": 1,
+                    "pending": 0,
+                    "calling": 0,
+                    "completed": 1,
+                    "failed": 0
+                  },
+                  "vi_status_raw": {
+                    "currentStatus": "Active",
+                    "baseDetails": {
+                      "...": "..."
+                    }
+                  },
+                  "vi_status_error": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          },
+          "404": {
+            "description": "No Vodafone campaign with that id for this customer"
+          },
+          "502": {
+            "description": "VI refused or is unreachable (`details` has VI's reply)"
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}/report": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "Campaign call report (every call VI placed)",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "VI Pull Report, outbound (calltype 2) for this campaign: one row per call VI placed in the period. Default period: the campaign's creation date to today (IST).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Engine campaign id (from POST /vodafone/campaigns)"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "YYYY-MM-DD (IST). Default: the campaign's creation date."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "YYYY-MM-DD (IST). Default: today. At most 31 days after `from`."
+          },
+          {
+            "name": "dni",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Calling number (DNI) to report on, any format. Default: the campaign's calling number, else the tenant DNI / first active DNI."
+          },
+          {
+            "name": "raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "0"
+              ]
+            },
+            "description": "1 = also return VI's reply as received (`raw`)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campaign calls",
+            "content": {
+              "application/json": {
+                "example": {
+                  "campaign": {
+                    "id": "5b7e0ffe-0477-4fec-8a29-72605515d901",
+                    "name": "New Test (copy) 2",
+                    "status": "running",
+                    "provider": "vodafone",
+                    "vi_campaign_ref_id": 771719,
+                    "...": "..."
+                  },
+                  "period": {
+                    "from": "2026-11-06",
+                    "to": "2026-11-06"
+                  },
+                  "dni": "9112002517",
+                  "leads": {
+                    "total": 1,
+                    "pending": 0,
+                    "calling": 0,
+                    "completed": 1,
+                    "failed": 0
+                  },
+                  "count": 1,
+                  "calls": [
+                    {
+                      "...": "VI's call record fields, as VI sends them"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          },
+          "404": {
+            "description": "No Vodafone campaign with that id for this customer"
+          },
+          "502": {
+            "description": "VI refused or is unreachable (`details` has VI's reply)"
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}/summary": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "Campaign summary report",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "VI Pull Report, outbound summary (calltype 4) for this campaign: VI's totals for the whole campaign (no date range).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Engine campaign id (from POST /vodafone/campaigns)"
+          },
+          {
+            "name": "dni",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Calling number (DNI) to report on, any format. Default: the campaign's calling number, else the tenant DNI / first active DNI."
+          },
+          {
+            "name": "raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "0"
+              ]
+            },
+            "description": "1 = also return VI's reply as received (`raw`)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campaign summary",
+            "content": {
+              "application/json": {
+                "example": {
+                  "campaign": {
+                    "id": "5b7e0ffe-0477-4fec-8a29-72605515d901",
+                    "name": "New Test (copy) 2",
+                    "status": "running",
+                    "provider": "vodafone",
+                    "vi_campaign_ref_id": 771719,
+                    "...": "..."
+                  },
+                  "dni": "9112002517",
+                  "leads": {
+                    "total": 1,
+                    "pending": 0,
+                    "calling": 0,
+                    "completed": 1,
+                    "failed": 0
+                  },
+                  "summary": {
+                    "...": "VI's summary fields, as VI sends them"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          },
+          "404": {
+            "description": "No Vodafone campaign with that id for this customer"
+          },
+          "502": {
+            "description": "VI refused or is unreachable (`details` has VI's reply)"
+          }
+        }
+      }
+    },
+    "/vodafone/reports/calls": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "Call history (inbound / outbound / click-to-call)",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "VI Pull Report for a date range on one calling number (DNI). `type=inbound` (calltype 1), `type=outbound` (calltype 2, needs `campaign_id`: VI reports outbound calls per campaign), `type=click_to_call` (calltype 3). Add `call_id` (the VI call id, also in the engine logs) for a single call.",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "inbound",
+                "outbound",
+                "click_to_call"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "YYYY-MM-DD (IST). Default: `to`, else today."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "YYYY-MM-DD (IST). Default: today. At most 31 days after `from`."
+          },
+          {
+            "name": "campaign_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for type=outbound. The engine campaign uuid or VI's numeric campaign ID (only this customer's campaigns)."
+          },
+          {
+            "name": "call_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "VI call id, for one call"
+          },
+          {
+            "name": "dni",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Calling number (DNI) to report on, any format. Default: the campaign's calling number, else the tenant DNI / first active DNI."
+          },
+          {
+            "name": "raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "0"
+              ]
+            },
+            "description": "1 = also return VI's reply as received (`raw`)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call history",
+            "content": {
+              "application/json": {
+                "example": {
+                  "type": "inbound",
+                  "period": {
+                    "from": "2026-11-01",
+                    "to": "2026-11-06"
+                  },
+                  "dni": "9112002517",
+                  "campaign": null,
+                  "count": 1,
+                  "calls": [
+                    {
+                      "...": "VI's call record fields, as VI sends them"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          },
+          "404": {
+            "description": "No Vodafone campaign with that id for this customer"
+          },
+          "502": {
+            "description": "VI refused or is unreachable (`details` has VI's reply)"
           }
         }
       }

@@ -106,7 +106,7 @@ function normalizeNumbers(input: string[]): { valid: string[]; invalid: number; 
   return { valid, invalid, duplicates };
 }
 
-function viErrorReply(reply: any, err: unknown, message: string) {
+export function viErrorReply(reply: any, err: unknown, message: string) {
   const status = err instanceof VodafoneObdError ? err.httpStatus : 502;
   return reply.status(status === 400 || status === 404 ? status : 502).send({
     error: message,
@@ -114,7 +114,7 @@ function viErrorReply(reply: any, err: unknown, message: string) {
   });
 }
 
-async function loadVodafoneCampaign(customerId: string, id: string): Promise<Record<string, any> | null> {
+export async function loadVodafoneCampaign(customerId: string, id: string): Promise<Record<string, any> | null> {
   if (!z.string().uuid().safeParse(id).success) return null;
   const res = await pool.query(
     `SELECT * FROM outbound_campaigns
@@ -124,7 +124,7 @@ async function loadVodafoneCampaign(customerId: string, id: string): Promise<Rec
   return res.rows[0] ?? null;
 }
 
-async function leadCounts(campaignId: string): Promise<Record<string, number>> {
+export async function leadCounts(campaignId: string): Promise<Record<string, number>> {
   const res = await pool.query(
     `SELECT status, COUNT(*)::int AS n FROM outbound_campaign_leads WHERE campaign_id = $1 GROUP BY status`,
     [campaignId]
@@ -138,7 +138,7 @@ async function leadCounts(campaignId: string): Promise<Record<string, number>> {
 }
 
 /** VI's campaignstatus wants the numeric campaign_Ref_ID; the campainKey is refused. */
-function statusIdOf(campaign: Record<string, any>): string {
+export function statusIdOf(campaign: Record<string, any>): string {
   return String(campaign.vi_campaign_ref_id ?? campaign.vi_campaign_id);
 }
 
@@ -150,7 +150,7 @@ function statusIdOf(campaign: Record<string, any>): string {
  * explicitly for the campaign that VI does not list is an error; otherwise
  * the Flow's first active DNI is used.
  */
-async function pickDni(
+export async function pickDni(
   customerId: string,
   flowId: string | null | undefined,
   phoneNumberId: string | null | undefined
@@ -246,7 +246,7 @@ async function pushNumbers(
   return { pushed, alreadyInCampaign, dni };
 }
 
-function publicCampaign(row: Record<string, any>) {
+export function publicCampaign(row: Record<string, any>) {
   return {
     id: row.id,
     name: row.name,

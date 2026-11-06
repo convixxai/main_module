@@ -139,4 +139,70 @@ Save `campaign.id` and use it for status, leads, start, pause and delete.
 }
 ```
 
+## Reports (read-only)
+
+These endpoints are Vodafone only, read only, and never dial. Swagger tag: **"Vodafone Reports (VI)"**. Code: `apps/api/src/routes/vodafone-reports.ts`.
+
+| Method | Endpoint | Source on VI | Purpose |
+|---|---|---|---|
+| GET | `/vodafone/campaigns/{id}/status` | `campaignstatus` | Live counts, flattened. Cheap to poll every 1-2 min |
+| GET | `/vodafone/campaigns/{id}/report?from=&to=` | Pull Report, calltype 2 | Every call VI placed for the campaign |
+| GET | `/vodafone/campaigns/{id}/summary` | Pull Report, calltype 4 | VI's totals for the whole campaign |
+| GET | `/vodafone/reports/calls?type=&from=&to=` | Pull Report, calltype 1, 2 or 3 | Call history: `inbound`, `outbound` (needs `campaign_id`) or `click_to_call` |
+
+Parameters:
+
+- **Dates:** `from` and `to` are `YYYY-MM-DD` in IST.
+  - `to` defaults to today.
+  - For a campaign report, `from` defaults to the campaign's creation date. For call history it defaults to `to`.
+  - The range can be at most 31 days.
+- **`dni`** is optional and takes any format. It defaults to the campaign's calling number, else the tenant DNI or first active DNI.
+- **`campaign_id`** (call history) takes the engine campaign uuid or VI's numeric campaign ID. Only this customer's own campaigns are accepted.
+- **`call_id`** (call history) takes a VI call id and returns a single call. VI call ids also appear in the engine logs.
+- **`raw=1`** also returns VI's reply exactly as received.
+
+### Status response (`GET /vodafone/campaigns/{id}/status`)
+
+```json
+{
+  "campaign": { "id": "<uuid>", "name": "New Test (copy) 2", "vi_campaign_ref_id": 771719, "...": "..." },
+  "status": {
+    "engine_status": "running", "vi_status": "Active",
+    "window": "10:00:00 - 19:00:00", "end_date": "07-11-2026",
+    "numbers_on_vi": 1, "calls_placed": 1, "connected": 1, "not_connected": 0,
+    "remaining": 0, "success_rate_percent": 100,
+    "retry": { "interval": "Minutes", "within": 60, "attempts": 1 }
+  },
+  "leads": { "total": 1, "pending": 0, "calling": 0, "completed": 1, "failed": 0 },
+  "vi_status_raw": { "...": "VI campaignstatus as received" },
+  "vi_status_error": null
+}
+```
+
+If VI is unreachable, the endpoint still answers `200`: the VI fields are `null` and `vi_status_error` says why.
+
+### Report response (`/report`, `/reports/calls`)
+
+```json
+{
+  "period": { "from": "2026-11-06", "to": "2026-11-06" },
+  "dni": "9112002517",
+  "count": 2,
+  "calls": [ { "...": "one row per call, VI's own fields" } ]
+}
+```
+
+`/report` also returns `campaign` and `leads`. `/reports/calls` also returns `type` and `campaign` (or `null`). `/summary` returns `summary` in place of `calls`.
+
+**Row fields:** VI's documentation shows the reply only as `{"report": "report JSON will be out"}` and does not name the row fields. The engine passes each row through unchanged. It accepts a list, an object, or a JSON string, and returns it as `calls`. Map the columns in the SaaS from a real reply, using `raw=1` once to see them.
+
+**How it works on VI:** the Pull Report API has its own login (`pullcalldetails/authenticatepullreport`, with username, password and dni). It uses the same Vodafone credentials, and the token is cached for 24 hours per DNI. Report dates go to VI as `DD/MM/YYYY`.
+
+Errors:
+
+- `400`: Vodafone not enabled, bad dates or range, `type=outbound` without `campaign_id`, or the campaign isn't on VI yet.
+- `401`: missing or invalid key.
+- `404`: not this customer's campaign.
+- `502`: VI refused the request. VI's reply is in `details`.
+
 The older shared `/outbound/campaigns*` endpoints still work for Vodafone, for existing clients. New integrations should use the API above.
