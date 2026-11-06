@@ -40,6 +40,7 @@ import { env } from "../config/env";
 import { pool } from "../config/db";
 import { encrypt } from "../services/crypto";
 import { getTelephonySettings } from "../services/telephony-settings";
+import { getActiveDniList } from "../services/vodafone-obd";
 import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { runAskPipeline } from "./ask";
@@ -500,7 +501,99 @@ function finishCampaignCall(app: FastifyInstance, streamId: string): void {
   void markCampaignLead(app, info.campaignId, info.leadDigits, "completed");
 }
 
-async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: string, event: Extract<CallEvent, { type: "start" }>): Promise<void> {
+interface VodafoneCallRoute {
+  /** Tenant that handles the call (may differ from the URL's tenant). */
+  customerId: string;
+  campaignId: string | null;
+  leadDigits: string | null;
+  how: "url" | "campaign_id" | "lead_match" | "lead_match_shared_flow";
+}
+
+/**
+ * Which tenant a Vodafone call belongs to. VI picks the WS URL from the
+ * Flow's Streaming node, and one Flow (one DNI) can be shared by several
+ * tenants: a campaign of tenant B dialed through a Flow whose Streaming node
+ * points at tenant A's URL arrives on A's URL (seen 2026-11-06: a UCB
+ * campaign call arrived on the Ganesh Project URL and got Ganesh's greeting).
+ * VI's start event looks the same for inbound and campaign calls (cli =
+ * customer, dni = our DNI), so the campaign is found from our own data:
+ *   1. an explicit campaign_id custom parameter -> that campaign's tenant;
+ *   2. otherwise a pending/calling number of a live Vodafone campaign whose
+ *      tenant is the URL tenant, or uses the same VI Flow, or has this call's
+ *      DNI among its Flow's active DNIs.
+ * Anything else stays with the URL tenant (a normal inbound call).
+ */
+async function routeVodafoneCall(
+  app: FastifyInstance,
+  urlCustomerId: string,
+  event: Extract<CallEvent, { type: "start" }>
+): Promise<VodafoneCallRoute> {
+  const byUrl: VodafoneCallRoute = { customerId: urlCustomerId, campaignId: null, leadDigits: null, how: "url" };
+  const param = String(event.customParameters?.campaign_id ?? "").trim();
+  try {
+    if (UUID_RE.test(param)) {
+      const r = await pool.query(
+        `SELECT id, customer_id FROM outbound_campaigns
+          WHERE id = $1 AND telephony_provider_id = 'vodafone' AND status != 'deleted'`,
+        [param]
+      );
+      const row = r.rows[0];
+      return row ? { customerId: row.customer_id, campaignId: row.id, leadDigits: null, how: "campaign_id" } : byUrl;
+    }
+
+    const sides = [last10(event.fromNumber), last10(event.toNumber)].filter((x) => x.length === 10);
+    if (sides.length === 0) return byUrl;
+    const urlTelephony = await getTelephonySettings(urlCustomerId);
+    const urlFlow = ((urlTelephony?.metadata as Record<string, unknown> | undefined)?.vi_flow_id as string | undefined) ?? null;
+
+    const m = await pool.query(
+      `SELECT c.id, c.customer_id, c.vi_flow_id,
+              RIGHT(regexp_replace(l.phone_number, '\\D', '', 'g'), 10) AS lead_digits
+         FROM outbound_campaign_leads l
+         JOIN outbound_campaigns c ON c.id = l.campaign_id
+         JOIN company_telephony_settings s
+           ON s.customer_id = c.customer_id AND s.provider_id = 'vodafone' AND s.is_enabled = TRUE
+        WHERE c.telephony_provider_id = 'vodafone'
+          AND c.status IN ('running', 'ready')
+          AND l.status IN ('pending', 'calling')
+          AND RIGHT(regexp_replace(l.phone_number, '\\D', '', 'g'), 10) = ANY($1::text[])
+        ORDER BY (c.customer_id = $2) DESC, (l.status = 'calling') DESC, c.updated_at DESC
+        LIMIT 10`,
+      [sides, urlCustomerId]
+    );
+    for (const row of m.rows) {
+      const sameTenant = row.customer_id === urlCustomerId;
+      let ok = sameTenant || (!!urlFlow && row.vi_flow_id === urlFlow);
+      const ourSide = sides.find((x) => x !== row.lead_digits) ?? null;
+      if (!ok && ourSide && row.vi_flow_id) {
+        try {
+          ok = (await getActiveDniList(row.customer_id, row.vi_flow_id)).includes(ourSide);
+        } catch {
+          ok = false;
+        }
+      }
+      if (ok) {
+        return {
+          customerId: row.customer_id,
+          campaignId: row.id,
+          leadDigits: row.lead_digits,
+          how: sameTenant ? "lead_match" : "lead_match_shared_flow",
+        };
+      }
+    }
+  } catch (err) {
+    app.log.warn({ err, urlCustomerId }, "vodafone-voicebot: call routing lookup failed, using the URL tenant");
+  }
+  return byUrl;
+}
+
+async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: string, event: Extract<CallEvent, { type: "start" }>): Promise<void> {
+  const route = await routeVodafoneCall(app, urlCustomerId, event);
+  const customerId = route.customerId;
+  app.log.info(
+    { urlCustomerId, customerId, how: route.how, campaignId: route.campaignId, streamId: event.streamId, callId: event.callId },
+    "vodafone-voicebot: call routed"
+  );
   const telephony = await getTelephonySettings(customerId);
   if (!telephony || telephony.provider_id !== "vodafone" || !telephony.is_enabled) {
     app.log.warn({ customerId }, "vodafone-voicebot: no enabled vodafone telephony settings for this customer");
@@ -539,9 +632,12 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
   // script, also seeded into chat history so the LLM knows what it asked),
   // the agent (campaign.agent_id, else the campaign number's default agent),
   // the call language (campaign.language_code), and lead status tracking.
-  const campaignIdParam = String(event.customParameters?.campaign_id ?? "").trim();
+  // The campaign (if any) was found by routeVodafoneCall: explicit
+  // custom_parameters.campaign_id, or the dialed number matched to a pending
+  // lead of a live campaign.
   let campaign: CampaignCallInfo | null = null;
-  if (event.customParameters?.call_type === "outbound" && UUID_RE.test(campaignIdParam)) {
+  const matchedLeadDigits: string | null = route.leadDigits;
+  if (route.campaignId) {
     session.mode = "outbound";
     try {
       const campaignRes = await pool.query(
@@ -549,7 +645,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
            FROM outbound_campaigns c
            LEFT JOIN company_phone_numbers p ON p.id = c.phone_number_id
           WHERE c.id = $1 AND c.customer_id = $2 AND c.status != 'deleted'`,
-        [campaignIdParam, customerId]
+        [route.campaignId, customerId]
       );
       const row = campaignRes.rows[0];
       if (row) {
@@ -560,57 +656,12 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, customerId: stri
           agentId: row.agent_id ?? null,
           callerNumber: row.caller_number ?? null,
         };
-      } else {
-        app.log.warn({ customerId, campaignId: campaignIdParam }, "vodafone-voicebot: campaign_id not found for this customer");
       }
     } catch (err) {
       app.log.error(
-        { err, customerId, campaignId: campaignIdParam },
+        { err, customerId, campaignId: route.campaignId },
         "vodafone-voicebot: failed to load campaign, falling back to default greeting"
       );
-    }
-  }
-
-  // Fallback when VI's Flow forwards no campaign_id (its base schema may only
-  // carry msisdn): match the call to a pending/calling number of one of this
-  // customer's live Vodafone campaigns. Our DNI is never a lead, so whichever
-  // side matches is the person VI dialed.
-  let matchedLeadDigits: string | null = null;
-  if (!campaign && !UUID_RE.test(campaignIdParam)) {
-    const sides = [last10(event.fromNumber), last10(event.toNumber)].filter((x) => x.length === 10);
-    if (sides.length > 0) {
-      try {
-        const m = await pool.query(
-          `SELECT c.id, c.script_text, c.language_code, c.agent_id, p.phone_number AS caller_number,
-                  RIGHT(regexp_replace(l.phone_number, '\\D', '', 'g'), 10) AS lead_digits
-             FROM outbound_campaign_leads l
-             JOIN outbound_campaigns c ON c.id = l.campaign_id
-             LEFT JOIN company_phone_numbers p ON p.id = c.phone_number_id
-            WHERE c.customer_id = $1
-              AND c.telephony_provider_id = 'vodafone'
-              AND c.status IN ('running', 'ready')
-              AND l.status IN ('pending', 'calling')
-              AND RIGHT(regexp_replace(l.phone_number, '\\D', '', 'g'), 10) = ANY($2::text[])
-            ORDER BY (l.status = 'calling') DESC, c.updated_at DESC
-            LIMIT 1`,
-          [customerId, sides]
-        );
-        const row = m.rows[0];
-        if (row) {
-          session.mode = "outbound";
-          campaign = {
-            id: row.id,
-            scriptText: row.script_text ?? null,
-            languageCode: row.language_code ?? null,
-            agentId: row.agent_id ?? null,
-            callerNumber: row.caller_number ?? null,
-          };
-          matchedLeadDigits = row.lead_digits;
-          app.log.info({ customerId, campaignId: row.id }, "vodafone-voicebot: call matched to a campaign by phone number");
-        }
-      } catch (err) {
-        app.log.warn({ err, customerId }, "vodafone-voicebot: campaign match by phone number failed");
-      }
     }
   }
 
