@@ -22,6 +22,7 @@ import { exotelOutboundCallRoutes } from "./routes/exotel-outbound-call";
 import { exotelStatusCallbackRoutes } from "./routes/exotel-status-callback";
 import { adminLogsRoutes } from "./routes/adminLogs";
 import { outboundCampaignRoutes } from "./routes/outbound-campaigns";
+import { vodafoneCampaignRoutes } from "./routes/vodafone-campaigns";
 import { voiceSimulatorRoutes } from "./routes/voice-simulator";
 import { elevenlabsVoiceBrowserRoutes } from "./routes/elevenlabs-voice-browser";
 import { openaiTtsSimulatorRoutes } from "./routes/openai-tts-simulator";
@@ -95,6 +96,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(exotelStatusCallbackRoutes);      // Exotel HTTP StatusCallback (answered)
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)
   app.register(outboundCampaignRoutes);         // Outbound Campaign management & triggering
+  app.register(vodafoneCampaignRoutes);         // Vodafone OBD campaigns (VI dials; never Exotel)
   app.register(kbAdminGaneshotsavRoutes);       // Temporary username/password-protected KB admin page (Ganeshotsav project)
   app.register(vodafoneWsSimulatorRoutes);      // Standalone VI WebSocket simulator page - does not touch the live Vodafone route
   app.register(toolCallingSettingsRoutes);    // GET/PUT/DELETE tool-calling prompt (mid-call CRM tools)

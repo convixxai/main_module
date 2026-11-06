@@ -74,7 +74,7 @@
     },
     {
       "name": "Vodafone Outbound Campaign",
-      "description": "Vodafone-specific slice of the **Outbound Campaigns** endpoints: driving VI's OBD Campaign API (\"With Flow\") instead of Exotel's per-lead `Calls/connect`. Requires `vi_flow_id` already configured via **Vodafone Voicebot**'s `PUT /customers/{customerId}/vodafone-settings` (one Flow per tenant, containing a Streaming node bound to that tenant's Vodafone WS endpoint — set up once in VI's portal). `POST /outbound/campaigns`, `.../leads`, `.../trigger` and `DELETE .../{id}` are shared with Exotel and listed under both tags; `.../pause` and `.../status` are Vodafone-only. Requires `x-api-key`."
+      "description": "Older, shared-with-Exotel campaign flow (create -> leads -> trigger). **For Vodafone use the dedicated `/vodafone/campaigns` API (tag \"Vodafone Campaigns (VI OBD)\")**, which does create + upload + start in one call. These still work for existing clients. Vodafone-specific slice of the **Outbound Campaigns** endpoints: driving VI's OBD Campaign API (\"With Flow\") instead of Exotel's per-lead `Calls/connect`. Requires `vi_flow_id` already configured via **Vodafone Voicebot**'s `PUT /customers/{customerId}/vodafone-settings` (one Flow per tenant, containing a Streaming node bound to that tenant's Vodafone WS endpoint — set up once in VI's portal). `POST /outbound/campaigns`, `.../leads`, `.../trigger` and `DELETE .../{id}` are shared with Exotel and listed under both tags; `.../pause` and `.../status` are Vodafone-only. Requires `x-api-key`."
     },
     {
       "name": "Admin logs",
@@ -103,6 +103,10 @@
     {
       "name": "Tool Calling (CRM)",
       "description": "Mid-call CRM tool calling on Vodafone and Exotel calls. The model can fetch live data from the native Convixx CRM (crm_records, custom fields, custom tables, activities; when crm_settings.provider = 'native' and records exist) and from the customer's own verified + active API tools (crm_tools, defined in the SaaS). While a READ tool runs, the caller hears a short 'please hold' line in the call's current language and voice; WRITE tools (POST/PUT/PATCH/DELETE) run without it, only after the caller explicitly confirms, and at most once per call. The optional tool_calling_prompt tells the model WHEN to call tools."
+    },
+    {
+      "name": "Vodafone Campaigns (VI OBD)",
+      "description": "**Use these for Vodafone outbound campaigns.** Vodafone campaigns run on VI's own OBD Campaign API: the engine creates the campaign on VI, uploads the numbers and starts it, and VI dials them inside the window (no Exotel, no per-lead calls, no pre-rendered audio). Answered calls come to the bot on the tenant's Vodafone WebSocket. `POST /vodafone/campaigns` does everything in one call; the other endpoints add numbers, start/resume, pause, read status and delete. Requires `x-api-key`; setup (`credentials`, `vi_flow_id`) is done once with `PUT /customers/{customerId}/vodafone-settings`."
     }
   ],
   "components": {
@@ -10719,6 +10723,708 @@
           },
           "404": {
             "description": "Customer settings not found"
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns": {
+      "post": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "Create, load and start a Vodafone campaign (one call)",
+        "description": "Runs the campaign on Vodafone's own OBD Campaign API (never Exotel, never per-lead calls): VI `createCampaign` with the tenant's Flow -> `getsampleBaseHeads` -> `staticCampaignDataIngestion` (numbers in chunks of 1000) -> `StartorStop(S)`. VI then dials the numbers itself inside the window; each answered call reaches the bot on the tenant's Vodafone WebSocket with `call_type=outbound` + `campaign_id`, and the bot opens with `script_text`.\n\n**Prerequisites:** the customer's telephony provider is Vodafone and enabled, OBD `credentials` (username/password, optional dni) and `vi_flow_id` are set with `PUT /customers/{customerId}/vodafone-settings`.\n\n**Partial failure:** if VI accepted the campaign but the upload or the start failed, the response is 502 and still carries `campaign.id`. Retry the remaining numbers with `/leads` and/or call `/start`; numbers are saved locally only after VI accepted them.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "script_text"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "Campaign name (also sent to VI)."
+                  },
+                  "script_text": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "First line the bot speaks when the lead answers. The bot speaks it live in the agent's voice; no audio file is rendered."
+                  },
+                  "language_code": {
+                    "type": "string",
+                    "default": "en-IN",
+                    "description": "Language for the whole call (STT, replies, voice), e.g. mr-IN, hi-IN, en-IN."
+                  },
+                  "phone_numbers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 50000,
+                    "description": "Numbers VI dials. Any format (+91 98765-43210, 919876543210, 9876543210); de-duplicated on the last 10 digits, invalid ones skipped and counted. Optional: add later with /leads."
+                  },
+                  "phone_number_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Company phone number used as the outbound DNI. Omitted = the tenant DNI in the Vodafone credentials, else the primary number."
+                  },
+                  "agent_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Agent that talks on these calls. Omitted = the DNI number's default agent, else the oldest active agent."
+                  },
+                  "fromdate": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "First dialing day (yyyy-mm-dd, IST). Default today."
+                  },
+                  "todate": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Last dialing day. Default = fromdate."
+                  },
+                  "fromtime": {
+                    "type": "string",
+                    "example": "09:00:00",
+                    "description": "Daily window start, HH:mm or HH:mm:ss IST. Default 09:00:00."
+                  },
+                  "totime": {
+                    "type": "string",
+                    "example": "21:00:00",
+                    "description": "Daily window end. Default 21:00:00."
+                  },
+                  "dial_timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 120,
+                    "default": 15
+                  },
+                  "retry_interval_type": {
+                    "type": "string",
+                    "enum": [
+                      "0",
+                      "1"
+                    ],
+                    "default": "0",
+                    "description": "0 = retry interval in minutes, 1 = in days."
+                  },
+                  "retry_interval_value": {
+                    "type": "integer",
+                    "default": 60
+                  },
+                  "retry_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "default": 0
+                  },
+                  "start": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Start dialing right away. false = create and load only; start later with /start."
+                  }
+                }
+              },
+              "examples": {
+                "start_now": {
+                  "summary": "Create and start now",
+                  "value": {
+                    "name": "AMC renewal - Nov",
+                    "script_text": "नमस्कार, मी Aqua Home कडून बोलत आहे. आपला AMC प्लॅन पुढच्या आठवड्यात संपत आहे.",
+                    "language_code": "mr-IN",
+                    "agent_id": "7f0cc828-318a-4dc6-a2b9-dc149187af4c",
+                    "phone_numbers": [
+                      "+919876500001",
+                      "9876500002"
+                    ],
+                    "fromdate": "2026-11-07",
+                    "todate": "2026-11-09",
+                    "fromtime": "10:00:00",
+                    "totime": "19:00:00",
+                    "dial_timeout_seconds": 20,
+                    "retry_interval_type": "0",
+                    "retry_interval_value": 30,
+                    "retry_count": 1
+                  }
+                },
+                "load_only": {
+                  "summary": "Create and load, start later",
+                  "value": {
+                    "name": "Festive offer",
+                    "script_text": "Hello, this is Aqua Home calling about our festive offer.",
+                    "phone_numbers": [
+                      "9876500001"
+                    ],
+                    "start": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created (started unless start=false or no numbers)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Vodafone campaign started; VI dials the numbers inside the window",
+                  "started": true,
+                  "window": {
+                    "fromdate": "2026-11-07",
+                    "todate": "2026-11-09",
+                    "fromtime": "10:00:00",
+                    "totime": "19:00:00"
+                  },
+                  "leads": {
+                    "received": 3,
+                    "valid": 2,
+                    "invalid": 0,
+                    "duplicates": 1,
+                    "pushed": 2
+                  },
+                  "campaign": {
+                    "id": "0b8f6c1e-6a3d-4c2b-9b1e-3f6f0e2a7c11",
+                    "name": "AMC renewal - Nov",
+                    "status": "running",
+                    "provider": "vodafone",
+                    "language_code": "mr-IN",
+                    "script_text": "नमस्कार, मी Aqua Home कडून बोलत आहे. आपला AMC प्लॅन पुढच्या आठवड्यात संपत आहे.",
+                    "agent_id": "7f0cc828-318a-4dc6-a2b9-dc149187af4c",
+                    "phone_number_id": null,
+                    "vi_campaign_id": "U2FsdGVkX1-campainKey",
+                    "vi_campaign_ref_id": 4242,
+                    "vi_flow_id": "U2FsdGVkX1-flowid",
+                    "created_at": "2026-11-06T10:15:00.000Z",
+                    "updated_at": "2026-11-06T10:15:01.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not on Vodafone / credentials or vi_flow_id missing / bad window / no valid numbers / foreign agent_id or phone_number_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "VI rejected createCampaign, the upload or the start (body carries campaign + leads when the campaign exists)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "List Vodafone campaigns",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "This customer's Vodafone campaigns (not deleted), newest first, with local lead totals.",
+        "responses": {
+          "200": {
+            "description": "List",
+            "content": {
+              "application/json": {
+                "example": [
+                  {
+                    "id": "0b8f6c1e-6a3d-4c2b-9b1e-3f6f0e2a7c11",
+                    "name": "AMC renewal - Nov",
+                    "status": "running",
+                    "provider": "vodafone",
+                    "language_code": "mr-IN",
+                    "script_text": "नमस्कार, मी Aqua Home कडून बोलत आहे. आपला AMC प्लॅन पुढच्या आठवड्यात संपत आहे.",
+                    "agent_id": "7f0cc828-318a-4dc6-a2b9-dc149187af4c",
+                    "phone_number_id": null,
+                    "vi_campaign_id": "U2FsdGVkX1-campainKey",
+                    "vi_campaign_ref_id": 4242,
+                    "vi_flow_id": "U2FsdGVkX1-flowid",
+                    "created_at": "2026-11-06T10:15:00.000Z",
+                    "updated_at": "2026-11-06T10:15:01.000Z",
+                    "total_leads": 2,
+                    "completed_calls": 1
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}": {
+      "get": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "Campaign status (local lead counts + live VI counts)",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Engine campaign id (returned by POST /vodafone/campaigns as campaign.id)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "`leads` counts what the engine tracked from live calls (pending / calling / completed / failed). `vi_status` is VI's own `campaignstatus` (base received, calls initiated / connected / not connected, queue left, success rate); null with `vi_status_error` if VI could not be reached.",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "example": {
+                  "campaign": {
+                    "id": "0b8f6c1e-6a3d-4c2b-9b1e-3f6f0e2a7c11",
+                    "name": "AMC renewal - Nov",
+                    "status": "running",
+                    "provider": "vodafone",
+                    "language_code": "mr-IN",
+                    "script_text": "नमस्कार, मी Aqua Home कडून बोलत आहे. आपला AMC प्लॅन पुढच्या आठवड्यात संपत आहे.",
+                    "agent_id": "7f0cc828-318a-4dc6-a2b9-dc149187af4c",
+                    "phone_number_id": null,
+                    "vi_campaign_id": "U2FsdGVkX1-campainKey",
+                    "vi_campaign_ref_id": 4242,
+                    "vi_flow_id": "U2FsdGVkX1-flowid",
+                    "created_at": "2026-11-06T10:15:00.000Z",
+                    "updated_at": "2026-11-06T10:15:01.000Z"
+                  },
+                  "leads": {
+                    "total": 2,
+                    "pending": 1,
+                    "calling": 0,
+                    "completed": 1,
+                    "failed": 0
+                  },
+                  "vi_status": {
+                    "campaignName": "AMC renewal - Nov",
+                    "currentStatus": "Running",
+                    "baseDetails": {
+                      "totalBaseReceived": 2,
+                      "totalCallInitiated": 1,
+                      "totalCallsConnected": 1,
+                      "totalCallsNotConnected": 0,
+                      "remainingNumbersInQueue": 1,
+                      "successRatePercentage": 100
+                    }
+                  },
+                  "vi_status_error": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Vodafone campaign with this id for this customer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "Delete a Vodafone campaign",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Engine campaign id (returned by POST /vodafone/campaigns as campaign.id)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Pauses it on VI (`StartorStop(P)`), then soft-deletes it locally. `vi_paused` is false if VI could not be reached (the local delete still happens).",
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Vodafone campaign deleted",
+                  "id": "0b8f6c1e-6a3d-4c2b-9b1e-3f6f0e2a7c11",
+                  "vi_paused": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}/leads": {
+      "post": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "Add numbers to a Vodafone campaign",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Engine campaign id (returned by POST /vodafone/campaigns as campaign.id)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "Uploads more numbers to the VI campaign base (chunks of 1000). If the campaign is running VI dials them inside the window. If a chunk fails the response is 502 and `leads.pushed` says how many were accepted.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "phone_numbers"
+                ],
+                "properties": {
+                  "phone_numbers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "maxItems": 50000
+                  }
+                }
+              },
+              "example": {
+                "phone_numbers": [
+                  "+919876500003",
+                  "9876500004"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Added",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "2 numbers added to the Vodafone campaign",
+                  "leads": {
+                    "received": 2,
+                    "valid": 2,
+                    "invalid": 0,
+                    "duplicates": 0,
+                    "pushed": 2
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No valid numbers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "VI rejected the upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}/start": {
+      "post": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "Start or resume a Vodafone campaign",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Engine campaign id (returned by POST /vodafone/campaigns as campaign.id)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "VI `StartorStop(S)`. Use after `start: false`, after a pause, or to retry a failed start. 400 if the campaign has no numbers yet.",
+        "responses": {
+          "200": {
+            "description": "Started",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Vodafone campaign started",
+                  "id": "0b8f6c1e-6a3d-4c2b-9b1e-3f6f0e2a7c11",
+                  "vi_campaign_id": "U2FsdGVkX1-campainKey",
+                  "status": "running"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No numbers yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "VI rejected the start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}/pause": {
+      "post": {
+        "tags": [
+          "Vodafone Campaigns (VI OBD)"
+        ],
+        "summary": "Pause a Vodafone campaign",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Engine campaign id (returned by POST /vodafone/campaigns as campaign.id)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "VI `StartorStop(P)`. The engine status goes back to `ready`; resume with `/start`.",
+        "responses": {
+          "200": {
+            "description": "Paused",
+            "content": {
+              "application/json": {
+                "example": {
+                  "message": "Vodafone campaign paused",
+                  "id": "0b8f6c1e-6a3d-4c2b-9b1e-3f6f0e2a7c11",
+                  "status": "ready",
+                  "paused": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "VI rejected the pause",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  }
+                }
+              }
+            }
           }
         }
       }

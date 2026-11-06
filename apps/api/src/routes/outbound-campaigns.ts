@@ -58,7 +58,7 @@ async function resolveOutboundCallerId(
  * `credentials.dni` (today's only option before per-campaign numbers existed)
  * — mirrors resolveOutboundCallerId's same fallback shape for Exotel.
  */
-async function resolveObdDni(
+export async function resolveObdDni(
   customerId: string,
   phoneNumberId: string | null | undefined,
   tenantDni: string | null | undefined
@@ -86,12 +86,12 @@ async function resolveObdDni(
 }
 
 /** VI's OBD base wants plain digit strings (no "+", spaces or dashes). */
-function digitsOnly(phone: string): string {
+export function digitsOnly(phone: string): string {
   return String(phone ?? "").replace(/\D/g, "");
 }
 
 /** Default base variables when getSampleBaseHeads is unavailable for a Flow. */
-const DEFAULT_OBD_BASE_VARIABLES = ["msisdn", "dni", "call_type", "campaign_id"];
+export const DEFAULT_OBD_BASE_VARIABLES = ["msisdn", "dni", "call_type", "campaign_id"];
 
 /** Pushes leads to VI's OBD base for a vodafone campaign row (shared by /leads and /trigger). */
 async function pushLeadsToVodafone(
@@ -128,7 +128,7 @@ async function pushLeadsToVodafone(
  * `call_type`/`campaign_id` (or whatever else the Flow's schema defines)
  * fall back to an empty string when this Flow doesn't expose that variable.
  */
-function buildObdBaseRecord(
+export function buildObdBaseRecord(
   variableNames: string[],
   phoneNumber: string,
   dni: string,
@@ -254,24 +254,27 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       // live WS channel once connected (same as the inbound greeting path),
       // independent of VI's own in-flow voice-upload mechanism.
       try {
-        const ttsResult = await sarvamTextToSpeechStream({
-          text: script_text,
-          target_language_code: language_code,
-          output_audio_codec: "wav",
-        });
-
-        if (ttsResult.status !== 200 || !ttsResult.audioBuffer) {
-          return reply.status(502).send({
-            error: "TTS Generation failed",
-            details: ttsResult.body
-          });
-        }
-
         const campaignId = randomUUID();
-        const fileName = `${campaignId}.wav`;
-        const filePath = path.join(CAMPAIGN_UPLOAD_DIR, fileName);
+        // Vodafone never plays a pre-rendered file: the bot speaks the script
+        // live over VI's Streaming WS, so skip the Sarvam render there.
+        let filePath: string | null = null;
+        if (provider !== "vodafone") {
+          const ttsResult = await sarvamTextToSpeechStream({
+            text: script_text,
+            target_language_code: language_code,
+            output_audio_codec: "wav",
+          });
 
-        fs.writeFileSync(filePath, ttsResult.audioBuffer);
+          if (ttsResult.status !== 200 || !ttsResult.audioBuffer) {
+            return reply.status(502).send({
+              error: "TTS Generation failed",
+              details: ttsResult.body
+            });
+          }
+
+          filePath = path.join(CAMPAIGN_UPLOAD_DIR, `${campaignId}.wav`);
+          fs.writeFileSync(filePath, ttsResult.audioBuffer);
+        }
 
         let viCampaignId: string | null = null;
         let viCampaignRefId: number | null = null;
@@ -298,7 +301,7 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
               throw new VodafoneObdError("VI createCampaign returned no campainKey", 502, created);
             }
           } catch (viErr) {
-            fs.unlinkSync(filePath);
+            if (filePath) fs.unlinkSync(filePath);
             const status = viErr instanceof VodafoneObdError ? viErr.httpStatus : 502;
             app.log.error({ err: viErr }, "Failed to create VI OBD campaign");
             return reply.status(status === 400 ? 400 : 502).send({
