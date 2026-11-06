@@ -19,6 +19,7 @@ import {
   getSampleBaseHeads,
   staticCampaignBaseLoad,
   startOrStopObdCampaign,
+  startObdCampaignOrConfirmActive,
   getObdCampaignStatus,
   getVodafoneObdCredentials,
   VodafoneObdError,
@@ -487,7 +488,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
           return reply.status(400).send({ error: "This Vodafone campaign has no VI campaign id; recreate it" });
         }
         try {
-          await startOrStopObdCampaign(customerId, campaign.vi_campaign_id, "S");
+          // VI refuses Start for a With-Flow campaign it already runs on its window; that counts as started.
+          await startObdCampaignOrConfirmActive(customerId, campaign.vi_campaign_id);
           await pool.query("UPDATE outbound_campaigns SET status = 'running', updated_at = NOW() WHERE id = $1", [id]);
         } catch (viErr) {
           app.log.error({ err: viErr, campaignId: id }, "Failed to start VI OBD campaign");

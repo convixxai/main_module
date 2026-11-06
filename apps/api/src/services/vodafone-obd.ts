@@ -269,3 +269,34 @@ export async function getObdCampaignStatus(
   );
   return res.data;
 }
+
+/** VI campaign states after which a campaign can no longer dial. */
+const TERMINAL_STATUS_RE = /finish|complet|delet|expir|stop|cancel|reject/i;
+
+/**
+ * Starts a VI OBD campaign, tolerating VI's refusal for one that is already
+ * live. A "With Flow" campaign is scheduled by its own date/time window as
+ * soon as its base is loaded, and VI then answers StartorStop(S) with 400
+ * "Requested action is not permitted for this campaign" (seen in production
+ * 2026-11-06). On that 400 the campaign status is read back: any state that
+ * is not finished/deleted means VI will dial it, so it counts as started.
+ */
+export async function startObdCampaignOrConfirmActive(
+  customerId: string,
+  campaignId: string
+): Promise<{ alreadyActive: boolean; viStatus: ObdCampaignStatus | null }> {
+  try {
+    await startOrStopObdCampaign(customerId, campaignId, "S");
+    return { alreadyActive: false, viStatus: null };
+  } catch (err) {
+    if (!(err instanceof VodafoneObdError) || err.httpStatus !== 400) throw err;
+    let status: ObdCampaignStatus | null = null;
+    try {
+      status = await getObdCampaignStatus(customerId, campaignId);
+    } catch {
+      throw err; // cannot confirm the campaign is live: report VI's original refusal
+    }
+    if (!status || TERMINAL_STATUS_RE.test(String(status.currentStatus ?? ""))) throw err;
+    return { alreadyActive: true, viStatus: status };
+  }
+}

@@ -31,6 +31,7 @@ import {
   getSampleBaseHeads,
   staticCampaignBaseLoad,
   startOrStopObdCampaign,
+  startObdCampaignOrConfirmActive,
   getObdCampaignStatus,
   getVodafoneObdCredentials,
   VodafoneObdError,
@@ -144,7 +145,19 @@ async function pushNumbers(
   customerId: string,
   campaign: Record<string, any>,
   numbers: string[]
-): Promise<{ pushed: number; error?: unknown }> {
+): Promise<{ pushed: number; alreadyInCampaign: number; error?: unknown }> {
+  // A retry re-sends the whole list: never upload a number VI already has
+  // (it would be dialed twice). Matched on the last 10 digits.
+  const existing = await pool.query(
+    `SELECT DISTINCT RIGHT(regexp_replace(phone_number, '\\D', '', 'g'), 10) AS d
+       FROM outbound_campaign_leads WHERE campaign_id = $1`,
+    [campaign.id]
+  );
+  const have = new Set<string>(existing.rows.map((r) => r.d));
+  const fresh = numbers.filter((n) => !have.has(n.slice(-10)));
+  const alreadyInCampaign = numbers.length - fresh.length;
+  numbers = fresh;
+  if (numbers.length === 0) return { pushed: 0, alreadyInCampaign };
   const creds = await getVodafoneObdCredentials(customerId);
   const dni = await resolveObdDni(customerId, campaign.phone_number_id, creds.dni);
   const variableNames: string[] =
@@ -159,7 +172,7 @@ async function pushNumbers(
     try {
       await staticCampaignBaseLoad(customerId, campaign.vi_campaign_id, records);
     } catch (error) {
-      return { pushed, error };
+      return { pushed, alreadyInCampaign, error };
     }
     await pool.query(
       `INSERT INTO outbound_campaign_leads (campaign_id, phone_number)
@@ -168,7 +181,7 @@ async function pushNumbers(
     );
     pushed += chunk.length;
   }
-  return { pushed };
+  return { pushed, alreadyInCampaign };
 }
 
 function publicCampaign(row: Record<string, any>) {
@@ -310,9 +323,14 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     }
 
     let started = false;
+    let viStatus: unknown = null;
     if (d.start !== false && leads.pushed > 0) {
       try {
-        await startOrStopObdCampaign(customerId, viCampaignId, "S");
+        const res = await startObdCampaignOrConfirmActive(customerId, viCampaignId);
+        viStatus = res.viStatus;
+        if (res.alreadyActive) {
+          app.log.info({ campaignId: id, viCampaignId, viStatus: res.viStatus?.currentStatus }, "vodafone-campaigns: VI already runs the campaign on its window");
+        }
         const upd = await pool.query(
           `UPDATE outbound_campaigns SET status = 'running', updated_at = NOW() WHERE id = $1 RETURNING *`,
           [id]
@@ -341,6 +359,7 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
       window,
       leads,
       campaign: publicCampaign(campaign),
+      vi_status: viStatus,
     });
   });
 
@@ -384,13 +403,20 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
 
     const numbers = normalizeNumbers(body.data.phone_numbers);
     if (numbers.valid.length === 0) return reply.status(400).send({ error: "None of phone_numbers is a valid number (10-13 digits)" });
-    let push: { pushed: number; error?: unknown };
+    let push: { pushed: number; alreadyInCampaign: number; error?: unknown };
     try {
       push = await pushNumbers(customerId, campaign, numbers.valid);
     } catch (err) {
       return viErrorReply(reply, err, "Could not upload the numbers to Vodafone");
     }
-    const leads = { received: body.data.phone_numbers.length, valid: numbers.valid.length, invalid: numbers.invalid, duplicates: numbers.duplicates, pushed: push.pushed };
+    const leads = {
+      received: body.data.phone_numbers.length,
+      valid: numbers.valid.length,
+      invalid: numbers.invalid,
+      duplicates: numbers.duplicates,
+      already_in_campaign: push.alreadyInCampaign,
+      pushed: push.pushed,
+    };
     if (push.error) {
       app.log.error({ err: push.error, campaignId: id }, "vodafone-campaigns: base upload to VI failed");
       return reply.status(502).send({
@@ -410,14 +436,25 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     if (!campaign) return reply.status(404).send({ error: "Vodafone campaign not found" });
     const counts = await leadCounts(campaign.id);
     if (counts.total === 0) return reply.status(400).send({ error: "This campaign has no numbers yet; add them with POST /vodafone/campaigns/{id}/leads" });
+    let res: Awaited<ReturnType<typeof startObdCampaignOrConfirmActive>>;
     try {
-      await startOrStopObdCampaign(customerId, campaign.vi_campaign_id, "S");
+      res = await startObdCampaignOrConfirmActive(customerId, campaign.vi_campaign_id);
     } catch (err) {
       app.log.error({ err, campaignId: id }, "vodafone-campaigns: VI start failed");
       return viErrorReply(reply, err, "Vodafone could not start the campaign");
     }
+    if (res.alreadyActive) {
+      app.log.info({ campaignId: id, viStatus: res.viStatus?.currentStatus }, "vodafone-campaigns: VI already runs the campaign on its window");
+    }
     await pool.query(`UPDATE outbound_campaigns SET status = 'running', updated_at = NOW() WHERE id = $1`, [id]);
-    return reply.send({ message: "Vodafone campaign started", id, vi_campaign_id: campaign.vi_campaign_id, status: "running" });
+    return reply.send({
+      message: res.alreadyActive ? "Vodafone campaign is already scheduled on VI; it dials inside its window" : "Vodafone campaign started",
+      id,
+      vi_campaign_id: campaign.vi_campaign_id,
+      status: "running",
+      already_active: res.alreadyActive,
+      vi_status: res.viStatus,
+    });
   });
 
   // Pause.
