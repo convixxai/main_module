@@ -118,7 +118,7 @@ You can call tools to fetch live data about THIS caller and their account (CRM r
 - Data returned by a tool is authoritative for this caller and may be used together with the KNOWLEDGEBASE. Use ONLY the values the tool returned; never invent or guess values.
 - If a tool returns found=false or an error, say briefly that you could not find it right now and offer to help another way.
 - Do not read out internal IDs, full phone numbers or emails unless the caller asks for them.
-- WRITE tools (they book, create, update or cancel something) need the caller's confirmation: first repeat the exact details and ask "shall I go ahead?", and call the tool ONLY after a clear yes. Call a write tool at most once per request; if it already succeeded earlier in this call, just confirm that result instead of calling it again.
+- WRITE tools (they book, create, update or cancel something) need the caller's confirmation: first repeat the exact details and ask "shall I go ahead?", and call the tool ONLY after a clear yes. Call a write tool at most once per request; if it already succeeded earlier in this call, just confirm that result instead of calling it again. A write tool that returns submitted=true has been sent: confirm it to the caller as done.
 - Keep the reply short and spoken, in the call's current language.`;
 
 function buildPromptBlock(customerPrompt: string | null | undefined): string {
@@ -277,12 +277,10 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
           } else if (prior && Date.now() - prior.at < WRITE_DEDUPE_MS) {
             // Same write already succeeded in this call: never send it twice.
             content = JSON.stringify({ already_done: true, previous_result: JSON.parse(prior.content) });
+          } else if (isWrite) {
+            content = submitWriteInBackground(row, args, ctx, companyId, dedupeKey);
           } else {
             content = await runCustomTool(row, args, ctx, companyId);
-            if (dedupeKey && !content.startsWith('{"error"')) {
-              recentWrites.set(dedupeKey, { at: Date.now(), content });
-              pruneRecentWrites();
-            }
           }
         } else {
           content = JSON.stringify({ error: "unknown_tool" });
@@ -296,8 +294,46 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
   };
 }
 
-// Per-call memory of successful write calls (callId + tool).
+// Per-call memory of submitted write calls (callId + tool).
 const WRITE_DEDUPE_MS = 3 * 60_000;
+
+/**
+ * Write tools are fire-and-forget (product rule 2026-11-06): the caller must
+ * not wait on the customer's API to save a booking/update. The request starts
+ * now and runs in the background (still logged in crm_tool_runs, shown in the
+ * SaaS tool logs); the model gets "submitted" back at once and confirms to
+ * the caller. Marked in the per-call dedupe at submission, so a second
+ * identical request in the same call is never sent; a failed run clears that
+ * mark so the next attempt can go through.
+ */
+function submitWriteInBackground(
+  row: CustomToolRow,
+  args: Record<string, unknown>,
+  ctx: CallToolContext,
+  companyId: string,
+  dedupeKey: string | null
+): string {
+  const content = JSON.stringify({
+    submitted: true,
+    instruction: "The request has been sent and is being saved. Briefly confirm to the caller that it is noted, then continue. Do not say you are waiting or checking.",
+  });
+  if (dedupeKey) {
+    recentWrites.set(dedupeKey, { at: Date.now(), content });
+    pruneRecentWrites();
+  }
+  void runCustomTool(row, args, ctx, companyId)
+    .then((result) => {
+      if (result.startsWith('{"error"')) {
+        if (dedupeKey) recentWrites.delete(dedupeKey);
+        ctx.log?.warn({ tool: row.title, result: result.slice(0, 300) }, "crm-tools: background write failed");
+      }
+    })
+    .catch((err) => {
+      if (dedupeKey) recentWrites.delete(dedupeKey);
+      ctx.log?.warn({ err: String(err), tool: row.title }, "crm-tools: background write failed");
+    });
+  return content;
+}
 
 const YES_RE = new RegExp(
   [
