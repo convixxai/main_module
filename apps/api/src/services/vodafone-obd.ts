@@ -220,17 +220,25 @@ export async function staticCampaignBaseLoad(
   campaignId: string,
   records: StaticObdBaseRecord[]
 ): Promise<{ status: string }> {
-  const res = await authedObdFetch<{ data?: { status?: string }; status?: string | number; message?: string }>(
+  const res = await authedObdFetch<{ data?: { status?: string; rowsAffected?: number | string }; status?: string | number; message?: string }>(
     customerId,
     "staticCampaignDataIngestion",
     { campaign_ID: campaignId, Records: records }
   );
-  // HTTP 200 alone is not proof: only data.status "success" means VI took the records.
-  const status = String(res?.data?.status ?? "");
-  if (status.toLowerCase() !== "success") {
-    throw new VodafoneObdError("VI did not accept the campaign base", 502, res);
+  // VI answers either {data:{status:"success"}} (its doc) or
+  // {data:{rowsAffected:n}} (seen in production 2026-11-06). Anything else,
+  // or rowsAffected 0, means VI took none of the records.
+  const status = String(res?.data?.status ?? "").toLowerCase();
+  const rows = res?.data?.rowsAffected;
+  const rowsN = rows === undefined || rows === null || rows === "" ? null : Number(rows);
+  if (status === "success" || (rowsN !== null && Number.isFinite(rowsN) && rowsN > 0)) {
+    return { status: status || `rowsAffected=${rowsN}` };
   }
-  return { status };
+  throw new VodafoneObdError(
+    rowsN === 0 ? "VI loaded 0 of the numbers (check the dni is an active DNI of the Flow)" : "VI did not accept the campaign base",
+    502,
+    res
+  );
 }
 
 const activeDniCache = new Map<string, { at: number; list: string[] }>();
