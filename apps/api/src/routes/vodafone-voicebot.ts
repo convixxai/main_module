@@ -757,6 +757,13 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
       ? matchedLeadDigits || pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber) || null
       : event.fromNumber || null,
   };
+  // Ignore the caller until the opening line / campaign script has finished
+  // playing. Without this, a "Hello" said on picking up (while the agent and
+  // the script audio were still loading, ~1-3 s) was buffered, answered right
+  // after the script and confused the call (2026-11-06: replied in English).
+  // Cleared by the greeting's mark ack / playback fallback (markPlaybackDone),
+  // or below if the greeting can't be played.
+  session.isSpeaking = true;
   calls.set(event.streamId, state);
 
   app.log.info(
@@ -792,10 +799,16 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
   }
   try {
     const pcm = await synthesizeSpeechToPcm8k(greeting, state.ttsConfig);
+    if (pcm.length === 0) throw new Error("greeting synthesis returned no audio");
+    // Anything that slipped in before playback starts is dropped too.
+    clearSilenceTimer(event.streamId);
+    session.inboundPcm = [];
+    session.inboundBytes = 0;
     sendFrames(ws, adapter.buildAudioFrame(event.streamId, pcm));
     sendMarkAndTrackPlayback(state, event.streamId, pcm.length);
   } catch (err) {
     app.log.error({ err, customerId }, "vodafone-voicebot: greeting synthesis failed");
+    markPlaybackDone(session); // nothing is playing: listen to the caller
   }
 }
 
@@ -1017,6 +1030,12 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
   const combined = Buffer.concat(session.inboundPcm);
   session.inboundPcm = [];
   session.inboundBytes = 0;
+  if (session.isSpeaking) {
+    // The bot (e.g. the opening script) started playing after this audio was
+    // buffered: it was said before / over the bot, so it is not answered.
+    app.log.info({ streamId, bytes: combined.length }, "vodafone-voicebot: audio from before the bot finished speaking ignored");
+    return;
+  }
   app.log.info(
     { streamId, bytes: combined.length, minRequired: MIN_UTTERANCE_BYTES },
     "vodafone-voicebot: silence timer fired, processing utterance"
