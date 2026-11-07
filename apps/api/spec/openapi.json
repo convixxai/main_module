@@ -9968,7 +9968,7 @@
           "Tool Calling (CRM)"
         ],
         "summary": "Add tool-calling prompt",
-        "description": "Adds the customer's tool-calling prompt (one per customer; if one exists it is replaced, same as PUT). The prompt tells the model WHEN to call tools for both the native Convixx CRM and the customer's custom CRM API tools. Optional: without a prompt the built-in rules apply. Takes effect on the next call turn.",
+        "description": "Adds the customer's tool-calling prompt (one per customer; if one exists it is replaced, same as PUT). The prompt tells the model WHEN to call tools for both the native Convixx CRM and the customer's custom CRM API tools. Optional: without a prompt the built-in rules apply. Takes effect on the next call turn.\n\n**Write rules the engine applies on every call (all customers):**\n- **SAVE tools** (the SaaS \"Save lead\" capture hook, or a write tool titled save / update / note / log / capture / record / lead) are silent and continuous. The model calls one after the caller's first useful answer and again after every new or corrected answer. It never asks to confirm. The engine sends only the fields that changed, one request at a time in order, in the background.\n- **ACTION tools** (any other write: book, cancel, pay) are confirmed by the caller once per call. A later correction in the same call is sent without asking again, and an exact repeat is never sent twice.\n- **All writes are fire-and-forget:** the caller never waits on the CRM. Runs are logged in the SaaS tool logs.\n- **The phone sent to a tool is the customer's number, never one of the company's own numbers.** If it can't be told, no save is sent.\nWrite a tool_calling_prompt with these rules in mind; for example, don't ask for \"once at the end\" saving.",
         "security": [
           {
             "AdminToken": []
@@ -10092,7 +10092,7 @@
           "Tool Calling (CRM)"
         ],
         "summary": "Edit tool-calling prompt / enable or disable",
-        "description": "Edits the prompt (send the new text, or null to clear it) and/or turns mid-call tool calling on or off with tool_calling_enabled. Fields you leave out are unchanged.",
+        "description": "Edits the prompt (send the new text, or null to clear it) and/or turns mid-call tool calling on or off with tool_calling_enabled. Fields you leave out are unchanged.\n\n**Write rules the engine applies on every call (all customers):**\n- **SAVE tools** (the SaaS \"Save lead\" capture hook, or a write tool titled save / update / note / log / capture / record / lead) are silent and continuous. The model calls one after the caller's first useful answer and again after every new or corrected answer. It never asks to confirm. The engine sends only the fields that changed, one request at a time in order, in the background.\n- **ACTION tools** (any other write: book, cancel, pay) are confirmed by the caller once per call. A later correction in the same call is sent without asking again, and an exact repeat is never sent twice.\n- **All writes are fire-and-forget:** the caller never waits on the CRM. Runs are logged in the SaaS tool logs.\n- **The phone sent to a tool is the customer's number, never one of the company's own numbers.** If it can't be told, no save is sent.\nWrite a tool_calling_prompt with these rules in mind; for example, don't ask for \"once at the end\" saving.",
         "security": [
           {
             "AdminToken": []
@@ -10410,7 +10410,7 @@
           "Tool Calling (CRM)"
         ],
         "summary": "Add tool-calling prompt",
-        "description": "Adds the customer's tool-calling prompt (one per customer; if one exists it is replaced, same as PUT). The prompt tells the model WHEN to call tools for both the native Convixx CRM and the customer's custom CRM API tools. Optional: without a prompt the built-in rules apply. Takes effect on the next call turn.",
+        "description": "Adds the customer's tool-calling prompt (one per customer; if one exists it is replaced, same as PUT). The prompt tells the model WHEN to call tools for both the native Convixx CRM and the customer's custom CRM API tools. Optional: without a prompt the built-in rules apply. Takes effect on the next call turn.\n\n**Write rules the engine applies on every call (all customers):**\n- **SAVE tools** (the SaaS \"Save lead\" capture hook, or a write tool titled save / update / note / log / capture / record / lead) are silent and continuous. The model calls one after the caller's first useful answer and again after every new or corrected answer. It never asks to confirm. The engine sends only the fields that changed, one request at a time in order, in the background.\n- **ACTION tools** (any other write: book, cancel, pay) are confirmed by the caller once per call. A later correction in the same call is sent without asking again, and an exact repeat is never sent twice.\n- **All writes are fire-and-forget:** the caller never waits on the CRM. Runs are logged in the SaaS tool logs.\n- **The phone sent to a tool is the customer's number, never one of the company's own numbers.** If it can't be told, no save is sent.\nWrite a tool_calling_prompt with these rules in mind; for example, don't ask for \"once at the end\" saving.",
         "security": [
           {
             "ApiKey": []
@@ -10524,7 +10524,7 @@
           "Tool Calling (CRM)"
         ],
         "summary": "Edit tool-calling prompt / enable or disable",
-        "description": "Edits the prompt (send the new text, or null to clear it) and/or turns mid-call tool calling on or off with tool_calling_enabled. Fields you leave out are unchanged.",
+        "description": "Edits the prompt (send the new text, or null to clear it) and/or turns mid-call tool calling on or off with tool_calling_enabled. Fields you leave out are unchanged.\n\n**Write rules the engine applies on every call (all customers):**\n- **SAVE tools** (the SaaS \"Save lead\" capture hook, or a write tool titled save / update / note / log / capture / record / lead) are silent and continuous. The model calls one after the caller's first useful answer and again after every new or corrected answer. It never asks to confirm. The engine sends only the fields that changed, one request at a time in order, in the background.\n- **ACTION tools** (any other write: book, cancel, pay) are confirmed by the caller once per call. A later correction in the same call is sent without asking again, and an exact repeat is never sent twice.\n- **All writes are fire-and-forget:** the caller never waits on the CRM. Runs are logged in the SaaS tool logs.\n- **The phone sent to a tool is the customer's number, never one of the company's own numbers.** If it can't be told, no save is sent.\nWrite a tool_calling_prompt with these rules in mind; for example, don't ask for \"once at the end\" saving.",
         "security": [
           {
             "ApiKey": []

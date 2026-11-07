@@ -4139,6 +4139,7 @@ ${toolset.promptBlock}` };
               log?.info({ stream_sid: session.streamSid }, "voicebot: tool hold message spoken");
             },
             executeTool: (name, args) => toolset.execute(name, args, toolCtx),
+            isSilentTool: (name) => toolset.isSilentTool(name),
             trace: ragTrace,
             ragOptions: voiceRagOpts,
           })
@@ -4235,6 +4236,7 @@ ${toolset.promptBlock}` };
             log?.info({ stream_sid: session.streamSid }, "voicebot: tool hold message spoken");
           },
           executeTool: (name, args) => toolset.execute(name, args, toolCtx),
+          isSilentTool: (name) => toolset.isSilentTool(name),
           trace: ragTrace,
           ragOptions: voiceRagOpts,
         })

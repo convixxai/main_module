@@ -903,6 +903,7 @@ ${toolset.promptBlock}` };
             await toolContext.onToolHold(holdMessageFor(toolContext.languageCode));
           },
           executeTool: (name, args) => toolset.execute(name, args, ctx),
+          isSilentTool: (name) => toolset.isSilentTool(name),
           trace,
           ragOptions: openaiOpts,
         });

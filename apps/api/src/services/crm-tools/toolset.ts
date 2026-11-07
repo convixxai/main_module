@@ -71,6 +71,8 @@ export interface CallToolset {
    * (custom POST/PUT/PATCH/DELETE) run without it (product rule 2026-11-05).
    */
   isReadTool: (name: string) => boolean;
+  /** SAVE tools (fire-and-forget capture): the reply never waits on their result. */
+  isSilentTool: (name: string) => boolean;
   summary: { native: boolean; custom: string[] };
 }
 
@@ -118,7 +120,9 @@ You can call tools to fetch live data about THIS caller and their account (CRM r
 - Data returned by a tool is authoritative for this caller and may be used together with the KNOWLEDGEBASE. Use ONLY the values the tool returned; never invent or guess values.
 - If a tool returns found=false or an error, say briefly that you could not find it right now and offer to help another way.
 - Do not read out internal IDs, full phone numbers or emails unless the caller asks for them.
-- WRITE tools (they book, create, update or cancel something) need the caller's confirmation: first repeat the exact details and ask "shall I go ahead?", and call the tool ONLY after a clear yes. Call a write tool at most once per request; if it already succeeded earlier in this call, just confirm that result instead of calling it again. A write tool that returns submitted=true has been sent: confirm it to the caller as done.
+- SAVE tools (marked "SAVE / UPDATE": they record what the caller tells you, e.g. save lead, update record, add note) are silent and continuous: call one as soon as the caller gives the FIRST useful answer, then call it again every time they give a new or corrected answer, each time with everything known so far. Never ask permission to save, never read the details back to confirm a save, and never mention saving, noting or the CRM. Keep the conversation going in the same reply.
+- ACTION tools (marked "ACTION": they book, schedule, cancel or pay for something) need the caller's confirmation ONCE: repeat the exact details, ask "shall I go ahead?", and call the tool only after a clear yes. Never ask for confirmation again in this call for something already confirmed; a correction the caller makes afterwards is sent without asking again.
+- A tool result of submitted=true means it has been sent: treat it as done and move on.
 - Keep the reply short and spoken, in the call's current language.`;
 
 function buildPromptBlock(customerPrompt: string | null | undefined): string {
@@ -210,6 +214,7 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
     customByName.set(name, row);
     const llmParams = placeholders(row).filter((p) => paramSource(row, p) === "conversation");
     const isWrite = !["GET", "HEAD"].includes((row.method || "GET").toUpperCase());
+    const capture = isWrite && isCaptureTool(row);
     const properties: Record<string, { type: "string"; description: string }> = {};
     for (const p of llmParams) {
       properties[p] = {
@@ -222,7 +227,11 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
       function: {
         name,
         description: [
-          isWrite ? "WRITE ACTION - only after the caller explicitly confirms the details" : "READ (fetch data)",
+          capture
+            ? "SAVE / UPDATE (silent): call it right after the caller's first useful answer and again after every new or corrected answer, with everything known so far. No confirmation, never mention it. This overrides any instruction below to call it only once or only at the end"
+            : isWrite
+              ? "ACTION - confirm the details with the caller once, then call it"
+              : "READ (fetch data)",
           row.title,
           row.description,
           row.condition ? `When to use: ${row.condition}` : null,
@@ -243,6 +252,10 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
     tools,
     promptBlock: buildPromptBlock(settings?.tool_calling_prompt),
     summary: { native, custom: [...customByName.keys()] },
+    isSilentTool: (name) => {
+      const row = customByName.get(name);
+      return !!row && !["GET", "HEAD"].includes((row.method || "GET").toUpperCase()) && isCaptureTool(row);
+    },
     isReadTool: (name) => {
       if (name === NATIVE_TOOL) return native;
       const row = customByName.get(name);
@@ -263,24 +276,31 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
         } else if (customByName.has(name)) {
           const row = customByName.get(name)!;
           const isWrite = !["GET", "HEAD"].includes((row.method || "GET").toUpperCase());
-          const dedupeKey = isWrite && ctx.callId ? `${ctx.customerId}|${ctx.callId}|${name}` : null;
-          const prior = dedupeKey ? recentWrites.get(dedupeKey) : undefined;
-          if (isWrite && !callerConfirmed(ctx)) {
-            // Hard guard (the prompt rule alone is not reliable): a write runs
-            // only when the bot just asked and the caller clearly said yes.
-            ctx.log?.info({ tool: name }, "crm-tools: write blocked until the caller confirms");
-            content = JSON.stringify({
-              not_executed: true,
-              needs_confirmation: true,
-              instruction: "Do NOT say it is done. Repeat the exact details to the caller and ask them to confirm. It will be executed after they say yes.",
-            });
-          } else if (prior && Date.now() - prior.at < WRITE_DEDUPE_MS) {
-            // Same write already succeeded in this call: never send it twice.
-            content = JSON.stringify({ already_done: true, previous_result: JSON.parse(prior.content) });
-          } else if (isWrite) {
-            content = submitWriteInBackground(row, args, ctx, companyId, dedupeKey);
-          } else {
+          const callKey = `${ctx.customerId}|${ctx.callId || "-"}|${name}`;
+          if (!isWrite) {
             content = await runCustomTool(row, args, ctx, companyId);
+          } else if (isCaptureTool(row)) {
+            content = submitCapture(row, args, ctx, companyId, callKey, name);
+          } else {
+            const st = callWriteState(callKey);
+            const argKey = normalizeArgs(args);
+            if (!st.confirmed && !callerConfirmed(ctx)) {
+              // Hard guard (the prompt rule alone is not reliable): an action
+              // runs only after the caller clearly said yes, once per call.
+              ctx.log?.info({ tool: name }, "crm-tools: action blocked until the caller confirms (once per call)");
+              content = JSON.stringify({
+                not_executed: true,
+                needs_confirmation: true,
+                instruction: "Do NOT say it is done. Repeat the exact details to the caller and ask them to confirm once. It will be executed after they say yes.",
+              });
+            } else if (st.sentArgs.has(argKey)) {
+              // The very same request was already sent in this call: never twice.
+              content = JSON.stringify({ already_done: true });
+            } else {
+              st.confirmed = true; // confirmation is asked only once per call
+              st.sentArgs.add(argKey);
+              content = submitWriteInBackground(row, args, ctx, companyId, () => st.sentArgs.delete(argKey));
+            }
           }
         } else {
           content = JSON.stringify({ error: "unknown_tool" });
@@ -294,45 +314,147 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
   };
 }
 
-// Per-call memory of submitted write calls (callId + tool).
-const WRITE_DEDUPE_MS = 3 * 60_000;
+// ---------- writes (fire-and-forget) ----------
+//
+// Product rules (2026-11-06/07): writes never make the caller wait; SAVE
+// tools (lead capture, record updates, notes) run silently after every new
+// answer with only what changed; ACTION tools (bookings, cancellations) are
+// confirmed once per call. All writes of one tool in one call are sent in
+// order (the first save creates the lead, later ones update it, never two
+// creates racing each other).
+
+const CALL_STATE_TTL_MS = 30 * 60_000;
+
+interface CallWriteState {
+  at: number;
+  /** ACTION tools: the caller already confirmed once in this call. */
+  confirmed: boolean;
+  /** ACTION tools: normalized args already sent (exact repeats are dropped). */
+  sentArgs: Set<string>;
+  /** SAVE tools: last value sent per conversation field. */
+  sent: Record<string, string>;
+  /** Serializes this tool's background requests for this call. */
+  chain: Promise<unknown>;
+}
+const callWrites = new Map<string, CallWriteState>();
+
+function callWriteState(key: string): CallWriteState {
+  let st = callWrites.get(key);
+  if (!st) {
+    st = { at: Date.now(), confirmed: false, sentArgs: new Set(), sent: {}, chain: Promise.resolve() };
+    callWrites.set(key, st);
+    if (callWrites.size > 500) {
+      const cutoff = Date.now() - CALL_STATE_TTL_MS;
+      for (const [k, v] of callWrites) if (v.at < cutoff) callWrites.delete(k);
+    }
+  }
+  st.at = Date.now();
+  return st;
+}
 
 /**
- * Write tools are fire-and-forget (product rule 2026-11-06): the caller must
- * not wait on the customer's API to save a booking/update. The request starts
- * now and runs in the background (still logged in crm_tool_runs, shown in the
- * SaaS tool logs); the model gets "submitted" back at once and confirms to
- * the caller. Marked in the per-call dedupe at submission, so a second
- * identical request in the same call is never sent; a failed run clears that
- * mark so the next attempt can go through.
+ * SAVE tools record what the caller says (the SaaS "Save lead" capture hook,
+ * or any write titled save / update / note / log / capture / record), as
+ * opposed to ACTION tools that do something (book, cancel, pay).
+ */
+export function isCaptureTool(row: { url: string; title: string }): boolean {
+  if (/\/hooks\/crm\/[^/]+\/leads\//.test(row.url || "")) return true;
+  return /\b(save|saves|capture|update|updates|note|notes|log|record|lead)\b/i.test(row.title || "");
+}
+
+const EMPTY_VALUES = new Set(["", "null", "none", "n/a", "na", "unknown", "-", "not provided", "not mentioned"]);
+
+/**
+ * SAVE tool call: sends only the fields that are new or changed since the
+ * last save in this call (the capture hook keeps the rest), in order, in the
+ * background. Nothing new: nothing is sent.
+ */
+function submitCapture(
+  row: CustomToolRow,
+  args: Record<string, unknown>,
+  ctx: CallToolContext,
+  companyId: string,
+  callKey: string,
+  name: string
+): string {
+  const st = callWriteState(callKey);
+  const needsPhone = placeholders(row).some((p) => paramSource(row, p) === "caller_phone");
+  if (needsPhone && last10(ctx.customerPhone).length < 10) {
+    ctx.log?.warn({ tool: name }, "crm-tools: save skipped, the customer's number is not known on this call");
+    return JSON.stringify({ submitted: false, reason: "customer_number_unknown", instruction: "Continue the conversation normally." });
+  }
+  const changed: Record<string, unknown> = {};
+  const changedKeys: string[] = [];
+  for (const [k, v] of Object.entries(args)) {
+    const val = String(v ?? "").trim();
+    if (EMPTY_VALUES.has(val.toLowerCase())) continue;
+    if (st.sent[k] === val) continue;
+    changed[k] = val;
+    changedKeys.push(k);
+  }
+  if (changedKeys.length === 0) {
+    return JSON.stringify({ submitted: true, unchanged: true, instruction: "Already saved. Continue the conversation; do not mention it." });
+  }
+  const previous: Record<string, string | undefined> = {};
+  for (const k of changedKeys) {
+    previous[k] = st.sent[k];
+    st.sent[k] = String(changed[k]);
+  }
+  const revert = () => {
+    for (const k of changedKeys) {
+      if (st.sent[k] !== String(changed[k])) continue;
+      if (previous[k] === undefined) delete st.sent[k];
+      else st.sent[k] = previous[k] as string;
+    }
+  };
+  ctx.log?.info({ tool: name, fields: changedKeys }, "crm-tools: save queued (background)");
+  st.chain = st.chain
+    .then(() => runCustomTool(row, changed, ctx, companyId))
+    .then((result) => {
+      if (result.startsWith('{"error"')) {
+        revert(); // resent with the next save
+        ctx.log?.warn({ tool: row.title, result: result.slice(0, 300) }, "crm-tools: background save failed");
+      }
+    })
+    .catch((err) => {
+      revert();
+      ctx.log?.warn({ err: String(err), tool: row.title }, "crm-tools: background save failed");
+    });
+  return JSON.stringify({
+    submitted: true,
+    instruction: "Saved in the background. Do not mention saving or ask to confirm; continue the conversation.",
+  });
+}
+
+/**
+ * ACTION tool call, sent in the background (the caller never waits on the
+ * customer's API). The run is logged in crm_tool_runs; onFail lets the same
+ * request be sent again later.
  */
 function submitWriteInBackground(
   row: CustomToolRow,
   args: Record<string, unknown>,
   ctx: CallToolContext,
   companyId: string,
-  dedupeKey: string | null
+  onFail: () => void
 ): string {
-  const content = JSON.stringify({
-    submitted: true,
-    instruction: "The request has been sent and is being saved. Briefly confirm to the caller that it is noted, then continue. Do not say you are waiting or checking.",
-  });
-  if (dedupeKey) {
-    recentWrites.set(dedupeKey, { at: Date.now(), content });
-    pruneRecentWrites();
-  }
-  void runCustomTool(row, args, ctx, companyId)
+  const st = callWriteState(`${ctx.customerId}|${ctx.callId || "-"}|${row.id}#action`);
+  st.chain = st.chain
+    .then(() => runCustomTool(row, args, ctx, companyId))
     .then((result) => {
       if (result.startsWith('{"error"')) {
-        if (dedupeKey) recentWrites.delete(dedupeKey);
+        onFail();
         ctx.log?.warn({ tool: row.title, result: result.slice(0, 300) }, "crm-tools: background write failed");
       }
     })
     .catch((err) => {
-      if (dedupeKey) recentWrites.delete(dedupeKey);
+      onFail();
       ctx.log?.warn({ err: String(err), tool: row.title }, "crm-tools: background write failed");
     });
-  return content;
+  return JSON.stringify({
+    submitted: true,
+    instruction: "The request has been sent. Briefly confirm to the caller that it is done, then continue. Do not say you are waiting or checking.",
+  });
 }
 
 const YES_RE = new RegExp(
@@ -352,12 +474,6 @@ function callerConfirmed(ctx: CallToolContext): boolean {
   const asked = String(ctx.lastAssistantMessage ?? "");
   if (!said || !/[?\uff1f]/.test(asked)) return false;
   return YES_RE.test(said) && !NO_RE.test(said);
-}
-const recentWrites = new Map<string, { at: number; content: string }>();
-function pruneRecentWrites(): void {
-  if (recentWrites.size < 500) return;
-  const cutoff = Date.now() - WRITE_DEDUPE_MS;
-  for (const [k, v] of recentWrites) if (v.at < cutoff) recentWrites.delete(k);
 }
 function normalizeArgs(args: Record<string, unknown>): string {
   return JSON.stringify(

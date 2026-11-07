@@ -39,7 +39,7 @@ import type { WebSocket } from "ws";
 import { env } from "../config/env";
 import { pool } from "../config/db";
 import { encrypt } from "../services/crypto";
-import { getTelephonySettings } from "../services/telephony-settings";
+import { getTelephonySettings, getDecryptedCredentials } from "../services/telephony-settings";
 import { getActiveDniList } from "../services/vodafone-obd";
 import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
@@ -451,17 +451,58 @@ function last10(phone: string | null | undefined): string {
   return String(phone ?? "").replace(/\D/g, "").slice(-10);
 }
 
+/** Custom parameter names a VI Streaming node may use to pass the lead's number. */
+const NUMBER_PARAM_RE = /^(msisdn|mobile|mobile_?no|phone|phone_?number|customer_?(number|phone|mobile)|lead_?(number|phone)|called_?number|b_?party)$/i;
+
+/** 10-digit numbers found in the start event's custom parameters (likely lead numbers first). */
+function numbersFromCustomParams(params: Record<string, unknown> | undefined): string[] {
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(params ?? {})) {
+    const d = last10(String(v ?? ""));
+    if (d.length === 10 && NUMBER_PARAM_RE.test(k)) out.push(d);
+  }
+  return out;
+}
+
+/** Every number that belongs to the tenant: its phone numbers, its VI dni, its Flow's active DNIs. */
+async function tenantOwnNumbers(customerId: string, flowId: string | null, extra: (string | null | undefined)[]): Promise<Set<string>> {
+  const own = new Set<string>();
+  for (const x of extra) if (last10(x).length === 10) own.add(last10(x));
+  try {
+    const r = await pool.query(`SELECT phone_number FROM company_phone_numbers WHERE customer_id = $1`, [customerId]);
+    for (const row of r.rows) if (last10(row.phone_number).length === 10) own.add(last10(row.phone_number));
+  } catch {
+    /* best effort */
+  }
+  try {
+    const t = await getTelephonySettings(customerId);
+    if (t?.credentials_enc) {
+      const creds = getDecryptedCredentials<{ dni?: string }>(t);
+      if (last10(creds?.dni).length === 10) own.add(last10(creds.dni));
+    }
+  } catch {
+    /* best effort */
+  }
+  if (flowId) {
+    try {
+      for (const d of await getActiveDniList(customerId, flowId)) own.add(last10(d));
+    } catch {
+      /* VI unavailable: the numbers above still apply */
+    }
+  }
+  return own;
+}
+
 /**
- * On a VI OBD call one side is our DNI and the other is the lead. Prefer the
- * side that isn't the campaign's caller number; otherwise `cli`: production
- * OBD calls arrive with cli = the lead and dni = our DNI, the same as inbound
- * (seen 2026-11-06, dni "9112002517" on every campaign call).
+ * The customer on a Vodafone call (inbound: the caller; campaign: the lead),
+ * as 10 digits, or null when it cannot be told. Never one of the tenant's own
+ * numbers: on 2026-11-07 a campaign call stored our DNI 9112002517 as the
+ * customer in the CRM because the lead was taken blindly from `cli`/`dni`.
+ * Order: lead-number custom parameters (msisdn...), then cli, then dni.
  */
-function pickLeadNumber(cli: string, dni: string, callerNumber: string | null): string {
-  const caller = last10(callerNumber);
-  if (caller && last10(dni) === caller) return last10(cli);
-  if (caller && last10(cli) === caller) return last10(dni);
-  return last10(cli) || last10(dni);
+function pickCustomerNumber(event: Extract<CallEvent, { type: "start" }>, own: Set<string>): string | null {
+  const candidates = [...numbersFromCustomParams(event.customParameters), last10(event.fromNumber), last10(event.toNumber)];
+  return candidates.find((d) => d.length === 10 && !own.has(d)) ?? null;
 }
 
 async function markCampaignLead(
@@ -549,7 +590,7 @@ async function routeVodafoneCall(
       if (row) byParam = { customerId: row.customer_id, campaignId: row.id, leadDigits: null, how: "campaign_id" };
     }
 
-    const sides = [last10(event.fromNumber), last10(event.toNumber)].filter((x) => x.length === 10);
+    const sides = [...new Set([...numbersFromCustomParams(event.customParameters), last10(event.fromNumber), last10(event.toNumber)])].filter((x) => x.length === 10);
     if (sides.length === 0) return byParam ?? byUrl;
     const urlTelephony = await getTelephonySettings(urlCustomerId);
     const urlFlow = ((urlTelephony?.metadata as Record<string, unknown> | undefined)?.vi_flow_id as string | undefined) ?? null;
@@ -721,11 +762,35 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
   session.voiceRagCustomerCache = { systemPrompt, defaultNoKb: null };
   const campaignGreetingText = campaign?.scriptText?.trim() || null;
 
-  if (campaign) {
-    // The lead VI dialed is whichever side of the call isn't our number.
-    const leadDigits = matchedLeadDigits ?? pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber);
-    campaignCalls.set(event.streamId, { campaignId: campaign.id, leadDigits });
-    void markCampaignLead(app, campaign.id, leadDigits, "calling", event.callId);
+  // The customer on the line: never one of the tenant's own numbers.
+  const ownNumbers = await tenantOwnNumbers(
+    customerId,
+    ((telephony.metadata as Record<string, unknown> | undefined)?.vi_flow_id as string | undefined) ?? null,
+    [campaign?.callerNumber]
+  );
+  const customerNumber = matchedLeadDigits ?? pickCustomerNumber(event, ownNumbers);
+  app.log.info(
+    {
+      streamId: event.streamId,
+      callId: event.callId,
+      cli: event.fromNumber,
+      dni: event.toNumber,
+      customParameters: event.customParameters,
+      customerNumber,
+      campaignId: campaign?.id ?? null,
+    },
+    "vodafone-voicebot: start event numbers"
+  );
+  if (!customerNumber) {
+    app.log.warn(
+      { streamId: event.streamId, cli: event.fromNumber, dni: event.toNumber },
+      "vodafone-voicebot: customer number unknown (cli/dni are our own numbers); CRM tools get no phone. Add a msisdn custom parameter to the VI Streaming node."
+    );
+  }
+
+  if (campaign && customerNumber) {
+    campaignCalls.set(event.streamId, { campaignId: campaign.id, leadDigits: customerNumber });
+    void markCampaignLead(app, campaign.id, customerNumber, "calling", event.callId);
   }
 
   // Feature 1 (§8.1) — agent-level TTS provider override (agents.tts_provider,
@@ -753,9 +818,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
     processing: false,
     mediaFrameCount: 0,
     agentPinned,
-    customerPhone: campaign
-      ? matchedLeadDigits || pickLeadNumber(event.fromNumber, event.toNumber, campaign.callerNumber) || null
-      : event.fromNumber || null,
+    customerPhone: customerNumber,
   };
   // Ignore the caller until the opening line / campaign script has finished
   // playing. Without this, a "Hello" said on picking up (while the agent and

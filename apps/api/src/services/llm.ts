@@ -272,6 +272,13 @@ export async function streamChatOpenAIWithTools(params: {
   executeTool: (name: string, argsJson: string) => Promise<{ content: string; ok: boolean; latencyMs: number }>;
   onTextDelta?: (token: string) => void | Promise<void>;
   onToolCallsStart?: (info: { names: string[]; textAlreadyEmitted: boolean }) => void | Promise<void>;
+  /**
+   * Tools whose result the reply does not depend on (fire-and-forget SAVE
+   * tools). When every call of a round is one and the model already spoke
+   * its reply in that round, no further model round is made (saves ~1-2 s
+   * per caller answer).
+   */
+  isSilentTool?: (name: string) => boolean;
   trace?: RagTraceFn;
   ragOptions?: ChatOpenAIRagOptions;
   maxToolRounds?: number;
@@ -356,6 +363,10 @@ export async function streamChatOpenAIWithTools(params: {
       round,
       results: results.map((r, i) => ({ name: realCalls[i].name, ok: r.ok, latency_ms: r.latencyMs, content: r.content.slice(0, 500) })),
     });
+    if (text.trim() && params.isSilentTool && realCalls.every((c) => params.isSilentTool!(c.name))) {
+      trace?.("openai_tools_silent_done", { round, calls: realCalls.map((c) => c.name) });
+      break; // reply already spoken; the saves run in the background
+    }
 
     messages.push({
       role: "assistant",
