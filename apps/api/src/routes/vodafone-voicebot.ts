@@ -77,6 +77,7 @@ import {
   LANGUAGE_DISPLAY_NAME,
 } from "../services/voice-language-infer";
 import type { CallEvent, OutboundFrame } from "../types/telephony-provider";
+import { startVodafoneCallLog, endVodafoneCallLog, noteVodafoneCallLanguage } from "../services/vodafone-call-log";
 import {
   createSession,
   removeSession,
@@ -844,6 +845,33 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
     "vodafone-voicebot: call started"
   );
 
+  // Call log row (exotel_call_sessions, same as Exotel calls): background
+  // only, never awaited, so the greeting below is not delayed.
+  startVodafoneCallLog(
+    {
+      streamId: event.streamId,
+      callId: event.callId,
+      customerId,
+      direction: campaign ? "outbound" : "inbound",
+      customerNumber,
+      ourNumber: [last10(event.toNumber), last10(event.fromNumber)].find((d) => d.length === 10 && ownNumbers.has(d)) ?? null,
+      chatSessionId,
+      agentId,
+      campaignId: campaign?.id ?? null,
+      voicebotMultilingual: customerSettings?.voicebot_multilingual === true,
+      defaultLanguageCode: session.defaultLanguageCode ?? null,
+      metadata: {
+        vi_call_id: event.callId,
+        room_id: event.streamId,
+        url_customer_id: urlCustomerId,
+        route: route.how,
+        cli: event.fromNumber || null,
+        dni: event.toNumber || null,
+      },
+    },
+    app.log
+  );
+
   const greeting =
     campaignGreetingText ||
     session.greetingText ||
@@ -1125,6 +1153,7 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
       return;
     }
     const transcript = stt.transcript.trim();
+    noteVodafoneCallLanguage(streamId, stt.language_code);
     app.log.info(
       { streamId, transcript, sttMs, sttLanguageCode: stt.language_code, sttLanguageHint },
       "vodafone-voicebot: transcript ready"
@@ -1666,6 +1695,7 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
             case "stop": {
               const state = streamId ? calls.get(streamId) : undefined;
               finishCampaignCall(app, event.streamId);
+              endVodafoneCallLog(event.streamId, `stopped:${event.reason || "stop"}`, app.log);
               if (state) {
                 state.session.isClosing = true;
                 if (state.silenceTimer) clearTimeout(state.silenceTimer);
@@ -1682,9 +1712,10 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
         });
       });
 
-      socket.on("close", () => {
+      socket.on("close", (code: number) => {
         if (!streamId) return;
         finishCampaignCall(app, streamId);
+        endVodafoneCallLog(streamId, `ws_closed:${code ?? ""}`, app.log);
         const state = calls.get(streamId);
         if (state) {
           if (state.silenceTimer) clearTimeout(state.silenceTimer);

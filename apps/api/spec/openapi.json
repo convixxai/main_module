@@ -110,7 +110,7 @@
     },
     {
       "name": "Vodafone Reports (VI)",
-      "description": "Vodafone only, read only. Live campaign status, a campaign's call report and summary, and call history (inbound / outbound / click-to-call), read from VI's campaignstatus and Pull Report APIs. Nothing here dials or changes a campaign. Exotel and /outbound/campaigns are not affected. VI does not document the report row fields: `calls` rows are passed through exactly as VI sends them; add `raw=1` to also get VI's reply as received."
+      "description": "Vodafone only, read only. Nothing here dials or changes a campaign. Exotel and /outbound/campaigns are not affected.\n\n**Two sources:**\n- **Convixx call log** (`/vodafone/reports/history`, `/history/{id}`, `/summary`, `/vodafone/campaigns/{id}/calls`): one row per Vodafone call that reached the bot. It holds time (UTC and IST), customer number, direction, duration, outcome, campaign, agent, language and transcript. These are the same rows the SaaS Calls page and dashboards read (`exotel_call_sessions`, `metadata.provider = 'vodafone'`). Use these for the SaaS reports.\n- **VI's own data** (`/vodafone/campaigns/{id}/status`, `/report`, `/summary`, `/vodafone/reports/calls`): VI campaignstatus and the Pull Report API. VI's rows are passed through as VI sends them (fields not documented by VI); add `raw=1` to see the reply.\n\nTimes: `started_at` / `ended_at` are ISO UTC (`Z`), and `*_ist` is the same instant as `DD/MM/YYYY HH:mm:ss` India time. Date filters (`from`, `to`) are IST calendar dates. Outcome is `live` (in progress), `connected` (answered, or lasted 10 s or more) or `missed`, the same rule as the SaaS dashboard."
     }
   ],
   "components": {
@@ -11889,6 +11889,472 @@
           },
           "502": {
             "description": "VI refused or is unreachable (`details` has VI's reply)"
+          }
+        }
+      }
+    },
+    "/vodafone/reports/history": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "Call history (Convixx call log)",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "Every Vodafone call of this customer that reached the bot, newest first: campaign (outbound) and inbound calls. Paginate with `limit` / `offset`; `total` is the count for the filters.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "First day, YYYY-MM-DD (IST). Optional."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Last day, YYYY-MM-DD (IST), inclusive. Optional."
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "inbound",
+                "outbound"
+              ]
+            },
+            "description": "outbound = campaign calls"
+          },
+          {
+            "name": "campaign_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Only this campaign's calls"
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "connected",
+                "missed",
+                "live"
+              ]
+            }
+          },
+          {
+            "name": "number",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer number, any format (matched on the last 10 digits)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calls",
+            "content": {
+              "application/json": {
+                "example": {
+                  "filters": {
+                    "from": "2026-11-07",
+                    "to": "2026-11-07",
+                    "direction": null,
+                    "campaign_id": null,
+                    "outcome": null,
+                    "number": null
+                  },
+                  "total": 1,
+                  "limit": 100,
+                  "offset": 0,
+                  "calls": [
+                    {
+                      "id": "695eb6dc-6115-4c15-a527-b0d681f68e04",
+                      "direction": "outbound",
+                      "customer_number": "+919876500001",
+                      "our_number": "+919112002517",
+                      "started_at": "2026-11-07T10:04:47.865Z",
+                      "started_at_ist": "07/11/2026 15:34:47",
+                      "ended_at": "2026-11-07T10:06:02.120Z",
+                      "ended_at_ist": "07/11/2026 15:36:02",
+                      "duration_seconds": 74,
+                      "outcome": "connected",
+                      "status": "stopped:hangup",
+                      "campaign": {
+                        "id": "<campaign uuid>",
+                        "name": "Main campaign"
+                      },
+                      "agent": {
+                        "id": "<agent uuid>",
+                        "name": "Benetton Diwali Outbound"
+                      },
+                      "language_code": "mr-IN",
+                      "vi_call_id": "48381932",
+                      "chat_session_id": "<uuid>"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter (e.g. `to` before `from`)"
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          }
+        }
+      }
+    },
+    "/vodafone/reports/history/{id}": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "One call with its transcript",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "The call (same fields as in the history) plus the full transcript in order. `role` is `bot` or `customer`. A campaign call starts with the campaign script line.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "`id` from the history"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call + transcript",
+            "content": {
+              "application/json": {
+                "example": {
+                  "call": {
+                    "id": "695eb6dc-6115-4c15-a527-b0d681f68e04",
+                    "direction": "outbound",
+                    "customer_number": "+919876500001",
+                    "our_number": "+919112002517",
+                    "started_at": "2026-11-07T10:04:47.865Z",
+                    "started_at_ist": "07/11/2026 15:34:47",
+                    "ended_at": "2026-11-07T10:06:02.120Z",
+                    "ended_at_ist": "07/11/2026 15:36:02",
+                    "duration_seconds": 74,
+                    "outcome": "connected",
+                    "status": "stopped:hangup",
+                    "campaign": {
+                      "id": "<campaign uuid>",
+                      "name": "Main campaign"
+                    },
+                    "agent": {
+                      "id": "<agent uuid>",
+                      "name": "Benetton Diwali Outbound"
+                    },
+                    "language_code": "mr-IN",
+                    "vi_call_id": "48381932",
+                    "chat_session_id": "<uuid>"
+                  },
+                  "transcript": [
+                    {
+                      "role": "bot",
+                      "text": "नमस्कार, शुभ दिवाळी! ...",
+                      "at": "2026-11-07T10:04:48.010Z"
+                    },
+                    {
+                      "role": "customer",
+                      "text": "हो.",
+                      "at": "2026-11-07T10:05:02.400Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          },
+          "404": {
+            "description": "No such call for this customer"
+          }
+        }
+      }
+    },
+    "/vodafone/reports/summary": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "Call totals (Convixx call log)",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "Totals for the period and filters: number of calls, connected / missed / live, outbound / inbound, total talk time and average connected call length, then the same per day (IST), per hour of day (IST) and per campaign.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "First day, YYYY-MM-DD (IST). Optional."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Last day, YYYY-MM-DD (IST), inclusive. Optional."
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "inbound",
+                "outbound"
+              ]
+            },
+            "description": "outbound = campaign calls"
+          },
+          {
+            "name": "campaign_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Only this campaign's calls"
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "connected",
+                "missed",
+                "live"
+              ]
+            }
+          },
+          {
+            "name": "number",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer number, any format (matched on the last 10 digits)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Totals",
+            "content": {
+              "application/json": {
+                "example": {
+                  "filters": {
+                    "from": "2026-11-01",
+                    "to": "2026-11-07",
+                    "direction": null,
+                    "campaign_id": null
+                  },
+                  "totals": {
+                    "calls": 42,
+                    "connected": 37,
+                    "missed": 5,
+                    "live": 0,
+                    "outbound": 40,
+                    "inbound": 2,
+                    "talk_seconds": 2710,
+                    "avg_connected_seconds": 71
+                  },
+                  "by_day": [
+                    {
+                      "day": "2026-11-07",
+                      "calls": 30,
+                      "connected": 27
+                    }
+                  ],
+                  "by_hour_ist": [
+                    {
+                      "hour": 11,
+                      "calls": 12
+                    },
+                    {
+                      "hour": 12,
+                      "calls": 18
+                    }
+                  ],
+                  "by_campaign": [
+                    {
+                      "campaign_id": "<uuid>",
+                      "name": "Main campaign",
+                      "calls": 40,
+                      "connected": 35,
+                      "talk_seconds": 2600
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter (e.g. `to` before `from`)"
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          }
+        }
+      }
+    },
+    "/vodafone/campaigns/{id}/calls": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "Campaign numbers and their calls (Convixx call log)",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "For one campaign: every number with its status (`pending` / `calling` / `completed` / `failed`), attempts, last attempt time and the call it got (`call_id`, open it with /vodafone/reports/history/{id}), plus the calls themselves (latest 500).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Numbers + calls",
+            "content": {
+              "application/json": {
+                "example": {
+                  "campaign": {
+                    "id": "<uuid>",
+                    "name": "Main campaign",
+                    "status": "running",
+                    "...": "..."
+                  },
+                  "leads_summary": {
+                    "total": 120,
+                    "pending": 80,
+                    "calling": 1,
+                    "completed": 39,
+                    "failed": 0
+                  },
+                  "numbers": [
+                    {
+                      "number": "919876500001",
+                      "status": "completed",
+                      "attempts": 1,
+                      "last_attempt_at": "2026-11-07T10:04:47.000Z",
+                      "vi_call_id": "48381932",
+                      "call_id": "695eb6dc-6115-4c15-a527-b0d681f68e04"
+                    }
+                  ],
+                  "calls": [
+                    {
+                      "id": "695eb6dc-6115-4c15-a527-b0d681f68e04",
+                      "direction": "outbound",
+                      "customer_number": "+919876500001",
+                      "our_number": "+919112002517",
+                      "started_at": "2026-11-07T10:04:47.865Z",
+                      "started_at_ist": "07/11/2026 15:34:47",
+                      "ended_at": "2026-11-07T10:06:02.120Z",
+                      "ended_at_ist": "07/11/2026 15:36:02",
+                      "duration_seconds": 74,
+                      "outcome": "connected",
+                      "status": "stopped:hangup",
+                      "campaign": {
+                        "id": "<campaign uuid>",
+                        "name": "Main campaign"
+                      },
+                      "agent": {
+                        "id": "<agent uuid>",
+                        "name": "Benetton Diwali Outbound"
+                      },
+                      "language_code": "mr-IN",
+                      "vi_call_id": "48381932",
+                      "chat_session_id": "<uuid>"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key"
+          },
+          "404": {
+            "description": "No Vodafone campaign with that id for this customer"
           }
         }
       }

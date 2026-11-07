@@ -13,8 +13,27 @@ The engine never falls back to Exotel and never renders an audio file.
 
 - **Base URL:** `https://convixx.in`
 - **Auth:** header `x-api-key: <company production key>`
-- **Swagger:** https://convixx.in/docs, tag **"Vodafone Campaigns (VI OBD)"**
-- **Code:** `apps/api/src/routes/vodafone-campaigns.ts`
+- **Swagger:** https://convixx.in/docs, tags **"Vodafone Campaigns (VI OBD)"** and **"Vodafone Reports (VI)"**
+- **Code:** `apps/api/src/routes/vodafone-campaigns.ts`, `vodafone-reports.ts`, `services/vodafone-call-log.ts`
+
+## All Vodafone APIs (for the SaaS)
+
+All endpoints use header `x-api-key`. Only Vodafone campaigns and calls are returned.
+
+| Need | Method + endpoint |
+|---|---|
+| Launch a campaign (create, upload numbers, start) | `POST /vodafone/campaigns` |
+| List campaigns | `GET /vodafone/campaigns` |
+| Calling numbers allowed on the Flow | `GET /vodafone/active-dnis` |
+| Add numbers / start / pause / delete | `POST .../{id}/leads`, `POST .../{id}/start`, `POST .../{id}/pause`, `DELETE /vodafone/campaigns/{id}` |
+| **Campaign progress card** (live, from VI) | `GET /vodafone/campaigns/{id}/status` |
+| **Campaign numbers + their calls** (Convixx) | `GET /vodafone/campaigns/{id}/calls` |
+| **Call history** (Convixx): time, number, campaign, duration, outcome | `GET /vodafone/reports/history` |
+| **One call + transcript** (Convixx) | `GET /vodafone/reports/history/{id}` |
+| **Totals**: per day, hour, campaign (Convixx) | `GET /vodafone/reports/summary` |
+| VI's own call records / summary | `GET /vodafone/campaigns/{id}/report`, `GET /vodafone/campaigns/{id}/summary`, `GET /vodafone/reports/calls` |
+
+Build the SaaS reports on the **Convixx** endpoints. Their fields are fixed and documented, and every call carries its transcript and campaign. VI's own reports are for cross-checking against VI's numbers: VI doesn't document their fields.
 
 ## One-time setup per customer
 
@@ -140,7 +159,53 @@ Save `campaign.id` and use it for status, leads, start, pause and delete.
 }
 ```
 
-## Reports (read-only)
+## Reports from the Convixx call log
+
+Every Vodafone call that reaches the bot gets one row in the engine's call log (`exotel_call_sessions`, `metadata.provider = 'vodafone'`). It is the same table and the same row shape as Exotel calls. Vodafone calls therefore also appear in the SaaS Calls page, dashboards and CRM call sync, with no SaaS change needed.
+
+- **Written in the background.** The call never waits for it. A database error is only logged: the call carries on and that one row is missing.
+- **Campaign link.** A campaign call links to its number (`outbound_campaign_leads.session_id`), so it is listed under its campaign.
+- **Turning it off.** Set `VODAFONE_CALL_LOG_ENABLED=false` in the engine's `.env` and restart. Already-written rows are kept.
+
+| Method | Endpoint | Returns |
+|---|---|---|
+| GET | `/vodafone/reports/history` | Calls, newest first. Filters: `from`, `to` (IST dates), `direction` (`outbound` = campaign, `inbound`), `campaign_id`, `outcome` (`connected` / `missed` / `live`), `number`, `limit` (max 500), `offset` |
+| GET | `/vodafone/reports/history/{id}` | One call and its transcript (`role`: `bot` / `customer`) |
+| GET | `/vodafone/reports/summary` | `totals` (calls, connected, missed, live, outbound, inbound, talk_seconds, avg_connected_seconds), `by_day`, `by_hour_ist`, `by_campaign`. Same filters as history |
+| GET | `/vodafone/campaigns/{id}/calls` | The campaign's numbers (status, attempts, last attempt, `call_id`) and its calls |
+
+A call in these responses:
+
+```json
+{
+  "id": "695eb6dc-6115-4c15-a527-b0d681f68e04",
+  "direction": "outbound",
+  "customer_number": "+919876500001",
+  "our_number": "+919112002517",
+  "started_at": "2026-11-07T10:04:47.865Z", "started_at_ist": "07/11/2026 15:34:47",
+  "ended_at": "2026-11-07T10:06:02.120Z",   "ended_at_ist": "07/11/2026 15:36:02",
+  "duration_seconds": 74,
+  "outcome": "connected",
+  "status": "stopped:hangup",
+  "campaign": { "id": "<uuid>", "name": "Main campaign" },
+  "agent": { "id": "<uuid>", "name": "Benetton Diwali Outbound" },
+  "language_code": "mr-IN",
+  "vi_call_id": "48381932",
+  "chat_session_id": "<uuid>"
+}
+```
+
+Field notes:
+
+- **Outcome** follows the SaaS dashboard rule:
+  - `live` while the call is in progress;
+  - `connected` if it was answered or lasted 10 seconds or more;
+  - otherwise `missed`.
+- **Only answered calls appear.** VI connects the stream only for answered calls, so a Vodafone row means the call was answered. Numbers VI dialled with no answer are in the campaign's `numbers` (still `pending`) and in VI's own report.
+- **`customer_number` can be `null`.** This happens when VI did not send the customer's number, for example when its Flow passes only our DNI. Add a `msisdn` custom parameter to the VI Streaming node and the engine reads it.
+- **History starts at deployment.** Calls from before the call log was switched on have no row.
+
+## Reports from VI (read-only)
 
 These endpoints are Vodafone only, read only, and never dial. Swagger tag: **"Vodafone Reports (VI)"**. Code: `apps/api/src/routes/vodafone-reports.ts`.
 
