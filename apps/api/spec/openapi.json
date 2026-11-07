@@ -10757,7 +10757,7 @@
                   "name": {
                     "type": "string",
                     "maxLength": 200,
-                    "description": "Campaign name (also sent to VI)."
+                    "description": "Campaign name (also sent to VI). On Vodafone's portal the name is cut to 50 characters, and a name already used on the account gets a date/time suffix (\"New Test 07 Nov 12:22\"); the response's `vi_campaign_name` is the name VI shows. The campaign keeps this name in Convixx."
                   },
                   "script_text": {
                     "type": "string",
@@ -10911,7 +10911,8 @@
                     "vi_flow_id": "U2FsdGVkX1-flowid",
                     "created_at": "2026-11-06T10:15:00.000Z",
                     "updated_at": "2026-11-06T10:15:01.000Z"
-                  }
+                  },
+                  "vi_campaign_name": "AMC renewal - Nov"
                 }
               }
             }

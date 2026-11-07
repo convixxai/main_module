@@ -106,6 +106,26 @@ function normalizeNumbers(input: string[]): { valid: string[]; invalid: number; 
   return { valid, invalid, duplicates };
 }
 
+/** VI's campaign_Name / description limit. */
+const VI_NAME_MAX = 50;
+
+/** Names to try on VI, in order: the name, + IST date/time, + random tag. All <= 50 chars. */
+function viCampaignNames(name: string): string[] {
+  const base = name.replace(/\s+/g, " ").trim() || "Campaign";
+  const fit = (suffix: string) => `${base.slice(0, VI_NAME_MAX - suffix.length).trim()}${suffix}`;
+  const stamp = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(new Date()).replace(",", ""); // "07 Nov 12:22"
+  const tag = Math.random().toString(36).slice(2, 7);
+  return [fit(""), fit(` ${stamp}`), fit(` ${stamp} ${tag}`)];
+}
+
+function isNameTaken(err: unknown): boolean {
+  if (!(err instanceof VodafoneObdError) || err.httpStatus !== 400) return false;
+  const msg = JSON.stringify(err.body ?? "");
+  return /already exist/i.test(msg);
+}
+
 export function viErrorReply(reply: any, err: unknown, message: string) {
   const status = err instanceof VodafoneObdError ? err.httpStatus : 502;
   return reply.status(status === 400 || status === 404 ? status : 502).send({
@@ -331,17 +351,37 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
 
     let viCampaignId: string;
     let viCampaignRefId: number | null = null;
+    let viName = "";
     try {
-      const created = await createObdCampaignWithFlow(customerId, {
-        flowid: viFlowId,
-        ...window,
-        dialtimeout: String(d.dial_timeout_seconds ?? 15),
-        name: d.name,
-        description: d.name,
-        retryintervaltype: d.retry_interval_type ?? "0",
-        retryintervalvalue: d.retry_interval_value ?? 60,
-        retrycount: d.retry_count ?? 0,
-      });
+      // VI campaign names are unique per account and at most 50 characters
+      // (createCampaign campaign_Name/description [1..50]); a reused name is
+      // refused with 400 "Campaign already exists!" (seen 2026-11-07). The
+      // name stays as given in our DB; on VI it gets a date/time suffix, then
+      // a random one, when it is taken.
+      const candidates = viCampaignNames(d.name);
+      let created: Awaited<ReturnType<typeof createObdCampaignWithFlow>> | null = null;
+      for (let i = 0; i < candidates.length; i++) {
+        viName = candidates[i];
+        try {
+          created = await createObdCampaignWithFlow(customerId, {
+            flowid: viFlowId,
+            ...window,
+            dialtimeout: String(d.dial_timeout_seconds ?? 15),
+            name: viName,
+            description: viName,
+            retryintervaltype: d.retry_interval_type ?? "0",
+            retryintervalvalue: d.retry_interval_value ?? 60,
+            retrycount: d.retry_count ?? 0,
+          });
+          break;
+        } catch (err) {
+          if (i < candidates.length - 1 && isNameTaken(err)) {
+            app.log.info({ customerId, viName }, "vodafone-campaigns: VI campaign name already exists, retrying with a suffix");
+            continue;
+          }
+          throw err;
+        }
+      }
       if (!created?.campainKey) throw new VodafoneObdError("VI createCampaign returned no campainKey", 502, created);
       viCampaignId = created.campainKey;
       viCampaignRefId = created.campaign_Ref_ID ?? null;
@@ -419,7 +459,7 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
       }
     }
     app.log.info(
-      { customerId, campaignId: id, viCampaignId, viCampaignRefId, dni, leads, started, viStatus },
+      { customerId, campaignId: id, viCampaignId, viCampaignRefId, viName, dni, leads, started, viStatus },
       "vodafone-campaigns: campaign created"
     );
     return reply.status(201).send({
@@ -431,6 +471,8 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
       started,
       window,
       dni,
+      /** Name on VI's portal (a taken or over-long name gets a suffix / is shortened). */
+      vi_campaign_name: viName,
       leads,
       campaign: publicCampaign(campaign),
       vi_status: viStatus,

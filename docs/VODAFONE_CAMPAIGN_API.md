@@ -35,6 +35,7 @@ The provider must be `vodafone` and enabled.
 - **Only the Flow's base variables are sent.** VI reports them through `getsampleBaseHeads`, for example only `msisdn`. When the Flow forwards no `campaign_id`, the bot recognises a campaign call by matching the dialled number to a pending number of a live campaign. It then speaks that campaign's script with the campaign's agent.
 - **Check VI's count.** The create response's `dni` field shows the DNI used, and `vi_status.baseDetails.totalBaseReceived` shows what VI actually loaded.
 - **Retries never dial anyone twice.** `/leads` skips numbers already in the campaign (`already_in_campaign`). The exception is when VI reports an empty base: then everything is uploaded again.
+- **Campaign names are unique on VI.** VI refuses a reused name with `400 "Campaign already exists!"`. The engine retries with a date/time suffix, then a short random tag, so a reused SaaS name still launches.
 - **Status uses VI's numeric campaign ID.** The engine reads VI status with `campaign_Ref_ID` (the "ID" shown in VI's portal). VI rejects the `campainKey` for status.
 - **A refused start can still count as started.** VI may refuse a start for a With-Flow campaign it already runs on its window. The engine then reads VI's status: any live state counts as started (`already_active: true`).
 
@@ -79,7 +80,7 @@ Content-Type: application/json
 
 | Field | Required | Default / notes |
 |---|---|---|
-| `name` | yes | Max 200 chars |
+| `name` | yes | Max 200 chars. VI allows only unique names of up to 50 characters, so the name sent to VI is cut to 50, and a name already used on the account gets a date/time suffix (`New Test 07 Nov 12:22`). The response field `vi_campaign_name` is the name VI shows. Convixx keeps the full name |
 | `script_text` | yes | First line the bot speaks. Max 4000 chars |
 | `language_code` | no | `en-IN`. Applies to the whole call |
 | `phone_numbers` | no | Up to 50,000 per request, in any format. Duplicates are removed by their last 10 digits; invalid numbers are skipped |
