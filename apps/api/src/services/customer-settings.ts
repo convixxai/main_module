@@ -330,6 +330,36 @@ export function invalidateCustomerSettingsCache(customerId: string): void {
 // ---------- Read ----------
 
 /**
+ * Whether this customer may make or take calls right now
+ * (customer_settings.voicebot_enabled). The SaaS switches it off when the
+ * company's call credits reach 0 and back on after a top-up, by writing the
+ * shared table directly, so this reads the row fresh instead of using the
+ * 1-minute cache. One indexed lookup, only when a call starts or a dial is
+ * requested, never per reply.
+ *
+ * Fails open: a database hiccup must not drop a paying customer's calls.
+ * No row at all (the 005 trigger normally creates one) is treated as enabled;
+ * a row reads its stored value.
+ */
+export async function isCallingEnabled(customerId: string): Promise<boolean> {
+  try {
+    const r = await pool.query<{ voicebot_enabled: boolean }>(
+      `SELECT voicebot_enabled FROM customer_settings WHERE customer_id = $1`,
+      [customerId]
+    );
+    return r.rows.length === 0 ? true : r.rows[0].voicebot_enabled !== false;
+  } catch {
+    return true;
+  }
+}
+
+/** Reply body when a dial is refused because calling is switched off. */
+export const CALLING_DISABLED_ERROR = {
+  error: "Calling is switched off for this customer (voicebot_enabled = false), for example because no call credits are left. Top up credits to turn it back on.",
+  code: "calling_disabled",
+} as const;
+
+/**
  * Load the customer_settings row. Returns null if the customer does not exist.
  * The 005 migration installs a trigger so every new customer gets a row, and
  * backfills existing customers. This function also auto-creates the row as a

@@ -283,8 +283,26 @@ const historyQuery = z.object({
 /** IST calendar date -> UTC wall-clock bound, as the engine stores times. */
 const IST_DAY_START = `(($X)::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC'`;
 
+/**
+ * Call Pulses (credits) charged per call live in call_charges, written by the
+ * SaaS metering job (credits:meter, one row per call session). The table is
+ * the SaaS's, so it may be missing on a dev database: checked once, and the
+ * report then shows the credits as not charged instead of failing.
+ */
+let callChargesTable: Promise<boolean> | null = null;
+function hasCallCharges(): Promise<boolean> {
+  callChargesTable ??= pool
+    .query(`SELECT to_regclass('public.call_charges') IS NOT NULL AS ok`)
+    .then((r) => Boolean(r.rows[0]?.ok))
+    .catch(() => {
+      callChargesTable = null; // retry on the next request
+      return false;
+    });
+  return callChargesTable;
+}
+
 /** Shared FROM/WHERE for Vodafone call rows of one customer. $1 = customer id. */
-function callRowsSql(f: z.infer<typeof historyQuery>, params: unknown[]): string {
+function callRowsSql(f: z.infer<typeof historyQuery>, params: unknown[], withCharges = false): string {
   const where = [`s.customer_id = $1`, `s.metadata->>'provider' = 'vodafone'`];
   const add = (v: unknown) => {
     params.push(v);
@@ -307,6 +325,7 @@ function callRowsSql(f: z.infer<typeof historyQuery>, params: unknown[]): string
      ) l ON TRUE
      LEFT JOIN outbound_campaigns c ON c.id = l.campaign_id
      LEFT JOIN agents a ON a.id = s.agent_id
+     ${withCharges ? "LEFT JOIN call_charges cc ON cc.call_session_id = s.id::text" : ""}
     WHERE ${where.join(" AND ")}`;
 }
 
@@ -321,6 +340,28 @@ const CALL_COLUMNS = `s.id, s.direction, s.from_number, s.to_number, s.status, s
        COALESCE(s.current_language_code, s.default_language_code) AS language_code,
        l.campaign_id, c.name AS campaign_name, s.metadata,
        ${DURATION_SQL} AS duration_seconds, ${OUTCOME_SQL} AS outcome`;
+const CHARGE_COLUMNS = `, cc.pulses_charged, cc.pulse_seconds, cc.billed_seconds, cc.status AS charge_status`;
+
+/** Columns + FROM for call rows, with the credit columns when call_charges exists. */
+async function callSelect(f: z.infer<typeof historyQuery>, params: unknown[]): Promise<{ cols: string; from: string; charges: boolean }> {
+  const charges = await hasCallCharges();
+  return { cols: CALL_COLUMNS + (charges ? CHARGE_COLUMNS : ""), from: callRowsSql(f, params, charges), charges };
+}
+
+/**
+ * Credits charged for one call: 1 per started pulse (60 s pulse: 1-60 s = 1,
+ * 61-120 s = 2). `final` is false while the call is still being metered;
+ * `deducted` is 0 until the metering job (every minute) has seen the call.
+ */
+function presentCredits(r: Record<string, any>) {
+  const charged = r.pulse_seconds != null;
+  return {
+    deducted: charged ? Number(r.pulses_charged) || 0 : 0,
+    pulse_seconds: charged ? Number(r.pulse_seconds) : null,
+    billed_seconds: charged ? Number(r.billed_seconds) || 0 : 0,
+    final: charged ? r.charge_status === "final" : false,
+  };
+}
 
 function utcIso(v: unknown): string | null {
   if (!v) return null;
@@ -359,6 +400,7 @@ function presentCall(r: Record<string, any>) {
     language_code: r.language_code ?? null,
     vi_call_id: r.vi_call_id ?? null,
     chat_session_id: r.chat_session_id ?? null,
+    credits: presentCredits(r),
   };
 }
 
@@ -403,9 +445,9 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
     const f = q.data;
     if (f.from && f.to && f.to < f.from) return reply.status(400).send({ error: "`to` is before `from`" });
     const params: unknown[] = [request.customerId];
-    const from = callRowsSql(f, params);
+    const { cols, from } = await callSelect(f, params);
     const [rows, total] = await Promise.all([
-      pool.query(`SELECT ${CALL_COLUMNS} ${from} ORDER BY s.started_at DESC LIMIT ${f.limit} OFFSET ${f.offset}`, params),
+      pool.query(`SELECT ${cols} ${from} ORDER BY s.started_at DESC LIMIT ${f.limit} OFFSET ${f.offset}`, params),
       pool.query(`SELECT COUNT(*)::int AS n ${from}`, params),
     ]);
     return reply.send({
@@ -422,9 +464,9 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     if (!z.string().uuid().safeParse(id).success) return reply.status(404).send({ error: "Call not found" });
     const params: unknown[] = [request.customerId];
-    const from = callRowsSql({ limit: 1, offset: 0 }, params);
+    const { cols, from } = await callSelect({ limit: 1, offset: 0 }, params);
     params.push(id);
-    const r = await pool.query(`SELECT ${CALL_COLUMNS} ${from} AND s.id = $${params.length}`, params);
+    const r = await pool.query(`SELECT ${cols} ${from} AND s.id = $${params.length}`, params);
     const row = r.rows[0];
     if (!row) return reply.status(404).send({ error: "Call not found" });
     const transcript = row.chat_session_id ? (await transcriptsFor([row.chat_session_id])).get(row.chat_session_id) ?? [] : [];
@@ -443,13 +485,14 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
     const f = q.data;
     if (f.from && f.to && f.to < f.from) return reply.status(400).send({ error: "`to` is before `from`" });
     const params: unknown[] = [request.customerId];
-    const from = callRowsSql({ from: f.from, to: f.to, number: digits, limit: f.limit, offset: f.offset }, params);
+    const { cols, from, charges } = await callSelect({ from: f.from, to: f.to, number: digits, limit: f.limit, offset: f.offset }, params);
     const [rows, totals] = await Promise.all([
-      pool.query(`SELECT ${CALL_COLUMNS} ${from} ORDER BY s.started_at DESC LIMIT ${f.limit} OFFSET ${f.offset}`, params),
+      pool.query(`SELECT ${cols} ${from} ORDER BY s.started_at DESC LIMIT ${f.limit} OFFSET ${f.offset}`, params),
       pool.query(
         `SELECT COUNT(*)::int AS calls,
                 COUNT(*) FILTER (WHERE ${OUTCOME_SQL} = 'connected')::int AS connected,
                 COALESCE(SUM(${DURATION_SQL}), 0)::int AS talk_seconds,
+                ${charges ? "COALESCE(SUM(cc.pulses_charged), 0)::int" : "0"} AS credits_deducted,
                 MIN(s.started_at) AS first_call, MAX(s.started_at) AS last_call
            ${from}`,
         params
@@ -465,7 +508,7 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
       number: digits,
       filters: { from: f.from ?? null, to: f.to ?? null },
       totals: {
-        calls: t.calls, connected: t.connected, talk_seconds: t.talk_seconds,
+        calls: t.calls, connected: t.connected, talk_seconds: t.talk_seconds, credits_deducted: t.credits_deducted,
         first_call_at: first, first_call_at_ist: istText(first),
         last_call_at: last, last_call_at_ist: istText(last),
       },
@@ -485,7 +528,8 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
     const f = q.data;
     if (f.from && f.to && f.to < f.from) return reply.status(400).send({ error: "`to` is before `from`" });
     const params: unknown[] = [request.customerId];
-    const from = callRowsSql(f, params);
+    const { from, charges } = await callSelect(f, params);
+    const credits = charges ? "COALESCE(SUM(cc.pulses_charged), 0)::int" : "0";
     const istStart = `((s.started_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')`;
     const [tot, byDay, byHour, byCampaign] = await Promise.all([
       pool.query(
@@ -496,18 +540,21 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
                 COUNT(*) FILTER (WHERE s.direction = 'outbound')::int AS outbound,
                 COUNT(*) FILTER (WHERE s.direction = 'inbound')::int AS inbound,
                 COALESCE(SUM(${DURATION_SQL}), 0)::int AS talk_seconds,
-                COALESCE(ROUND(AVG(${DURATION_SQL}) FILTER (WHERE ${OUTCOME_SQL} = 'connected')), 0)::int AS avg_connected_seconds
+                COALESCE(ROUND(AVG(${DURATION_SQL}) FILTER (WHERE ${OUTCOME_SQL} = 'connected')), 0)::int AS avg_connected_seconds,
+                ${credits} AS credits_deducted
            ${from}`,
         params
       ),
       pool.query(`SELECT to_char(${istStart}, 'YYYY-MM-DD') AS day, COUNT(*)::int AS calls,
-                         COUNT(*) FILTER (WHERE ${OUTCOME_SQL} = 'connected')::int AS connected
+                         COUNT(*) FILTER (WHERE ${OUTCOME_SQL} = 'connected')::int AS connected,
+                         ${credits} AS credits_deducted
                     ${from} GROUP BY 1 ORDER BY 1`, params),
       pool.query(`SELECT EXTRACT(HOUR FROM ${istStart})::int AS hour, COUNT(*)::int AS calls
                     ${from} GROUP BY 1 ORDER BY 1`, params),
       pool.query(`SELECT l.campaign_id, c.name, COUNT(*)::int AS calls,
                          COUNT(*) FILTER (WHERE ${OUTCOME_SQL} = 'connected')::int AS connected,
-                         COALESCE(SUM(${DURATION_SQL}), 0)::int AS talk_seconds
+                         COALESCE(SUM(${DURATION_SQL}), 0)::int AS talk_seconds,
+                         ${credits} AS credits_deducted
                     ${from} AND l.campaign_id IS NOT NULL GROUP BY 1, 2 ORDER BY 3 DESC`, params),
     ]);
     return reply.send({
@@ -515,7 +562,7 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
       totals: tot.rows[0],
       by_day: byDay.rows,
       by_hour_ist: byHour.rows,
-      by_campaign: byCampaign.rows.map((r) => ({ campaign_id: r.campaign_id, name: r.name, calls: r.calls, connected: r.connected, talk_seconds: r.talk_seconds })),
+      by_campaign: byCampaign.rows.map((r) => ({ campaign_id: r.campaign_id, name: r.name, calls: r.calls, connected: r.connected, talk_seconds: r.talk_seconds, credits_deducted: r.credits_deducted })),
     });
   });
 
@@ -526,9 +573,9 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
     const campaign = await loadVodafoneCampaign(customerId, id);
     if (!campaign) return reply.status(404).send({ error: "Vodafone campaign not found" });
     const params: unknown[] = [customerId];
-    const from = callRowsSql({ campaign_id: campaign.id, limit: 500, offset: 0 }, params);
+    const { cols, from } = await callSelect({ campaign_id: campaign.id, limit: 500, offset: 0 }, params);
     const [calls, leads] = await Promise.all([
-      pool.query(`SELECT ${CALL_COLUMNS} ${from} ORDER BY s.started_at DESC LIMIT 500`, params),
+      pool.query(`SELECT ${cols} ${from} ORDER BY s.started_at DESC LIMIT 500`, params),
       pool.query(
         `SELECT phone_number, status, attempts, last_attempt_at, vi_call_id, session_id
            FROM outbound_campaign_leads WHERE campaign_id = $1 ORDER BY created_at ASC LIMIT 50000`,

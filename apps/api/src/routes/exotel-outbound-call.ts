@@ -9,7 +9,8 @@ import { z } from "zod";
 import { pool } from "../config/db";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { getExotelSettings, createCallSession } from "../services/exotel-settings";
-import { getCustomerSettings } from "../services/customer-settings";
+import { getCustomerSettings, isCallingEnabled, CALLING_DISABLED_ERROR } from "../services/customer-settings";
+import { recordCallingEvent } from "../services/calling-switch";
 import {
   exotelConnectCall,
   ExotelUpstreamError,
@@ -74,6 +75,10 @@ export async function exotelOutboundCallRoutes(app: FastifyInstance): Promise<vo
       ]);
       if (customer.rows.length === 0) {
         return reply.status(404).send({ error: "Customer not found" });
+      }
+      if (!(await isCallingEnabled(customerId))) {
+        recordCallingEvent(customerId, "dial_blocked", "POST /customers/:customerId/exotel/outbound-call", { to: parsedBody.data.to ?? null });
+        return reply.status(403).send(CALLING_DISABLED_ERROR);
       }
 
       const settings = await getExotelSettings(customerId);

@@ -42,7 +42,8 @@ import { encrypt } from "../services/crypto";
 import { getTelephonySettings, getDecryptedCredentials } from "../services/telephony-settings";
 import { getActiveDniList } from "../services/vodafone-obd";
 import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
-import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
+import { getCustomerSettings, isCallingEnabled, type CustomerSettings } from "../services/customer-settings";
+import { recordCallingEvent } from "../services/calling-switch";
 import { runAskPipeline } from "./ask";
 import { runSimulatorStt } from "./voice-simulator";
 import { createRagTrace } from "../services/rag-trace";
@@ -665,6 +666,19 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
   if (!telephony || telephony.provider_id !== "vodafone" || !telephony.is_enabled) {
     app.log.warn({ customerId }, "vodafone-voicebot: no enabled vodafone telephony settings for this customer");
     ws.close(4400, "vodafone not configured for this customer");
+    return;
+  }
+  // Calling switched off (the SaaS does this at 0 call credits): end the
+  // call before any session, call-log row or transcript, so it is not billed.
+  if (!(await isCallingEnabled(customerId))) {
+    app.log.warn({ customerId, streamId: event.streamId, callId: event.callId }, "vodafone-voicebot: call rejected, calling disabled (voicebot_enabled = false)");
+    recordCallingEvent(customerId, "call_blocked", "vodafone-voicebot", {
+      vi_call_id: event.callId || null,
+      stream_id: event.streamId || null,
+      direction: route.campaignId ? "outbound" : "inbound",
+      campaign_id: route.campaignId ?? null,
+    });
+    ws.close(4403, "calling disabled for this customer");
     return;
   }
 

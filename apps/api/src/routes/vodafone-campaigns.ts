@@ -25,6 +25,8 @@ import { randomUUID } from "crypto";
 import { pool } from "../config/db";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { getTelephonySettings } from "../services/telephony-settings";
+import { isCallingEnabled, CALLING_DISABLED_ERROR } from "../services/customer-settings";
+import { recordCallingEvent } from "../services/calling-switch";
 import { resolvePhoneNumberById } from "../services/company-phone-numbers";
 import {
   createObdCampaignWithFlow,
@@ -580,6 +582,10 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     if (!campaign) return reply.status(404).send({ error: "Vodafone campaign not found" });
     const counts = await leadCounts(campaign.id);
     if (counts.total === 0) return reply.status(400).send({ error: "This campaign has no numbers yet; add them with POST /vodafone/campaigns/{id}/leads" });
+    if (!(await isCallingEnabled(customerId))) {
+      recordCallingEvent(customerId, "dial_blocked", "POST /vodafone/campaigns/:id/start", { campaign_id: id });
+      return reply.status(403).send(CALLING_DISABLED_ERROR);
+    }
     let res: Awaited<ReturnType<typeof startObdCampaignOrConfirmActive>>;
     try {
       res = await startObdCampaignOrConfirmActive(customerId, campaign.vi_campaign_id, campaign.vi_campaign_ref_id);

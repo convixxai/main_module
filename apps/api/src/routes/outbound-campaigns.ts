@@ -7,7 +7,8 @@ import { pool } from "../config/db";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { sarvamTextToSpeechStream } from "../services/sarvam";
 import { getExotelSettings, createCallSession } from "../services/exotel-settings";
-import { getCustomerSettings } from "../services/customer-settings";
+import { getCustomerSettings, isCallingEnabled, CALLING_DISABLED_ERROR } from "../services/customer-settings";
+import { recordCallingEvent } from "../services/calling-switch";
 import { exotelConnectCall, restApiBaseUrlFromSubdomain } from "../services/exotel-connect-call";
 import { voicebotUrlsForCustomer } from "../services/exotel-voice-urls";
 import { resolvePhoneNumberById } from "../services/company-phone-numbers";
@@ -434,6 +435,10 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
 
       const customerId = request.customerId!;
       const { phone_numbers } = body.data;
+      if (!(await isCallingEnabled(customerId))) {
+        recordCallingEvent(customerId, "dial_blocked", "POST /outbound/campaigns/:id/trigger", { campaign_id: id });
+        return reply.status(403).send(CALLING_DISABLED_ERROR);
+      }
 
       const campaignRes = await pool.query(
         "SELECT * FROM outbound_campaigns WHERE id = $1 AND customer_id = $2",
@@ -725,6 +730,10 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
 
       const customerId = request.customerId!;
       const { phone_number, phone_number_id } = body.data;
+      if (!(await isCallingEnabled(customerId))) {
+        recordCallingEvent(customerId, "dial_blocked", "POST /outbound/call", { phone_number });
+        return reply.status(403).send(CALLING_DISABLED_ERROR);
+      }
 
       const settings = await getExotelSettings(customerId);
       const customerSettings = await getCustomerSettings(customerId);

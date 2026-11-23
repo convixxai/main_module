@@ -23,6 +23,8 @@ import { companyPhoneNumbersRoutes } from "./routes/company-phone-numbers";
 import { exotelOutboundCallRoutes } from "./routes/exotel-outbound-call";
 import { exotelStatusCallbackRoutes } from "./routes/exotel-status-callback";
 import { adminLogsRoutes } from "./routes/adminLogs";
+import { callingRoutes } from "./routes/calling";
+import { customerLogRoutes } from "./routes/customer-logs";
 import { outboundCampaignRoutes } from "./routes/outbound-campaigns";
 import { vodafoneCampaignRoutes } from "./routes/vodafone-campaigns";
 import { vodafoneReportRoutes, vodafoneOwnReportRoutes } from "./routes/vodafone-reports";
@@ -100,6 +102,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(exotelOutboundCallRoutes);       // Exotel outbound dial (REST Connect API)
   app.register(exotelStatusCallbackRoutes);      // Exotel HTTP StatusCallback (answered)
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)
+  app.register(callingRoutes);                  // Calling switch on/off (0 credits) + calling logs + activity per hour/day/week/month
+  app.register(customerLogRoutes);              // One customer's server log lines per IST day, with frequency summary
   app.register(outboundCampaignRoutes);         // Outbound Campaign management & triggering
   app.register(vodafoneCampaignRoutes);         // Vodafone OBD campaigns (VI dials; never Exotel)
   app.register(vodafoneReportRoutes);           // Vodafone reports: campaign status/report/summary, call history (VI, read-only)

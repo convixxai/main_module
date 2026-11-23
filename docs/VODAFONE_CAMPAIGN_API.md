@@ -203,11 +203,19 @@ A call in these responses:
   "agent": { "id": "<uuid>", "name": "Benetton Diwali Outbound" },
   "language_code": "mr-IN",
   "vi_call_id": "48381932",
-  "chat_session_id": "<uuid>"
+  "chat_session_id": "<uuid>",
+  "credits": { "deducted": 2, "pulse_seconds": 60, "billed_seconds": 74, "final": true }
 }
 ```
 
 Field notes:
+
+- **Credits (Call Pulses)** are what was deducted for the call:
+  - 1 credit per started pulse. With a 60 s pulse: 1–60 s = 1, 61–120 s = 2, and so on. A connected call under 1 second also costs 1.
+  - `pulse_seconds` is the pulse length frozen for this call: changing a company's pulse only affects later calls.
+  - `billed_seconds` is the time charged. `final` is `false` while the call is still being metered.
+  - The SaaS metering job (`credits:meter`, every minute) writes them to `call_charges` and the wallet ledger (`credit_entries`). A call that just ended can show `deducted: 0` for up to a minute.
+  - The summary and number totals also carry `credits_deducted`.
 
 - **Outcome** follows the SaaS dashboard rule:
   - `live` while the call is in progress;

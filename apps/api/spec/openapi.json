@@ -111,6 +111,14 @@
     {
       "name": "Vodafone Reports (VI)",
       "description": "Vodafone only, read only. Nothing here dials or changes a campaign. Exotel and /outbound/campaigns are not affected.\n\n**Two sources:**\n- **Convixx call log** (`/vodafone/reports/history`, `/history/{id}`, `/summary`, `/vodafone/campaigns/{id}/calls`): one row per Vodafone call that reached the bot. It holds time (UTC and IST), customer number, direction, duration, outcome, campaign, agent, language and transcript. These are the same rows the SaaS Calls page and dashboards read (`exotel_call_sessions`, `metadata.provider = 'vodafone'`). Use these for the SaaS reports.\n- **VI's own data** (`/vodafone/campaigns/{id}/status`, `/report`, `/summary`, `/vodafone/reports/calls`): VI campaignstatus and the Pull Report API. VI's rows are passed through as VI sends them (fields not documented by VI); add `raw=1` to see the reply.\n\nTimes: `started_at` / `ended_at` are ISO UTC (`Z`), and `*_ist` is the same instant as `DD/MM/YYYY HH:mm:ss` India time. Date filters (`from`, `to`) are IST calendar dates. Outcome is `live` (in progress), `connected` (answered, or lasted 10 s or more) or `missed`, the same rule as the SaaS dashboard.\n\n**Auth:** every report endpoint accepts the customer's `x-api-key`, or the admin `x-admin-token` together with `x-customer-id` (header) or `customer_id` (query). No other access."
+    },
+    {
+      "name": "Calling",
+      "description": "Calling switch (block calls at 0 credits), calling logs, activity per hour/day/week/month"
+    },
+    {
+      "name": "Logs",
+      "description": "One customer's server logs per day"
     }
   ],
   "components": {
@@ -11999,7 +12007,7 @@
             "AdminToken": []
           }
         ],
-        "description": "Every Vodafone call of this customer that reached the bot, newest first: campaign (outbound) and inbound calls. Paginate with `limit` / `offset`; `total` is the count for the filters.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
+        "description": "Every Vodafone call of this customer that reached the bot, newest first: campaign (outbound) and inbound calls. Paginate with `limit` / `offset`; `total` is the count for the filters.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.",
         "parameters": [
           {
             "name": "from",
@@ -12148,7 +12156,13 @@
                       },
                       "language_code": "mr-IN",
                       "vi_call_id": "48381932",
-                      "chat_session_id": "<uuid>"
+                      "chat_session_id": "<uuid>",
+                      "credits": {
+                        "deducted": 2,
+                        "pulse_seconds": 60,
+                        "billed_seconds": 98,
+                        "final": true
+                      }
                     }
                   ]
                 }
@@ -12181,7 +12195,7 @@
             "AdminToken": []
           }
         ],
-        "description": "The call (same fields as in the history) plus the full transcript in order. `role` is `bot` or `customer`. A campaign call starts with the campaign script line.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
+        "description": "The call (same fields as in the history) plus the full transcript in order. `role` is `bot` or `customer`. A campaign call starts with the campaign script line.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.",
         "parameters": [
           {
             "name": "id",
@@ -12242,7 +12256,13 @@
                     },
                     "language_code": "mr-IN",
                     "vi_call_id": "48381932",
-                    "chat_session_id": "<uuid>"
+                    "chat_session_id": "<uuid>",
+                    "credits": {
+                      "deducted": 2,
+                      "pulse_seconds": 60,
+                      "billed_seconds": 98,
+                      "final": true
+                    }
                   },
                   "transcript": [
                     {
@@ -12286,7 +12306,7 @@
             "AdminToken": []
           }
         ],
-        "description": "Totals for the period and filters: number of calls, connected / missed / live, outbound / inbound, total talk time and average connected call length, then the same per day (IST), per hour of day (IST) and per campaign.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
+        "description": "Totals for the period and filters: number of calls, connected / missed / live, outbound / inbound, total talk time and average connected call length, then the same per day (IST), per hour of day (IST) and per campaign.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.",
         "parameters": [
           {
             "name": "from",
@@ -12394,13 +12414,15 @@
                     "outbound": 40,
                     "inbound": 2,
                     "talk_seconds": 2710,
-                    "avg_connected_seconds": 71
+                    "avg_connected_seconds": 71,
+                    "credits_deducted": 589
                   },
                   "by_day": [
                     {
                       "day": "2026-11-07",
                       "calls": 30,
-                      "connected": 27
+                      "connected": 27,
+                      "credits_deducted": 3
                     }
                   ],
                   "by_hour_ist": [
@@ -12419,7 +12441,8 @@
                       "name": "Main campaign",
                       "calls": 40,
                       "connected": 35,
-                      "talk_seconds": 2600
+                      "talk_seconds": 2600,
+                      "credits_deducted": 126
                     }
                   ]
                 }
@@ -12452,7 +12475,7 @@
             "AdminToken": []
           }
         ],
-        "description": "For one campaign: every number with its status (`pending` / `calling` / `completed` / `failed`), attempts, last attempt time and the call it got (`call_id`, open it with /vodafone/reports/history/{id}), plus the calls themselves (latest 500).\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
+        "description": "For one campaign: every number with its status (`pending` / `calling` / `completed` / `failed`), attempts, last attempt time and the call it got (`call_id`, open it with /vodafone/reports/history/{id}), plus the calls themselves (latest 500).\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.",
         "parameters": [
           {
             "name": "id",
@@ -12536,7 +12559,13 @@
                       },
                       "language_code": "mr-IN",
                       "vi_call_id": "48381932",
-                      "chat_session_id": "<uuid>"
+                      "chat_session_id": "<uuid>",
+                      "credits": {
+                        "deducted": 2,
+                        "pulse_seconds": 60,
+                        "billed_seconds": 98,
+                        "final": true
+                      }
                     }
                   ]
                 }
@@ -12569,7 +12598,7 @@
             "AdminToken": []
           }
         ],
-        "description": "For one customer number: how many calls it had (total, connected, talk time, first and last call in UTC and IST), then each call newest first with its transcript. The number may be in any format (`9876500001`, `+919876500001`, `91 98765 00001`); it is matched on the last 10 digits of the **customer's** side of the call (outbound: number dialled, inbound: caller).\n\nA transcript belongs to its call (one chat session per call), so two calls of the same number never mix. Use `transcripts=0` for the call list only. Calls where Vodafone did not send the customer's number cannot be found by number.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
+        "description": "For one customer number: how many calls it had (total, connected, talk time, first and last call in UTC and IST), then each call newest first with its transcript. The number may be in any format (`9876500001`, `+919876500001`, `91 98765 00001`); it is matched on the last 10 digits of the **customer's** side of the call (outbound: number dialled, inbound: caller).\n\nA transcript belongs to its call (one chat session per call), so two calls of the same number never mix. Use `transcripts=0` for the call list only. Calls where Vodafone did not send the customer's number cannot be found by number.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.",
         "parameters": [
           {
             "name": "number",
@@ -12671,6 +12700,7 @@
                     "calls": 2,
                     "connected": 2,
                     "talk_seconds": 80,
+                    "credits_deducted": 2,
                     "first_call_at": "2026-11-09T09:54:17.000Z",
                     "first_call_at_ist": "09/11/2026 15:24:17",
                     "last_call_at": "2026-11-10T06:10:00.000Z",
@@ -12702,6 +12732,12 @@
                       "language_code": "mr-IN",
                       "vi_call_id": "48381932",
                       "chat_session_id": "<uuid>",
+                      "credits": {
+                        "deducted": 2,
+                        "pulse_seconds": 60,
+                        "billed_seconds": 98,
+                        "final": true
+                      },
                       "transcript": [
                         {
                           "role": "bot",
@@ -13351,6 +13387,740 @@
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/settings/calling": {
+      "get": {
+        "tags": [
+          "Calling"
+        ],
+        "summary": "Calling switch: is calling on? (+ credits, last change)",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "The calling switch (`customer_settings.voicebot_enabled`). **Off = no calls:** a Vodafone call is disconnected as soon as VI connects it (no session, transcript or charge), Exotel refuses the stream, and `POST /vodafone/campaigns/{id}/start`, `POST /outbound/campaigns/{id}/trigger`, `POST /outbound/call` and `POST /customers/{id}/exotel/outbound-call` answer **403** `code: calling_disabled`. Calls already in progress finish normally.\n\nThe SaaS turns it off automatically when the company's call credits reach 0 and back on after a top-up (it only turns back on what billing turned off). Every change and every blocked call is logged: `GET /calling/logs`.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calling state",
+            "content": {
+              "application/json": {
+                "example": {
+                  "calling_enabled": false,
+                  "last_change": {
+                    "event": "disabled",
+                    "source": "saas-billing",
+                    "reason": "Call credits reached 0",
+                    "at": "2026-11-24T06:10:02.000Z",
+                    "at_ist": "24/11/2026 11:40:02"
+                  },
+                  "billing": {
+                    "linked": true,
+                    "credits_balance": 0,
+                    "suspended_for_zero_credits_at": "2026-11-24T06:10:02.000Z",
+                    "suspended_for_zero_credits_at_ist": "24/11/2026 11:40:02",
+                    "pulse_seconds": 60
+                  },
+                  "note": "When off, new calls are disconnected as soon as they connect and dials / campaign starts are refused. Calls already in progress finish normally."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Calling"
+        ],
+        "summary": "Calling switch: enable / disable calls",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "The calling switch (`customer_settings.voicebot_enabled`). **Off = no calls:** a Vodafone call is disconnected as soon as VI connects it (no session, transcript or charge), Exotel refuses the stream, and `POST /vodafone/campaigns/{id}/start`, `POST /outbound/campaigns/{id}/trigger`, `POST /outbound/call` and `POST /customers/{id}/exotel/outbound-call` answer **403** `code: calling_disabled`. Calls already in progress finish normally.\n\nThe SaaS turns it off automatically when the company's call credits reach 0 and back on after a top-up (it only turns back on what billing turned off). Every change and every blocked call is logged: `GET /calling/logs`.\n\n`enabled: false` blocks calls at once. `enabled: true` turns calling back on; with 0 credits or less it is refused (**409** `code: no_credits`) unless `force: true` (**admin token only**; with `x-api-key` it is refused, 403 `code: force_admin_only`). A forced turn-on stays on: billing does not switch it off again until the next top-up resets the 0-credit state, so calls then run unpaid. `reason` is saved in the log.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "enabled"
+                ],
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500,
+                    "description": "Why (saved in the log)"
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "description": "Admin token only: turn on although credits are 0 or less"
+                  }
+                }
+              },
+              "examples": {
+                "disable": {
+                  "value": {
+                    "enabled": false,
+                    "reason": "Paused by admin"
+                  }
+                },
+                "enable": {
+                  "value": {
+                    "enabled": true,
+                    "reason": "Resumed"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New calling state (same as GET)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "calling_enabled": true,
+                  "last_change": {
+                    "event": "enabled",
+                    "source": "api:admin",
+                    "reason": "Resumed",
+                    "at": "2026-11-24T07:00:00.000Z",
+                    "at_ist": "24/11/2026 12:30:00"
+                  },
+                  "billing": {
+                    "linked": true,
+                    "credits_balance": 500,
+                    "suspended_for_zero_credits_at": null,
+                    "suspended_for_zero_credits_at_ist": null,
+                    "pulse_seconds": 60
+                  },
+                  "note": "When off, new calls are disconnected as soon as they connect and dials / campaign starts are refused. Calls already in progress finish normally."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad body (unknown fields are refused)"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "404": {
+            "description": "Customer not found"
+          },
+          "409": {
+            "description": "Turning on with no credits left (send `force: true` to override)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "No call credits left: calls would run unpaid. ...",
+                  "code": "no_credits",
+                  "credits_balance": 0
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`force` sent with a customer API key (admin token only)"
+          }
+        }
+      }
+    },
+    "/calling/logs": {
+      "get": {
+        "tags": [
+          "Calling"
+        ],
+        "summary": "Calling logs: switch changes, blocked calls, blocked dials",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "Newest first. Events:\n\n- `disabled` / `enabled`: the switch changed. `source`: `saas-billing` (0 credits / top-up), `api:admin` or `api:customer-key` (PUT /settings/calling), `database` (a direct database update).\n- `call_blocked`: a call reached Convixx while calling was off and was disconnected (`details`: VI call id, stream id, direction, campaign).\n- `dial_blocked`: a dial or campaign start was refused (`source` = the endpoint).\n\n`from` / `to` are IST dates (default: the last 30 days). `counts` covers the whole range per event.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "IST date, default 29 days before `to`"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "IST date, default today"
+          },
+          {
+            "name": "event",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "enabled",
+                "disabled",
+                "call_blocked",
+                "dial_blocked"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Logs",
+            "content": {
+              "application/json": {
+                "example": {
+                  "filters": {
+                    "from": "2026-10-26",
+                    "to": "2026-11-24",
+                    "event": null
+                  },
+                  "counts": {
+                    "enabled": 1,
+                    "disabled": 1,
+                    "call_blocked": 3,
+                    "dial_blocked": 1
+                  },
+                  "total": 6,
+                  "limit": 100,
+                  "offset": 0,
+                  "logs": [
+                    {
+                      "id": 42,
+                      "event": "call_blocked",
+                      "source": "vodafone-voicebot",
+                      "reason": null,
+                      "details": {
+                        "vi_call_id": "53800199",
+                        "stream_id": "TN_53800199_387_9348979",
+                        "direction": "outbound",
+                        "campaign_id": "<uuid>"
+                      },
+                      "at": "2026-11-24T06:12:40.000Z",
+                      "at_ist": "24/11/2026 11:42:40"
+                    },
+                    {
+                      "id": 41,
+                      "event": "disabled",
+                      "source": "saas-billing",
+                      "reason": "Call credits reached 0",
+                      "details": null,
+                      "at": "2026-11-24T06:10:02.000Z",
+                      "at_ist": "24/11/2026 11:40:02"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "503": {
+            "description": "Logs not set up on this server (migration 027)"
+          }
+        }
+      }
+    },
+    "/calling/activity": {
+      "get": {
+        "tags": [
+          "Calling"
+        ],
+        "summary": "Activity per hour / day / week / month: calls, talk time, credits, blocked calls",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "Per IST period: calls that reached Convixx (Vodafone and Exotel), connected, outbound / inbound, talk time, Call Pulses (credits) deducted, calls and dials blocked, and how often calling was switched off / on. Only periods with activity are listed; `totals` sums them.\n\n`group` and the longest range: `hour` 7 days (default: today), `day` 92 days (default: last 30), `week` 366 days (default: last 12 weeks; ISO weeks, e.g. `2026-W45`), `month` 731 days (default: last 12 months).\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "IST date"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "IST date, default today"
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "hour",
+                "day",
+                "week",
+                "month"
+              ],
+              "default": "day"
+            }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Activity",
+            "content": {
+              "application/json": {
+                "example": {
+                  "filters": {
+                    "from": "2026-11-01",
+                    "to": "2026-11-23",
+                    "group": "day",
+                    "timezone": "Asia/Kolkata"
+                  },
+                  "totals": {
+                    "calls": 519,
+                    "connected": 519,
+                    "outbound": 517,
+                    "inbound": 2,
+                    "talk_seconds": 12893,
+                    "credits_deducted": 589,
+                    "calls_blocked": 0,
+                    "dials_blocked": 0,
+                    "times_disabled": 0,
+                    "times_enabled": 0
+                  },
+                  "periods": [
+                    {
+                      "period": "2026-11-07",
+                      "calls": 514,
+                      "connected": 514,
+                      "outbound": 513,
+                      "inbound": 1,
+                      "talk_seconds": 12700,
+                      "credits_deducted": 584,
+                      "calls_blocked": 0,
+                      "dials_blocked": 0,
+                      "times_disabled": 0,
+                      "times_enabled": 0
+                    }
+                  ],
+                  "note": "Only periods with activity are listed. ..."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter or range too long for the grouping"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          }
+        }
+      }
+    },
+    "/logs/dates": {
+      "get": {
+        "tags": [
+          "Logs"
+        ],
+        "summary": "Days with server logs",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "IST days whose server log can be read with `GET /logs/daily` (the server keeps a limited number of days).\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dates, newest first",
+            "content": {
+              "application/json": {
+                "example": {
+                  "timezone": "Asia/Kolkata",
+                  "dates": [
+                    "2026-11-24",
+                    "2026-11-23",
+                    "2026-11-22"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          }
+        }
+      }
+    },
+    "/logs/daily": {
+      "get": {
+        "tags": [
+          "Logs"
+        ],
+        "summary": "This customer's server log lines for one day, with frequency summary",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "The server log lines of one IST day (default today) that belong to this customer: lines carrying the customer id, or the stream / call / session id of one of the customer's calls that day (every message of those calls, e.g. raw Vodafone events, replies, timings). Secrets (API keys, tokens, auth headers, passwords) are shown as `[hidden]`.\n\n`summary` counts every matching line: per hour (IST), per level and the 30 most frequent messages. `logs` is one page of the lines (newest first by default). Filters: `level` (that level and above), `msg` (message contains), `q` (anywhere in the line), `hour` (0-23 IST).\n\nThe whole server log for every customer stays admin-only: `GET /admin/logs`.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "IST date, default today"
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ]
+            }
+          },
+          {
+            "name": "msg",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hour",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 23
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "newest",
+                "oldest"
+              ],
+              "default": "newest"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 200
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Log lines",
+            "content": {
+              "application/json": {
+                "example": {
+                  "date": "2026-11-23",
+                  "timezone": "Asia/Kolkata",
+                  "filters": {
+                    "level": null,
+                    "q": null,
+                    "msg": null,
+                    "hour": null,
+                    "order": "newest"
+                  },
+                  "total": 4,
+                  "limit": 200,
+                  "offset": 0,
+                  "truncated": false,
+                  "summary": {
+                    "by_hour_ist": [
+                      {
+                        "hour": 16,
+                        "lines": 2
+                      },
+                      {
+                        "hour": 21,
+                        "lines": 2
+                      }
+                    ],
+                    "by_level": {
+                      "info": 4
+                    },
+                    "top_messages": [
+                      {
+                        "msg": "http.in",
+                        "lines": 2
+                      },
+                      {
+                        "msg": "http.out",
+                        "lines": 2
+                      }
+                    ]
+                  },
+                  "logs": [
+                    {
+                      "time_ist": "2026-11-23 21:03:46",
+                      "level": "info",
+                      "msg": "http.out",
+                      "data": {
+                        "reqId": "req-48",
+                        "method": "GET",
+                        "url": "/customers/<uuid>/vodafone-settings",
+                        "statusCode": 200,
+                        "responseTimeMs": 2
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "404": {
+            "description": "No server log for that day"
           }
         }
       }

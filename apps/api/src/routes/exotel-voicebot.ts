@@ -138,6 +138,7 @@ import {
   redactOutboundExotelForLog,
 } from "../services/voicebot-trace";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
+import { recordCallingEvent } from "../services/calling-switch";
 import { effectiveKbNativeLanguages } from "../services/kb-native-languages";
 import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
 import { loadCallToolset, looksPersonalQuestion, type CallToolset } from "../services/crm-tools/toolset";
@@ -4427,6 +4428,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
       }
       if (!csConn || !csConn.voicebot_enabled) {
         log.warn({ customerId }, "voicebot disabled in customer_settings");
+        if (csConn) recordCallingEvent(customerId, "call_blocked", "exotel-voicebot", { stage: "connect" });
         socket.close(4403, "Voicebot disabled");
         return;
       }
@@ -4514,6 +4516,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
               }
               if (!csStart || !csStart.voicebot_enabled) {
                 log.warn({ customerId }, "voicebot start rejected: disabled");
+                if (csStart) recordCallingEvent(customerId, "call_blocked", "exotel-voicebot", { stage: "start" });
                 socket.close(4403, "Voicebot disabled");
                 break;
               }
