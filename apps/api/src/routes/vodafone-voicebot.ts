@@ -1604,6 +1604,33 @@ function clearSilenceTimer(streamId: string): void {
   }
 }
 
+/**
+ * Logs every non-audio message VI sends (connected, start, stop, dtmf, mark,
+ * anything unknown) exactly as received, for troubleshooting: the adapter
+ * keeps only the fields it uses, so without this a field VI adds is never
+ * seen. Audio (`media`) frames are skipped: they are many per second and
+ * carry only base64 audio. Turn off with VODAFONE_RAW_EVENT_LOG=false.
+ */
+const RAW_EVENT_LOG_ENABLED = String(process.env.VODAFONE_RAW_EVENT_LOG ?? "true").toLowerCase() !== "false";
+const RAW_EVENT_LOG_MAX_CHARS = 16_384;
+const MEDIA_EVENT_RE = /"event"\s*:\s*"media"/;
+
+export function isViMediaMessage(text: string): boolean {
+  // Media frames are the large ones; control messages are a few hundred bytes.
+  if (text.length > RAW_EVENT_LOG_MAX_CHARS) return true;
+  return MEDIA_EVENT_RE.test(text);
+}
+
+function logRawViMessage(app: FastifyInstance, urlCustomerId: string, streamId: string | null, text: string): void {
+  if (!RAW_EVENT_LOG_ENABLED) return;
+  try {
+    if (isViMediaMessage(text)) return;
+    app.log.info({ urlCustomerId, streamId, raw: text }, "vodafone-voicebot: raw VI message");
+  } catch {
+    // Logging must never affect the call.
+  }
+}
+
 export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { customerId: string } }>(
     "/telephony/vodafone/voicebot/:customerId",
@@ -1621,7 +1648,9 @@ export async function vodafoneVoicebotRoutes(app: FastifyInstance): Promise<void
 
       socket.on("message", (raw: Buffer) => {
         void (async () => {
-          const event = adapterForParsing.parseInboundMessage(raw.toString("utf8"));
+          const text = raw.toString("utf8");
+          logRawViMessage(app, customerId, streamId, text);
+          const event = adapterForParsing.parseInboundMessage(text);
           if (!event) return;
 
           switch (event.type) {
