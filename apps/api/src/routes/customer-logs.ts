@@ -149,7 +149,8 @@ export async function customerLogRoutes(app: FastifyInstance) {
         if (!time.startsWith(date)) continue;
         const levelNum = Number(line.level) || 30;
         if (levelNum < minLevel) continue;
-        const hour = Number(time.slice(11, 13));
+        // Older lines print midnight as "24:mm" (logger fixed since): that is hour 0.
+        const hour = Number(time.slice(11, 13)) % 24;
         if (f.hour !== undefined && hour !== f.hour) continue;
         const msg = String(line.msg ?? "");
         if (msgFilter && !msg.toLowerCase().includes(msgFilter)) continue;

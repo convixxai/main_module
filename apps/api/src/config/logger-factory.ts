@@ -12,7 +12,8 @@ const tzFormatter = new Intl.DateTimeFormat('en-CA', {
   hour: '2-digit',
   minute: '2-digit',
   second: '2-digit',
-  hour12: false,
+  // h23, not hour12:false: the latter prints midnight as "24:mm".
+  hourCycle: 'h23',
 });
 
 function getKolkataTime() {
