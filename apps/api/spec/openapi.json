@@ -12731,6 +12731,214 @@
           }
         }
       }
+    },
+    "/settings/kb-search": {
+      "get": {
+        "tags": [
+          "Settings"
+        ],
+        "summary": "KB search settings (native KB languages, search picks)",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "How the knowledge base (KB) is searched for this customer.\n\n- **`kb_native_languages`**: languages whose KB entries you store in the KB yourself (the same entries added again in Marathi, Hindi, ...). For a question in one of these languages the engine searches the KB with the caller's own words and skips the translate-to-English step, about 0.5–0.7 s faster per reply. Primary codes: `mr`, `hi` (`mr-IN` is accepted and stored as `mr`). Empty list = translate as before.\n- **Safety:** a language is only used when the KB really has entries in it (written in that language's script, or saved with that `source_language_code`). `kb_native_languages_in_use` shows which ones are active; `kb_entries_by_language` shows the counts. Setting a language before adding its entries changes nothing.\n- **`rag_top_k`**: how many KB entries each search passes to the model (1–10, default 3).\n- Only for customers with multilingual voice (`voicebot_multilingual`); changes apply to new replies within 1 minute.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer to read / change."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current settings",
+            "content": {
+              "application/json": {
+                "example": {
+                  "kb_native_languages": [
+                    "mr",
+                    "hi"
+                  ],
+                  "kb_native_languages_in_use": [
+                    "mr"
+                  ],
+                  "kb_entries_by_language": {
+                    "en": 63,
+                    "mr": 63,
+                    "hi": 0
+                  },
+                  "rag_top_k": 5,
+                  "voicebot_multilingual": true,
+                  "supported_languages": [
+                    "en",
+                    "hi",
+                    "mr",
+                    "ne",
+                    "bn",
+                    "as",
+                    "pa",
+                    "gu",
+                    "or",
+                    "ta",
+                    "te",
+                    "kn",
+                    "ml"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`x-admin-token` without a valid customer UUID"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Settings"
+        ],
+        "summary": "Change KB search settings",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "How the knowledge base (KB) is searched for this customer.\n\n- **`kb_native_languages`**: languages whose KB entries you store in the KB yourself (the same entries added again in Marathi, Hindi, ...). For a question in one of these languages the engine searches the KB with the caller's own words and skips the translate-to-English step, about 0.5–0.7 s faster per reply. Primary codes: `mr`, `hi` (`mr-IN` is accepted and stored as `mr`). Empty list = translate as before.\n- **Safety:** a language is only used when the KB really has entries in it (written in that language's script, or saved with that `source_language_code`). `kb_native_languages_in_use` shows which ones are active; `kb_entries_by_language` shows the counts. Setting a language before adding its entries changes nothing.\n- **`rag_top_k`**: how many KB entries each search passes to the model (1–10, default 3).\n- Only for customers with multilingual voice (`voicebot_multilingual`); changes apply to new replies within 1 minute.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).\n\nSend either field or both. The reply is the same as GET.",
+        "parameters": [
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer to read / change."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kb_native_languages": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 20,
+                    "description": "Languages the KB holds natively, e.g. [\"mr\",\"hi\"]. [] = off."
+                  },
+                  "rag_top_k": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "KB entries per search"
+                  }
+                }
+              },
+              "example": {
+                "kb_native_languages": [
+                  "mr",
+                  "hi"
+                ],
+                "rag_top_k": 5
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated settings",
+            "content": {
+              "application/json": {
+                "example": {
+                  "kb_native_languages": [
+                    "mr",
+                    "hi"
+                  ],
+                  "kb_native_languages_in_use": [
+                    "mr"
+                  ],
+                  "kb_entries_by_language": {
+                    "en": 63,
+                    "mr": 63,
+                    "hi": 0
+                  },
+                  "rag_top_k": 5,
+                  "voicebot_multilingual": true,
+                  "supported_languages": [
+                    "en",
+                    "hi",
+                    "mr",
+                    "ne",
+                    "bn",
+                    "as",
+                    "pa",
+                    "gu",
+                    "or",
+                    "ta",
+                    "te",
+                    "kn",
+                    "ml"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unsupported language code, rag_top_k out of range, unknown field, or nothing to change"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      }
     }
   }
 }

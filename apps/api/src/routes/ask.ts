@@ -50,6 +50,7 @@ import {
 } from "../services/elevenlabs";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
+import { effectiveKbNativeLanguages } from "../services/kb-native-languages";
 
 const askSchema = z.object({
   question: z.string().min(1),
@@ -630,11 +631,17 @@ export async function runAskPipeline(params: {
   let resolveAgentMs = 0;
   const [embedBundle, agent] = await Promise.all([
     (async () => {
+      // Languages the KB holds natively (empty unless the tenant set the flag
+      // AND the KB has entries in that language): no translate-for-search.
+      const nativeKbLanguages = multilingual
+        ? await effectiveKbNativeLanguages(customerId, custSettings?.kb_native_languages)
+        : [];
       const { textForEmbedding, translatedForSearch } =
         await prepareQuestionForKbEmbedding(question, {
           multilingual,
           languageTag: embeddingLanguageHint ?? null,
           trace,
+          nativeKbLanguages,
         });
       const embedding = await generateEmbedding(textForEmbedding, trace);
       return { textForEmbedding, translatedForSearch, embedding };

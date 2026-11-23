@@ -138,6 +138,7 @@ import {
   redactOutboundExotelForLog,
 } from "../services/voicebot-trace";
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
+import { effectiveKbNativeLanguages } from "../services/kb-native-languages";
 import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers";
 import { loadCallToolset, looksPersonalQuestion, type CallToolset } from "../services/crm-tools/toolset";
 import { holdMessageFor } from "../services/crm-tools/hold-messages";
@@ -3703,11 +3704,21 @@ async function runVoicebotAskPipeline(
         exotel_call_session_id: session.callSessionDbId,
         question_len: question.length,
       });
+      // Languages the KB holds natively (customer_settings.kb_native_languages,
+      // only those with real KB entries): no translate-for-search for them.
+      const nativeKbLanguages =
+        session.voicebotMultilingualEffective === true
+          ? await effectiveKbNativeLanguages(
+              session.customerId,
+              (await getCustomerSettings(session.customerId).catch(() => null))?.kb_native_languages
+            )
+          : [];
       const { textForEmbedding, translatedForSearch } =
         await prepareQuestionForKbEmbedding(question, {
           multilingual: session.voicebotMultilingualEffective === true,
           languageTag: session.effectiveSttLanguageThisTurn,
           trace: ragTrace,
+          nativeKbLanguages,
           // Enable Sarvam translation for Hindi/Marathi queries to match English KB content
           // This adds ~150ms latency but significantly improves cross-lingual KB search accuracy
           voicePreferNativeEmbeddingForIndic: false,

@@ -131,6 +131,9 @@ function openAiGenerationParams(
     max_tokens: maxTokens,
     temperature,
     ...(top_p != null && top_p !== 1 ? { top_p } : {}),
+    // Priority processing also applies to gpt-4.1 (2026-11-23, UCB prompt,
+    // gpt-4.1-mini median first token 582ms default -> 554ms priority).
+    ...(/^gpt-4\.1/i.test(model) && env.openai.serviceTier ? { service_tier: env.openai.serviceTier } : {}),
   };
 }
 
@@ -465,6 +468,13 @@ export async function prepareQuestionForKbEmbedding(
      * and steer RAG to unrelated KB rows. Nomic cross-lingual match on the raw transcript is safer.
      */
     voicePreferNativeEmbeddingForIndic?: boolean;
+    /**
+     * Languages whose KB entries the tenant stores natively in kb_entries
+     * (customer_settings.kb_native_languages, already checked by the caller
+     * against the KB's actual rows). A question in one of these languages is
+     * embedded as-is: no translate-for-search call (saves ~0.5 s per turn).
+     */
+    nativeKbLanguages?: string[] | null;
   }
 ): Promise<{ textForEmbedding: string; translatedForSearch: boolean }> {
   const q = question.trim();
@@ -480,6 +490,18 @@ export async function prepareQuestionForKbEmbedding(
 
   if (isEnglishLanguageTag(effectiveTag)) {
     return { textForEmbedding: q, translatedForSearch: false };
+  }
+
+  if (effectiveTag && opts.nativeKbLanguages && opts.nativeKbLanguages.length > 0) {
+    const primary = String(effectiveTag).trim().toLowerCase().split(/[-_]/)[0];
+    if (opts.nativeKbLanguages.some((l) => String(l).trim().toLowerCase().split(/[-_]/)[0] === primary)) {
+      opts.trace?.("kb_search_translate_skipped", {
+        reason: "native_kb_language",
+        language: effectiveTag,
+        question_preview: q.slice(0, 500),
+      });
+      return { textForEmbedding: q, translatedForSearch: false };
+    }
   }
 
   if (opts.voicePreferNativeEmbeddingForIndic && effectiveTag) {

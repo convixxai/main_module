@@ -1,7 +1,14 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
-import { apiKeyAuth, adminAuth, AuthenticatedRequest } from "../middleware/auth";
+import { apiKeyAuth, adminAuth, apiKeyOrAdminAuth, AuthenticatedRequest } from "../middleware/auth";
+import {
+  KB_NATIVE_LANGUAGE_CODES,
+  normaliseKbNativeLanguages,
+  kbEntryCountsByLanguage,
+  effectiveKbNativeLanguages,
+  invalidateKbNativeLanguagesCache,
+} from "../services/kb-native-languages";
 import {
   getCustomerSettings,
   updateCustomerSettings,
@@ -52,6 +59,7 @@ const settingsPatchSchema = z
     // D. RAG / LLM
     rag_use_openai_only: z.boolean(),
     rag_top_k: z.number().int().positive(),
+    kb_native_languages: z.array(z.string().min(2).max(10)).max(20),
     rag_use_history: z.boolean(),
     rag_history_max_turns: z.number().int().positive().nullable(),
     rag_distance_threshold: z.number().min(0).max(2).nullable(),
@@ -152,6 +160,21 @@ const settingsPatchSchema = z
       }
     }
   });
+
+/** PUT /settings/kb-search. Search picks capped at 10 to keep the prompt (and its latency) bounded. */
+const kbSearchPatchSchema = z
+  .object({
+    kb_native_languages: z.array(z.string().min(2).max(10)).max(20),
+    rag_top_k: z.number().int().min(1).max(10),
+  })
+  .partial()
+  .strict();
+
+/** Same clamp the ask pipeline applies (ask.ts ragTopKAsk). */
+function ragTopKOf(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(20, Math.max(1, Math.floor(n))) : 3;
+}
 
 const patchRagSchema = z.object({
   rag_use_openai_only: z.boolean(),
@@ -311,6 +334,58 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       return { rag_use_openai_only: result.settings.rag_use_openai_only };
     }
   );
+
+  // ============================================================
+  // KB search settings (x-api-key, or x-admin-token + x-customer-id):
+  // which languages the KB is stored in natively, and how many KB entries
+  // each search picks.
+  // ============================================================
+
+  const kbSearchView = async (customerId: string) => {
+    const s = await getCustomerSettings(customerId);
+    if (!s) return null;
+    const configured = normaliseKbNativeLanguages(s.kb_native_languages);
+    const counts = await kbEntryCountsByLanguage(customerId, ["en", ...configured]);
+    const inUse = await effectiveKbNativeLanguages(customerId, configured);
+    return {
+      kb_native_languages: configured,
+      kb_native_languages_in_use: inUse,
+      kb_entries_by_language: counts,
+      rag_top_k: ragTopKOf(s.rag_top_k),
+      voicebot_multilingual: s.voicebot_multilingual === true,
+      supported_languages: KB_NATIVE_LANGUAGE_CODES,
+    };
+  };
+
+  app.get("/settings/kb-search", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
+    const view = await kbSearchView(request.customerId!);
+    if (!view) return reply.status(404).send({ error: "Customer not found" });
+    return view;
+  });
+
+  app.put("/settings/kb-search", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
+    const body = kbSearchPatchSchema.safeParse(request.body ?? {});
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() });
+    const patch: Record<string, unknown> = {};
+    if (body.data.kb_native_languages !== undefined) {
+      const bad = body.data.kb_native_languages.filter(
+        (c) => !KB_NATIVE_LANGUAGE_CODES.includes(c.trim().toLowerCase().split(/[-_]/)[0])
+      );
+      if (bad.length > 0) {
+        return reply.status(400).send({ error: `Unsupported language code(s): ${bad.join(", ")}`, supported_languages: KB_NATIVE_LANGUAGE_CODES });
+      }
+      patch.kb_native_languages = normaliseKbNativeLanguages(body.data.kb_native_languages);
+    }
+    if (body.data.rag_top_k !== undefined) patch.rag_top_k = body.data.rag_top_k;
+    if (Object.keys(patch).length === 0) {
+      return reply.status(400).send({ error: "Send kb_native_languages and/or rag_top_k" });
+    }
+    const customerId = request.customerId!;
+    const result = await updateCustomerSettings(customerId, patch, { enforceTenantScope: false });
+    if (!result.settings) return reply.status(404).send({ error: "Customer not found" });
+    invalidateKbNativeLanguagesCache(customerId);
+    return kbSearchView(customerId);
+  });
 
   // ============================================================
   // Admin endpoints — x-admin-token, can edit any field

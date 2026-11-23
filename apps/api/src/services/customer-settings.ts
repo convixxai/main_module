@@ -59,6 +59,8 @@ export interface CustomerSettings {
   tool_calling_prompt?: string | null;
   rag_use_openai_only: boolean;
   rag_top_k: number;
+  /** Languages whose KB is stored natively in kb_entries: no translate-for-search for them (migration 025). */
+  kb_native_languages: string[];
   rag_use_history: boolean;
   rag_history_max_turns: number | null;
   rag_distance_threshold: number | null;
@@ -224,6 +226,7 @@ export const ALL_SETTINGS_FIELDS: ReadonlyArray<keyof CustomerSettingsPatch> = [
   // D
   "rag_use_openai_only",
   "rag_top_k",
+  "kb_native_languages",
   "rag_use_history",
   "rag_history_max_turns",
   "rag_distance_threshold",
@@ -416,6 +419,9 @@ function normalize(row: Record<string, unknown>): CustomerSettings {
   out["filler_ack_threshold"] = Number.isFinite(tn)
     ? Math.min(10, Math.max(1, Math.round(tn)))
     : 2;
+
+  // Column added by migration 025; before it runs the row has no such key.
+  out["kb_native_languages"] = Array.isArray(row["kb_native_languages"]) ? row["kb_native_languages"] : [];
 
   if (out["tts_humanizer_enabled"] === undefined) {
     out["tts_humanizer_enabled"] = false;
