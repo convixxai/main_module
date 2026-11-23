@@ -110,7 +110,7 @@
     },
     {
       "name": "Vodafone Reports (VI)",
-      "description": "Vodafone only, read only. Nothing here dials or changes a campaign. Exotel and /outbound/campaigns are not affected.\n\n**Two sources:**\n- **Convixx call log** (`/vodafone/reports/history`, `/history/{id}`, `/summary`, `/vodafone/campaigns/{id}/calls`): one row per Vodafone call that reached the bot. It holds time (UTC and IST), customer number, direction, duration, outcome, campaign, agent, language and transcript. These are the same rows the SaaS Calls page and dashboards read (`exotel_call_sessions`, `metadata.provider = 'vodafone'`). Use these for the SaaS reports.\n- **VI's own data** (`/vodafone/campaigns/{id}/status`, `/report`, `/summary`, `/vodafone/reports/calls`): VI campaignstatus and the Pull Report API. VI's rows are passed through as VI sends them (fields not documented by VI); add `raw=1` to see the reply.\n\nTimes: `started_at` / `ended_at` are ISO UTC (`Z`), and `*_ist` is the same instant as `DD/MM/YYYY HH:mm:ss` India time. Date filters (`from`, `to`) are IST calendar dates. Outcome is `live` (in progress), `connected` (answered, or lasted 10 s or more) or `missed`, the same rule as the SaaS dashboard."
+      "description": "Vodafone only, read only. Nothing here dials or changes a campaign. Exotel and /outbound/campaigns are not affected.\n\n**Two sources:**\n- **Convixx call log** (`/vodafone/reports/history`, `/history/{id}`, `/summary`, `/vodafone/campaigns/{id}/calls`): one row per Vodafone call that reached the bot. It holds time (UTC and IST), customer number, direction, duration, outcome, campaign, agent, language and transcript. These are the same rows the SaaS Calls page and dashboards read (`exotel_call_sessions`, `metadata.provider = 'vodafone'`). Use these for the SaaS reports.\n- **VI's own data** (`/vodafone/campaigns/{id}/status`, `/report`, `/summary`, `/vodafone/reports/calls`): VI campaignstatus and the Pull Report API. VI's rows are passed through as VI sends them (fields not documented by VI); add `raw=1` to see the reply.\n\nTimes: `started_at` / `ended_at` are ISO UTC (`Z`), and `*_ist` is the same instant as `DD/MM/YYYY HH:mm:ss` India time. Date filters (`from`, `to`) are IST calendar dates. Outcome is `live` (in progress), `connected` (answered, or lasted 10 s or more) or `missed`, the same rule as the SaaS dashboard.\n\n**Auth:** every report endpoint accepts the customer's `x-api-key`, or the admin `x-admin-token` together with `x-customer-id` (header) or `customer_id` (query). No other access."
     }
   ],
   "components": {
@@ -11482,9 +11482,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "VI `campaignstatus` for this campaign (asked by VI's numeric campaign ID), flattened into simple fields, plus the engine's own lead counts. Cheap enough to poll every 1-2 minutes. If VI is unreachable the call still returns 200 with `vi_status_error` set and the VI fields null.",
+        "description": "VI `campaignstatus` for this campaign (asked by VI's numeric campaign ID), flattened into simple fields, plus the engine's own lead counts. Cheap enough to poll every 1-2 minutes. If VI is unreachable the call still returns 200 with `vi_status_error` set and the VI fields null.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "id",
@@ -11495,6 +11498,26 @@
               "format": "uuid"
             },
             "description": "Engine campaign id (from POST /vodafone/campaigns)"
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -11550,7 +11573,7 @@
             "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
           },
           "404": {
             "description": "No Vodafone campaign with that id for this customer"
@@ -11570,9 +11593,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "VI Pull Report, outbound (calltype 2) for this campaign: one row per call VI placed in the period. Default period: the campaign's creation date to today (IST).",
+        "description": "VI Pull Report, outbound (calltype 2) for this campaign: one row per call VI placed in the period. Default period: the campaign's creation date to today (IST).\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "id",
@@ -11625,6 +11651,26 @@
               ]
             },
             "description": "1 = also return VI's reply as received (`raw`)."
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -11667,7 +11713,7 @@
             "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
           },
           "404": {
             "description": "No Vodafone campaign with that id for this customer"
@@ -11687,9 +11733,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "VI Pull Report, outbound summary (calltype 4) for this campaign: VI's totals for the whole campaign (no date range).",
+        "description": "VI Pull Report, outbound summary (calltype 4) for this campaign: VI's totals for the whole campaign (no date range).\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "id",
@@ -11722,6 +11771,26 @@
               ]
             },
             "description": "1 = also return VI's reply as received (`raw`)."
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -11757,7 +11826,7 @@
             "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
           },
           "404": {
             "description": "No Vodafone campaign with that id for this customer"
@@ -11777,9 +11846,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "VI Pull Report for a date range on one calling number (DNI). `type=inbound` (calltype 1), `type=outbound` (calltype 2, needs `campaign_id`: VI reports outbound calls per campaign), `type=click_to_call` (calltype 3). Add `call_id` (the VI call id, also in the engine logs) for a single call.",
+        "description": "VI Pull Report for a date range on one calling number (DNI). `type=inbound` (calltype 1), `type=outbound` (calltype 2, needs `campaign_id`: VI reports outbound calls per campaign), `type=click_to_call` (calltype 3). Add `call_id` (the VI call id, also in the engine logs) for a single call.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "type",
@@ -11853,6 +11925,26 @@
               ]
             },
             "description": "1 = also return VI's reply as received (`raw`)."
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -11882,7 +11974,7 @@
             "description": "Not on Vodafone, bad dates/range, missing campaign_id, or campaign not created on VI yet"
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
           },
           "404": {
             "description": "No Vodafone campaign with that id for this customer"
@@ -11902,9 +11994,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "Every Vodafone call of this customer that reached the bot, newest first: campaign (outbound) and inbound calls. Paginate with `limit` / `offset`; `total` is the count for the filters.",
+        "description": "Every Vodafone call of this customer that reached the bot, newest first: campaign (outbound) and inbound calls. Paginate with `limit` / `offset`; `total` is the count for the filters.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "from",
@@ -11969,7 +12064,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Customer number, any format (matched on the last 10 digits)"
+            "description": "Customer number, any format (matched on the last 10 digits of the customer's side of the call; our own number never matches)"
           },
           {
             "name": "limit",
@@ -11991,6 +12086,26 @@
               "minimum": 0,
               "default": 0
             }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -12044,7 +12159,10 @@
             "description": "Bad filter (e.g. `to` before `from`)"
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
+          },
+          "404": {
+            "description": "Not found (with `x-admin-token`: also when the customer does not exist)"
           }
         }
       }
@@ -12058,9 +12176,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "The call (same fields as in the history) plus the full transcript in order. `role` is `bot` or `customer`. A campaign call starts with the campaign script line.",
+        "description": "The call (same fields as in the history) plus the full transcript in order. `role` is `bot` or `customer`. A campaign call starts with the campaign script line.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "id",
@@ -12071,6 +12192,26 @@
               "format": "uuid"
             },
             "description": "`id` from the history"
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -12120,10 +12261,13 @@
             }
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
           },
           "404": {
             "description": "No such call for this customer"
+          },
+          "400": {
+            "description": "Bad filter, or `x-admin-token` sent without a valid customer UUID"
           }
         }
       }
@@ -12137,9 +12281,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "Totals for the period and filters: number of calls, connected / missed / live, outbound / inbound, total talk time and average connected call length, then the same per day (IST), per hour of day (IST) and per campaign.",
+        "description": "Totals for the period and filters: number of calls, connected / missed / live, outbound / inbound, total talk time and average connected call length, then the same per day (IST), per hour of day (IST) and per campaign.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "from",
@@ -12205,6 +12352,26 @@
               "type": "string"
             },
             "description": "Customer number, any format (matched on the last 10 digits)"
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -12263,7 +12430,10 @@
             "description": "Bad filter (e.g. `to` before `from`)"
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
+          },
+          "404": {
+            "description": "Not found (with `x-admin-token`: also when the customer does not exist)"
           }
         }
       }
@@ -12277,9 +12447,12 @@
         "security": [
           {
             "ApiKey": []
+          },
+          {
+            "AdminToken": []
           }
         ],
-        "description": "For one campaign: every number with its status (`pending` / `calling` / `completed` / `failed`), attempts, last attempt time and the call it got (`call_id`, open it with /vodafone/reports/history/{id}), plus the calls themselves (latest 500).",
+        "description": "For one campaign: every number with its status (`pending` / `calling` / `completed` / `failed`), attempts, last attempt time and the call it got (`call_id`, open it with /vodafone/reports/history/{id}), plus the calls themselves (latest 500).\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
         "parameters": [
           {
             "name": "id",
@@ -12289,6 +12462,26 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
           }
         ],
         "responses": {
@@ -12351,10 +12544,190 @@
             }
           },
           "401": {
-            "description": "Missing or invalid x-api-key"
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
           },
           "404": {
             "description": "No Vodafone campaign with that id for this customer"
+          },
+          "400": {
+            "description": "Bad filter, or `x-admin-token` sent without a valid customer UUID"
+          }
+        }
+      }
+    },
+    "/vodafone/reports/numbers/{number}": {
+      "get": {
+        "tags": [
+          "Vodafone Reports (VI)"
+        ],
+        "summary": "All calls of one customer number, with transcripts",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "For one customer number: how many calls it had (total, connected, talk time, first and last call in UTC and IST), then each call newest first with its transcript. The number may be in any format (`9876500001`, `+919876500001`, `91 98765 00001`); it is matched on the last 10 digits of the **customer's** side of the call (outbound: number dialled, inbound: caller).\n\nA transcript belongs to its call (one chat session per call), so two calls of the same number never mix. Use `transcripts=0` for the call list only. Calls where Vodafone did not send the customer's number cannot be found by number.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.",
+        "parameters": [
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer number, at least 10 digits"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "First day, YYYY-MM-DD (IST)"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Last day, YYYY-MM-DD (IST), inclusive"
+          },
+          {
+            "name": "transcripts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "0"
+              ],
+              "default": "1"
+            },
+            "description": "0 = leave out transcripts"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer whose report to read."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id` (either one)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The number's totals and calls",
+            "content": {
+              "application/json": {
+                "example": {
+                  "number": "9876500001",
+                  "filters": {
+                    "from": null,
+                    "to": null
+                  },
+                  "totals": {
+                    "calls": 2,
+                    "connected": 2,
+                    "talk_seconds": 80,
+                    "first_call_at": "2026-11-09T09:54:17.000Z",
+                    "first_call_at_ist": "09/11/2026 15:24:17",
+                    "last_call_at": "2026-11-10T06:10:00.000Z",
+                    "last_call_at_ist": "10/11/2026 11:40:00"
+                  },
+                  "limit": 50,
+                  "offset": 0,
+                  "calls": [
+                    {
+                      "id": "695eb6dc-6115-4c15-a527-b0d681f68e04",
+                      "direction": "outbound",
+                      "customer_number": "919876500001",
+                      "our_number": "+919112002517",
+                      "started_at": "2026-11-09T09:54:17.000Z",
+                      "started_at_ist": "09/11/2026 15:24:17",
+                      "ended_at": "2026-11-09T09:55:02.000Z",
+                      "ended_at_ist": "09/11/2026 15:25:02",
+                      "duration_seconds": 45,
+                      "outcome": "connected",
+                      "status": "stopped:hangup",
+                      "campaign": {
+                        "id": "<campaign uuid>",
+                        "name": "Main campaign diwali"
+                      },
+                      "agent": {
+                        "id": "<agent uuid>",
+                        "name": "Benetton Diwali Outbound"
+                      },
+                      "language_code": "mr-IN",
+                      "vi_call_id": "48381932",
+                      "chat_session_id": "<uuid>",
+                      "transcript": [
+                        {
+                          "role": "bot",
+                          "text": "नमस्कार, शुभ दिवाळी! ...",
+                          "at": "2026-11-09T09:54:17.300Z"
+                        },
+                        {
+                          "role": "customer",
+                          "text": "हो, सांगा.",
+                          "at": "2026-11-09T09:54:29.900Z"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Number has fewer than 10 digits, bad filter, or `x-admin-token` without a valid customer UUID"
+          },
+          "401": {
+            "description": "No valid `x-api-key`, and no valid `x-admin-token`"
+          },
+          "404": {
+            "description": "With `x-admin-token`: the customer does not exist"
           }
         }
       }

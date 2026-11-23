@@ -20,6 +20,16 @@ The engine never falls back to Exotel and never renders an audio file.
 
 All endpoints use header `x-api-key`. Only Vodafone campaigns and calls are returned.
 
+**Report endpoints only** (status, `/calls`, `/report`, `/summary`, everything under `/vodafone/reports/`) accept one of two credentials, and nothing else:
+
+- `x-api-key: <company production key>`: reads that company's data.
+- `x-admin-token: <ADMIN_TOKEN>` plus the customer to read, as header `x-customer-id: <customer uuid>` or query `?customer_id=<uuid>`.
+  - Without a customer id: `400`.
+  - Unknown customer: `404`.
+  - Wrong token: `401`.
+
+If both credentials are sent, the engine uses `x-api-key` and ignores the admin token.
+
 | Need | Method + endpoint |
 |---|---|
 | Launch a campaign (create, upload numbers, start) | `POST /vodafone/campaigns` |
@@ -30,6 +40,7 @@ All endpoints use header `x-api-key`. Only Vodafone campaigns and calls are retu
 | **Campaign numbers + their calls** (Convixx) | `GET /vodafone/campaigns/{id}/calls` |
 | **Call history** (Convixx): time, number, campaign, duration, outcome | `GET /vodafone/reports/history` |
 | **One call + transcript** (Convixx) | `GET /vodafone/reports/history/{id}` |
+| **One number: call count + every call with its transcript** (Convixx) | `GET /vodafone/reports/numbers/{number}` |
 | **Totals**: per day, hour, campaign (Convixx) | `GET /vodafone/reports/summary` |
 | VI's own call records / summary | `GET /vodafone/campaigns/{id}/report`, `GET /vodafone/campaigns/{id}/summary`, `GET /vodafone/reports/calls` |
 
@@ -171,6 +182,7 @@ Every Vodafone call that reaches the bot gets one row in the engine's call log (
 |---|---|---|
 | GET | `/vodafone/reports/history` | Calls, newest first. Filters: `from`, `to` (IST dates), `direction` (`outbound` = campaign, `inbound`), `campaign_id`, `outcome` (`connected` / `missed` / `live`), `number`, `limit` (max 500), `offset` |
 | GET | `/vodafone/reports/history/{id}` | One call and its transcript (`role`: `bot` / `customer`) |
+| GET | `/vodafone/reports/numbers/{number}` | One customer number: `totals` (calls, connected, talk_seconds, first and last call in UTC and IST), then its calls, newest first, each with `transcript`. Filters: `from`, `to` (IST dates), `transcripts=0` (list only), `limit` (max 100, default 50), `offset` |
 | GET | `/vodafone/reports/summary` | `totals` (calls, connected, missed, live, outbound, inbound, talk_seconds, avg_connected_seconds), `by_day`, `by_hour_ist`, `by_campaign`. Same filters as history |
 | GET | `/vodafone/campaigns/{id}/calls` | The campaign's numbers (status, attempts, last attempt, `call_id`) and its calls |
 

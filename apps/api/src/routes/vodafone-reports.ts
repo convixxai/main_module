@@ -21,7 +21,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
-import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
+import { apiKeyOrAdminAuth, AuthenticatedRequest } from "../middleware/auth";
 import { getTelephonySettings } from "../services/telephony-settings";
 import { getObdCampaignStatus, pullViCallReport, VodafoneObdError, type PullReportCallType } from "../services/vodafone-obd";
 import { loadVodafoneCampaign, leadCounts, statusIdOf, pickDni, publicCampaign, viErrorReply } from "./vodafone-campaigns";
@@ -97,7 +97,7 @@ function num(v: unknown): number {
 
 export async function vodafoneReportRoutes(app: FastifyInstance) {
   // Live status of one campaign (VI campaignstatus) + our own lead counts.
-  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/status", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/status", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const { id } = request.params as { id: string };
     const customerId = request.customerId!;
     const campaign = await loadVodafoneCampaign(customerId, id);
@@ -133,7 +133,7 @@ export async function vodafoneReportRoutes(app: FastifyInstance) {
   });
 
   // One campaign's call records from VI (Pull Report, outbound).
-  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/report", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/report", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const { id } = request.params as { id: string };
     const customerId = request.customerId!;
     const q = rangeQuery.extend({ dni: z.string().optional() }).safeParse(request.query ?? {});
@@ -169,7 +169,7 @@ export async function vodafoneReportRoutes(app: FastifyInstance) {
   });
 
   // One campaign's summary from VI (Pull Report, outbound summary).
-  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/summary", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/summary", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const { id } = request.params as { id: string };
     const customerId = request.customerId!;
     const q = z.object({ dni: z.string().optional(), raw: z.enum(["0", "1", "true", "false"]).optional() }).safeParse(request.query ?? {});
@@ -195,7 +195,7 @@ export async function vodafoneReportRoutes(app: FastifyInstance) {
   });
 
   // Call history from VI for a date range: inbound, outbound (one campaign) or click-to-call.
-  app.get("/vodafone/reports/calls", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get("/vodafone/reports/calls", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const customerId = request.customerId!;
     const q = rangeQuery
       .extend({
@@ -296,7 +296,9 @@ function callRowsSql(f: z.infer<typeof historyQuery>, params: unknown[]): string
   if (f.campaign_id) where.push(`l.campaign_id = ${add(f.campaign_id)}`);
   if (f.number) {
     const d = digitsOnly(f.number).slice(-10);
-    if (d) where.push(`(s.from_number LIKE ${add(`%${d}`)} OR s.to_number LIKE $${params.length})`);
+    // The customer's side only (outbound: to_number, inbound: from_number), so
+    // our own DNI never matches every call.
+    if (d) where.push(`(CASE WHEN s.direction = 'outbound' THEN s.to_number ELSE s.from_number END) LIKE ${add(`%${d}`)}`);
   }
   if (f.outcome) where.push(`${OUTCOME_SQL} = ${add(f.outcome)}`);
   return `FROM exotel_call_sessions s
@@ -360,9 +362,42 @@ function presentCall(r: Record<string, any>) {
   };
 }
 
+const numberQuery = z.object({
+  from: z.string().regex(DATE_RE).optional(),
+  to: z.string().regex(DATE_RE).optional(),
+  transcripts: z.enum(["0", "1", "true", "false"]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+});
+
+type TranscriptLine = { role: string; text: string; at: string | null };
+
+/** Transcripts of several calls, keyed by chat session id (one call = one session). */
+async function transcriptsFor(sessionIds: string[]): Promise<Map<string, TranscriptLine[]>> {
+  const out = new Map<string, TranscriptLine[]>();
+  if (sessionIds.length === 0) return out;
+  const m = await pool.query(
+    `SELECT session_id, role, content, created_at FROM chat_messages
+      WHERE session_id = ANY($1::uuid[]) ORDER BY session_id, created_at ASC, id ASC`,
+    [sessionIds]
+  );
+  for (const x of m.rows) {
+    let text = "";
+    try {
+      text = decrypt(x.content);
+    } catch {
+      text = "";
+    }
+    const list = out.get(x.session_id) ?? [];
+    list.push({ role: x.role === "assistant" ? "bot" : x.role === "user" ? "customer" : x.role, text, at: utcIso(x.created_at) });
+    out.set(x.session_id, list);
+  }
+  return out;
+}
+
 export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
   // Convixx call history for Vodafone calls (newest first).
-  app.get("/vodafone/reports/history", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get("/vodafone/reports/history", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const q = historyQuery.safeParse(request.query ?? {});
     if (!q.success) return reply.status(400).send({ error: q.error.flatten() });
     const f = q.data;
@@ -383,7 +418,7 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
   });
 
   // One Vodafone call with its transcript.
-  app.get<{ Params: { id: string } }>("/vodafone/reports/history/:id", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get<{ Params: { id: string } }>("/vodafone/reports/history/:id", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const { id } = request.params as { id: string };
     if (!z.string().uuid().safeParse(id).success) return reply.status(404).send({ error: "Call not found" });
     const params: unknown[] = [request.customerId];
@@ -392,27 +427,59 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
     const r = await pool.query(`SELECT ${CALL_COLUMNS} ${from} AND s.id = $${params.length}`, params);
     const row = r.rows[0];
     if (!row) return reply.status(404).send({ error: "Call not found" });
-    let transcript: { role: string; text: string; at: string | null }[] = [];
-    if (row.chat_session_id) {
-      const m = await pool.query(
-        `SELECT role, content, created_at FROM chat_messages WHERE session_id = $1 ORDER BY created_at ASC, id ASC`,
-        [row.chat_session_id]
-      );
-      transcript = m.rows.map((x) => {
-        let text = "";
-        try {
-          text = decrypt(x.content);
-        } catch {
-          text = "";
-        }
-        return { role: x.role === "assistant" ? "bot" : x.role === "user" ? "customer" : x.role, text, at: utcIso(x.created_at) };
-      });
-    }
+    const transcript = row.chat_session_id ? (await transcriptsFor([row.chat_session_id])).get(row.chat_session_id) ?? [] : [];
     return reply.send({ call: presentCall(row), transcript });
   });
 
+  // Everything for one customer number: call count, first/last call, and each
+  // call (newest first) with its transcript. Matched on the last 10 digits of
+  // the customer's side of the call.
+  app.get<{ Params: { number: string } }>("/vodafone/reports/numbers/:number", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
+    const { number } = request.params as { number: string };
+    const digits = digitsOnly(number).slice(-10);
+    if (digits.length !== 10) return reply.status(400).send({ error: "number must contain at least 10 digits" });
+    const q = numberQuery.safeParse(request.query ?? {});
+    if (!q.success) return reply.status(400).send({ error: q.error.flatten() });
+    const f = q.data;
+    if (f.from && f.to && f.to < f.from) return reply.status(400).send({ error: "`to` is before `from`" });
+    const params: unknown[] = [request.customerId];
+    const from = callRowsSql({ from: f.from, to: f.to, number: digits, limit: f.limit, offset: f.offset }, params);
+    const [rows, totals] = await Promise.all([
+      pool.query(`SELECT ${CALL_COLUMNS} ${from} ORDER BY s.started_at DESC LIMIT ${f.limit} OFFSET ${f.offset}`, params),
+      pool.query(
+        `SELECT COUNT(*)::int AS calls,
+                COUNT(*) FILTER (WHERE ${OUTCOME_SQL} = 'connected')::int AS connected,
+                COALESCE(SUM(${DURATION_SQL}), 0)::int AS talk_seconds,
+                MIN(s.started_at) AS first_call, MAX(s.started_at) AS last_call
+           ${from}`,
+        params
+      ),
+    ]);
+    const withTranscript = f.transcripts !== "0" && f.transcripts !== "false";
+    const sessions = rows.rows.map((r) => r.chat_session_id).filter(Boolean) as string[];
+    const tx = withTranscript ? await transcriptsFor(sessions) : new Map();
+    const t = totals.rows[0];
+    const first = utcIso(t.first_call);
+    const last = utcIso(t.last_call);
+    return reply.send({
+      number: digits,
+      filters: { from: f.from ?? null, to: f.to ?? null },
+      totals: {
+        calls: t.calls, connected: t.connected, talk_seconds: t.talk_seconds,
+        first_call_at: first, first_call_at_ist: istText(first),
+        last_call_at: last, last_call_at_ist: istText(last),
+      },
+      limit: f.limit,
+      offset: f.offset,
+      calls: rows.rows.map((r) => ({
+        ...presentCall(r),
+        ...(withTranscript ? { transcript: r.chat_session_id ? tx.get(r.chat_session_id) ?? [] : [] } : {}),
+      })),
+    });
+  });
+
   // Totals for a period: calls, connected, missed, talk time, by day / hour (IST) / campaign.
-  app.get("/vodafone/reports/summary", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get("/vodafone/reports/summary", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const q = historyQuery.safeParse(request.query ?? {});
     if (!q.success) return reply.status(400).send({ error: q.error.flatten() });
     const f = q.data;
@@ -453,7 +520,7 @@ export async function vodafoneOwnReportRoutes(app: FastifyInstance) {
   });
 
   // One campaign: its numbers (status, attempts, last attempt) and the calls made.
-  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/calls", { preHandler: apiKeyAuth }, async (request: AuthenticatedRequest, reply) => {
+  app.get<{ Params: { id: string } }>("/vodafone/campaigns/:id/calls", { preHandler: apiKeyOrAdminAuth }, async (request: AuthenticatedRequest, reply) => {
     const { id } = request.params as { id: string };
     const customerId = request.customerId!;
     const campaign = await loadVodafoneCampaign(customerId, id);
