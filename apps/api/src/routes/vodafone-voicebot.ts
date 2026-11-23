@@ -45,7 +45,6 @@ import { resolveDefaultAgentForNumber } from "../services/company-phone-numbers"
 import { getCustomerSettings, type CustomerSettings } from "../services/customer-settings";
 import { runAskPipeline } from "./ask";
 import { runSimulatorStt } from "./voice-simulator";
-import { logSuggestedKbEntryIfNoAnswer } from "../services/suggested-kb";
 import { createRagTrace } from "../services/rag-trace";
 import { synthesizeSpeechToPcm8k, type VodafoneTtsConfig } from "../services/vodafone-tts";
 import { parseCartesiaGenerationConfig } from "../services/cartesia";
@@ -1294,6 +1293,8 @@ async function answerUtteranceBatch(
   const systemPrompt = session.voiceRagCustomerCache?.systemPrompt ?? "You are a helpful assistant.";
   const trace = createRagTrace(app.log);
   const askResult = await runAskPipeline({
+    // Suggested-KB logging happens in the background after the answer exists.
+    suggestedKbSource: "vodafone-voicebot",
     customerId: session.customerId,
     customerPrompt: systemPrompt,
     question: transcript,
@@ -1323,14 +1324,6 @@ async function answerUtteranceBatch(
     { streamId, askMs: askResult.response_time_ms, agentId: session.agentId, voice: `${state.ttsConfig.provider}/${state.ttsConfig.speaker ?? "default"}`, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (batch)"
   );
-  logSuggestedKbEntryIfNoAnswer({
-    customerId: session.customerId,
-    question: transcript,
-    answer: askResult.answer,
-    languageCode: sttLanguageCode,
-    source: "vodafone-voicebot",
-    log: app.log,
-  });
   const answer = askResult.answer.trim();
   if (!answer) return;
 
@@ -1424,6 +1417,8 @@ async function answerUtteranceStreaming(
   let pushChain: Promise<void> = Promise.resolve();
 
   const askResult = await runAskPipeline({
+    // Suggested-KB logging happens in the background after the answer exists.
+    suggestedKbSource: "vodafone-voicebot",
     customerId: session.customerId,
     customerPrompt: systemPrompt,
     question: transcript,
@@ -1470,14 +1465,6 @@ async function answerUtteranceStreaming(
     { streamId, askMs: askResult.response_time_ms, agentId: session.agentId, voice: `${state.ttsConfig.provider}/${state.ttsConfig.speaker ?? "default"}`, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (streaming)"
   );
-  logSuggestedKbEntryIfNoAnswer({
-    customerId: session.customerId,
-    question: transcript,
-    answer: askResult.answer,
-    languageCode: sttLanguageCode,
-    source: "vodafone-voicebot",
-    log: app.log,
-  });
 
   await pushChain;
   await sentences.flush();

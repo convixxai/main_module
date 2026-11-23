@@ -606,7 +606,7 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       const user = await requireSession(request, reply);
       if (!user) return;
       const r = await pool.query(
-        `UPDATE suggested_kb_entries SET status = 'ignored', updated_at = now()
+        `UPDATE suggested_kb_entries SET status = 'rejected', reviewed_at = now(), updated_at = now()
          WHERE id = $1 AND customer_id = $2 AND status = 'pending' RETURNING id`,
         [request.params.id, CUSTOMER_ID]
       );
@@ -627,7 +627,7 @@ export async function kbAdminGaneshotsavRoutes(app: FastifyInstance): Promise<vo
       const user = await requireSession(request, reply);
       if (!user) return;
       const r = await pool.query(
-        `UPDATE suggested_kb_entries SET status = 'added', updated_at = now()
+        `UPDATE suggested_kb_entries SET status = 'added', reviewed_at = now(), updated_at = now()
          WHERE id = $1 AND customer_id = $2 AND status = 'pending'
          RETURNING id, question, question_language_code, answer_given`,
         [request.params.id, CUSTOMER_ID]

@@ -51,6 +51,7 @@ import {
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
 import { encrypt, decrypt } from "../services/crypto";
 import { effectiveKbNativeLanguages } from "../services/kb-native-languages";
+import { queueSuggestedKb } from "../services/suggested-kb";
 
 const askSchema = z.object({
   question: z.string().min(1),
@@ -530,7 +531,50 @@ export type AskPipelineTimings = {
     | "rag_last_resort";
 };
 
-export async function runAskPipeline(params: {
+/** What the pipeline saw this turn, for the suggested-KB logger (never affects the answer). */
+export type AskTurnProbe = {
+  /** Cosine distance of the best KB match; null when the KB search returned nothing. */
+  topDistance: number | null;
+  kbMatchCount: number;
+  /** Names of CRM tools the model called this turn. */
+  toolCalls: string[];
+};
+
+type RunAskPipelineParams = Parameters<typeof runAskPipelineCore>[0] & {
+  /**
+   * Opt-in suggested-KB logging (live calls and the customer chat API only,
+   * never simulators/test consoles): tag of where the question came from,
+   * e.g. "vodafone-voicebot". Logged in the background after the answer is
+   * produced; it never delays or changes the answer.
+   */
+  suggestedKbSource?: string | null;
+};
+
+export async function runAskPipeline(params: RunAskPipelineParams): Promise<AskPipelineResult> {
+  const { suggestedKbSource, ...core } = params;
+  if (!suggestedKbSource) return runAskPipelineCore(core);
+  const probe: AskTurnProbe = { topDistance: null, kbMatchCount: 0, toolCalls: [] };
+  const result = await runAskPipelineCore({ ...core, probe });
+  // Synchronous push onto an in-memory queue; all work happens later, off the call path.
+  queueSuggestedKb({
+    customerId: core.customerId,
+    question: core.question,
+    answer: result.answer,
+    answerSource: result.source,
+    agentId: result.agent_id,
+    sessionId: result.session_id,
+    languageCode: core.embeddingLanguageHint ?? core.toolContext?.languageCode ?? null,
+    topDistance: probe.topDistance,
+    kbMatchCount: probe.kbMatchCount,
+    toolCalls: probe.toolCalls,
+    source: suggestedKbSource,
+  });
+  return result;
+}
+
+async function runAskPipelineCore(params: {
+  /** Internal: filled with what the turn saw (KB distance, tools), see AskTurnProbe. */
+  probe?: AskTurnProbe;
   customerId: string;
   customerPrompt: string;
   question: string;
@@ -714,6 +758,10 @@ export async function runAskPipeline(params: {
   ]);
   const historyForRag = trimAskHistoryForRag(custSettings ?? null, history);
   const vectorHistoryMs = Date.now() - tVec0;
+  if (params.probe) {
+    params.probe.kbMatchCount = matches.length;
+    params.probe.topDistance = matches.length > 0 && Number.isFinite(Number(matches[0].distance)) ? Number(matches[0].distance) : null;
+  }
 
   trace?.("vector_search_and_history", {
     match_count: matches.length,
@@ -914,6 +962,7 @@ ${toolset.promptBlock}` };
           trace,
           ragOptions: openaiOpts,
         });
+        if (params.probe) params.probe.toolCalls = r.toolCalls.map((t) => t.name);
         if (r.toolCalls.length > 0) {
           toolContext.log?.info({ tools: r.toolCalls, held }, "crm-tools: tools used this turn");
         }
@@ -1323,6 +1372,7 @@ export async function askRoutes(app: FastifyInstance) {
         embeddingLanguageHint: questionLanguageCode ?? null,
         ragOpenaiOnly: request.ragUseOpenaiOnly === true,
         trace,
+        suggestedKbSource: "ask-api",
       });
     }
   );

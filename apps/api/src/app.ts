@@ -5,6 +5,8 @@ import formbody from "@fastify/formbody";
 import { healthRoutes } from "./routes/health";
 import { customerRoutes } from "./routes/customers";
 import { kbRoutes } from "./routes/kb";
+import { kbSuggestionRoutes } from "./routes/kb-suggestions";
+import { setSuggestedKbLogger } from "./services/suggested-kb";
 import { askRoutes } from "./routes/ask";
 import { chatRoutes } from "./routes/chat";
 import { agentRoutes } from "./routes/agents";
@@ -51,6 +53,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   }) as unknown as FastifyInstance;
 
   attachPoolQueryLogging(app.log);
+  setSuggestedKbLogger(app.log);
 
   registerRequestLogging(app);
   
@@ -73,6 +76,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(avatarRoutes);
   app.register(voiceCatalogRoutes);             // Unified cross-provider voice picker (GET /voices, /voices/sample)
   app.register(kbRoutes);
+  app.register(kbSuggestionRoutes);             // Suggested KB review (pending / added / rejected)
   app.register(askRoutes);
   app.register(chatRoutes);
   app.register(voiceRoutes);

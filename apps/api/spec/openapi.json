@@ -12939,6 +12939,421 @@
           }
         }
       }
+    },
+    "/kb/suggestions": {
+      "get": {
+        "tags": [
+          "Knowledgebase"
+        ],
+        "summary": "Suggested KB: list (pending / added / rejected)",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "Questions callers asked that the knowledgebase (KB) did not cover, collected automatically from live calls (Vodafone) and the chat API (`/ask`), for the customer to review.\n\n- **`kind: unanswered`**: the bot could not answer (no KB entry, out of scope, or it said it doesn't know).\n- **`kind: ai_answered`**: the AI answered, but no KB entry was close to the question (`kb_top_distance` ≥ 0.45), so the answer came from the model. `answer_given` is a draft answer.\n- Small talk (\"yes\", \"ok\"), very short phrases and turns that used CRM tools (the caller's own name/order/booking) are not collected.\n- The same question asked again is grouped into one row (`times_asked`). A question already rejected or added is counted on that row and not suggested again.\n- **Statuses:** `pending` (to review), `added` (put into the KB), `rejected`.\n- Collected in the background after the reply: it never delays or changes a call.\n\nDefault: `status=pending`, newest first. `counts` is per status for this customer (all rows).\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "added",
+                "rejected",
+                "all"
+              ],
+              "default": "pending"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "unanswered",
+                "ai_answered"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Text search in question and answer"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Last asked on or after (IST date)"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Last asked on or before (IST date)"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "recent",
+                "most_asked"
+              ],
+              "default": "recent"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Suggestions",
+            "content": {
+              "application/json": {
+                "example": {
+                  "filters": {
+                    "status": "pending",
+                    "kind": null,
+                    "q": null,
+                    "from": null,
+                    "to": null,
+                    "sort": "recent"
+                  },
+                  "counts": {
+                    "pending": 12,
+                    "added": 5,
+                    "rejected": 3
+                  },
+                  "total": 12,
+                  "limit": 50,
+                  "offset": 0,
+                  "suggestions": [
+                    {
+                      "id": "8c1f0c7e-2b7a-4f7e-9a51-0c2d4b6e9f10",
+                      "question": "तुमचं दुकान रविवारी उघडं असतं का?",
+                      "answer_given": "हो, रविवारी सकाळी 10 ते रात्री 9 उघडं असतं.",
+                      "kind": "ai_answered",
+                      "status": "pending",
+                      "language_code": "mr-IN",
+                      "times_asked": 4,
+                      "first_asked_at": "2026-11-20T06:10:00.000Z",
+                      "first_asked_at_ist": "20/11/2026 11:40:00",
+                      "last_asked_at": "2026-11-23T09:02:11.000Z",
+                      "last_asked_at_ist": "23/11/2026 14:32:11",
+                      "kb_top_distance": 0.61,
+                      "source": "vodafone-voicebot",
+                      "agent": {
+                        "id": "<agent uuid>",
+                        "name": "Benetton Diwali Outbound"
+                      },
+                      "last_session_id": "<chat session uuid>",
+                      "kb_entry_id": null,
+                      "reviewed_at": null,
+                      "review_note": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          }
+        }
+      }
+    },
+    "/kb/suggestions/{id}": {
+      "get": {
+        "tags": [
+          "Knowledgebase"
+        ],
+        "summary": "Suggested KB: one suggestion + its conversation",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "The suggestion and the conversation it was last asked in (`role`: `bot` / `customer`), so the reviewer sees the context.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Suggestion",
+            "content": {
+              "application/json": {
+                "example": {
+                  "suggestion": {
+                    "id": "8c1f0c7e-2b7a-4f7e-9a51-0c2d4b6e9f10",
+                    "question": "तुमचं दुकान रविवारी उघडं असतं का?",
+                    "answer_given": "हो, रविवारी सकाळी 10 ते रात्री 9 उघडं असतं.",
+                    "kind": "ai_answered",
+                    "status": "pending",
+                    "language_code": "mr-IN",
+                    "times_asked": 4,
+                    "first_asked_at": "2026-11-20T06:10:00.000Z",
+                    "first_asked_at_ist": "20/11/2026 11:40:00",
+                    "last_asked_at": "2026-11-23T09:02:11.000Z",
+                    "last_asked_at_ist": "23/11/2026 14:32:11",
+                    "kb_top_distance": 0.61,
+                    "source": "vodafone-voicebot",
+                    "agent": {
+                      "id": "<agent uuid>",
+                      "name": "Benetton Diwali Outbound"
+                    },
+                    "last_session_id": "<chat session uuid>",
+                    "kb_entry_id": null,
+                    "reviewed_at": null,
+                    "review_note": null
+                  },
+                  "conversation": [
+                    {
+                      "role": "bot",
+                      "text": "नमस्कार, शुभ दिवाळी! ...",
+                      "at": "2026-11-23T09:01:40.000Z"
+                    },
+                    {
+                      "role": "customer",
+                      "text": "तुमचं दुकान रविवारी उघडं असतं का?",
+                      "at": "2026-11-23T09:02:11.000Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Knowledgebase"
+        ],
+        "summary": "Suggested KB: review (added / rejected / pending)",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "Sets the review status. To add a suggestion to the KB: create the entry with the normal KB API (`POST /kb/upload`, with the reviewed question and answer), then send `status: \"added\"` with the new `kb_entry_id`. `rejected` hides it; `pending` puts it back for review. `review_note` is optional.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id` (header) or `customer_id` (query).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          },
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: same as `x-customer-id`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "added",
+                      "rejected"
+                    ]
+                  },
+                  "kb_entry_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "nullable": true,
+                    "description": "The KB entry created from it (status added)"
+                  },
+                  "review_note": {
+                    "type": "string",
+                    "nullable": true,
+                    "maxLength": 1000
+                  }
+                }
+              },
+              "example": {
+                "status": "added",
+                "kb_entry_id": "<kb entry uuid>"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated suggestion",
+            "content": {
+              "application/json": {
+                "example": {
+                  "suggestion": {
+                    "id": "8c1f0c7e-2b7a-4f7e-9a51-0c2d4b6e9f10",
+                    "question": "तुमचं दुकान रविवारी उघडं असतं का?",
+                    "answer_given": "हो, रविवारी सकाळी 10 ते रात्री 9 उघडं असतं.",
+                    "kind": "ai_answered",
+                    "status": "added",
+                    "language_code": "mr-IN",
+                    "times_asked": 4,
+                    "first_asked_at": "2026-11-20T06:10:00.000Z",
+                    "first_asked_at_ist": "20/11/2026 11:40:00",
+                    "last_asked_at": "2026-11-23T09:02:11.000Z",
+                    "last_asked_at_ist": "23/11/2026 14:32:11",
+                    "kb_top_distance": 0.61,
+                    "source": "vodafone-voicebot",
+                    "agent": {
+                      "id": "<agent uuid>",
+                      "name": "Benetton Diwali Outbound"
+                    },
+                    "last_session_id": "<chat session uuid>",
+                    "kb_entry_id": "<kb entry uuid>",
+                    "reviewed_at": "2026-11-23T10:00:00.000Z",
+                    "review_note": null
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad status, unknown field, or kb_entry_id not a KB entry of this customer"
+          },
+          "401": {
+            "description": "No valid `x-api-key` or `x-admin-token`"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
     }
   }
 }
