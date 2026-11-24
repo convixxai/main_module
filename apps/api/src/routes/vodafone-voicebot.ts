@@ -57,6 +57,7 @@ import {
   type CartesiaTtsSession,
 } from "../services/cartesia-tts-ws";
 import { SentenceStreamBuffer, looksLikeRawRagMarker } from "../services/voice-reply-stream";
+import { fillPlaceholders } from "../services/lead-variables";
 import { VOICE_SPOKEN_REPLY_STYLE_RULE, RAG_MULTILINGUAL_GRAMMAR_RULE } from "../services/rag-prompt-utils";
 import {
   normalizeBcp47Tag,
@@ -721,18 +722,32 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
   if (route.campaignId) {
     session.mode = "outbound";
     try {
+      // Per-lead {{placeholders}} (outbound_campaign_leads.variables): read in
+      // this same query, and only when the script has a placeholder, so a
+      // campaign without them costs nothing extra. to_jsonb(l) keeps this
+      // working before migration 028 adds the column (variables = NULL).
+      const leadCandidates = [route.leadDigits, last10(event.toNumber), last10(event.fromNumber)].filter(
+        (d): d is string => !!d && d.length === 10
+      );
       const campaignRes = await pool.query(
-        `SELECT c.id, c.script_text, c.language_code, c.agent_id, p.phone_number AS caller_number
+        `SELECT c.id, c.script_text, c.language_code, c.agent_id, p.phone_number AS caller_number,
+                CASE WHEN position('{{' IN COALESCE(c.script_text, '')) > 0 THEN (
+                  SELECT to_jsonb(l) -> 'variables' FROM outbound_campaign_leads l
+                   WHERE l.campaign_id = c.id
+                     AND RIGHT(regexp_replace(l.phone_number, '\\D', '', 'g'), 10) = ANY($3::text[])
+                   ORDER BY (l.status = 'calling') DESC, l.last_attempt_at DESC NULLS LAST, l.created_at DESC
+                   LIMIT 1
+                ) END AS lead_variables
            FROM outbound_campaigns c
            LEFT JOIN company_phone_numbers p ON p.id = c.phone_number_id
           WHERE c.id = $1 AND c.customer_id = $2 AND c.status != 'deleted'`,
-        [route.campaignId, customerId]
+        [route.campaignId, customerId, leadCandidates]
       );
       const row = campaignRes.rows[0];
       if (row) {
         campaign = {
           id: row.id,
-          scriptText: row.script_text ?? null,
+          scriptText: row.script_text ? fillPlaceholders(row.script_text, row.lead_variables) : null,
           languageCode: row.language_code ?? null,
           agentId: row.agent_id ?? null,
           callerNumber: row.caller_number ?? null,

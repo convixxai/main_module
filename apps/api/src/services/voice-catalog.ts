@@ -26,6 +26,7 @@ import {
   cartesiaTextToSpeech,
   cartesiaConfigured,
   resolveCartesiaModel,
+  normalizeCartesiaGenerationConfigForVoice,
 } from "./cartesia";
 
 export type CatalogProvider = "sarvam" | "elevenlabs" | "cartesia";
@@ -39,6 +40,49 @@ export interface VoiceCatalogEntry {
   model: string | null;
   /** Always a same-origin path (`/voices/sample?...`) — proxies/synthesizes regardless of provider so the frontend has one playback code path. */
   sample_url: string;
+  /** indian | us | uk | au | ... when known, else null (provider labels / country; see voiceTraits). */
+  accent: string | null;
+  /** warm | calm | energetic | professional when known, else null. */
+  tone: string | null;
+}
+
+// ---------- Accent and tone (B2) ----------
+// Sarvam voices are Indian voices. ElevenLabs gives labels (accent,
+// descriptive / description). Cartesia gives a country and a free-text
+// description. Anything else is null: nothing is guessed from the name.
+// VOICE_TRAIT_OVERRIDES pins values for specific voices ("provider:voice_id").
+
+export const VOICE_TONES = ["warm", "calm", "energetic", "professional"] as const;
+
+const VOICE_TRAIT_OVERRIDES: Record<string, { accent?: string | null; tone?: string | null }> = {
+  // "cartesia:<voice id>": { accent: "indian", tone: "warm" },
+};
+
+const ACCENT_WORDS: Array<[RegExp, string]> = [
+  [/\b(indian|india|hindi|hinglish)\b/i, "indian"],
+  [/\b(american|usa?|united states)\b/i, "us"],
+  [/\b(british|english \(uk\)|uk|england|london)\b/i, "uk"],
+  [/\baustralian\b/i, "au"],
+  [/\b(irish)\b/i, "irish"],
+  [/\b(scottish)\b/i, "scottish"],
+];
+const COUNTRY_ACCENT: Record<string, string> = { IN: "indian", US: "us", GB: "uk", UK: "uk", AU: "au", IE: "irish" };
+const TONE_WORDS: Array<[RegExp, string]> = [
+  [/\b(warm|friendly|kind|caring|gentle|sweet)\b/i, "warm"],
+  [/\b(calm|soothing|relaxed|soft|peaceful|serene|smooth)\b/i, "calm"],
+  [/\b(energetic|upbeat|excited|lively|cheerful|enthusiastic|bright)\b/i, "energetic"],
+  [/\b(professional|confident|authoritative|formal|clear|corporate|newsreader|narrat\w*)\b/i, "professional"],
+];
+
+function firstMatch(text: string | null | undefined, table: Array<[RegExp, string]>): string | null {
+  if (!text) return null;
+  for (const [re, v] of table) if (re.test(text)) return v;
+  return null;
+}
+
+function withOverrides(provider: CatalogProvider, voiceId: string, accent: string | null, tone: string | null) {
+  const o = VOICE_TRAIT_OVERRIDES[`${provider}:${voiceId}`];
+  return { accent: o && "accent" in o ? o.accent ?? null : accent, tone: o && "tone" in o ? o.tone ?? null : tone };
 }
 
 // ---------- Sarvam: fixed speaker roster (kept in sync with
@@ -105,6 +149,7 @@ function listSarvamCatalog(): VoiceCatalogEntry[] {
         gender,
         model: "bulbul:v3",
         sample_url: sampleUrl("sarvam", name, "bulbul:v3"),
+        ...withOverrides("sarvam", name, "indian", null),
       });
     }
   }
@@ -126,6 +171,9 @@ async function listElevenLabsCatalog(): Promise<VoiceCatalogEntry[]> {
       (labels.language as string | undefined) ??
       null;
     const voiceId = String(v.voice_id ?? "");
+    const label = (k: string) => (typeof labels[k] === "string" ? (labels[k] as string) : null);
+    const accent = firstMatch(label("accent"), ACCENT_WORDS) ?? (label("accent")?.trim().toLowerCase() || null);
+    const tone = firstMatch([label("descriptive"), label("description"), label("use_case")].filter(Boolean).join(" "), TONE_WORDS);
     return {
       provider: "elevenlabs",
       voice_id: voiceId,
@@ -134,6 +182,7 @@ async function listElevenLabsCatalog(): Promise<VoiceCatalogEntry[]> {
       gender: (labels.gender as string | undefined) ?? null,
       model: null,
       sample_url: sampleUrl("elevenlabs", voiceId, null),
+      ...withOverrides("elevenlabs", voiceId, accent, tone),
     };
   });
 }
@@ -153,6 +202,12 @@ async function listCartesiaCatalog(language?: string | null): Promise<VoiceCatal
     gender: v.gender ?? null,
     model: "sonic-3.5",
     sample_url: sampleUrl("cartesia", v.id, "sonic-3.5"),
+    ...withOverrides(
+      "cartesia",
+      v.id,
+      (v.country ? COUNTRY_ACCENT[v.country.toUpperCase()] : null) ?? firstMatch(v.description, ACCENT_WORDS),
+      firstMatch(v.description, TONE_WORDS)
+    ),
   }));
 }
 
@@ -160,6 +215,10 @@ export interface VoiceCatalogFilter {
   /** BCP-47 or plain ISO-639-1 (e.g. "hi-IN" or "hi"). Sarvam voices always match (they work across every Sarvam-supported language, incl. the current hi/en/mr focus); ElevenLabs/Cartesia voices are filtered to this language's primary subtag. */
   language?: string | null;
   gender?: string | null;
+  /** Exact match on `accent` (e.g. indian, us, uk). */
+  accent?: string | null;
+  /** Exact match on `tone` (warm, calm, energetic, professional). */
+  tone?: string | null;
 }
 
 /**
@@ -185,6 +244,10 @@ export async function listVoiceCatalog(filter: VoiceCatalogFilter = {}): Promise
   if (gender) {
     all = all.filter((v) => !v.gender || v.gender.toLowerCase() === gender);
   }
+  const accent = filter.accent?.trim().toLowerCase() || null;
+  const tone = filter.tone?.trim().toLowerCase() || null;
+  if (accent) all = all.filter((v) => v.accent === accent);
+  if (tone) all = all.filter((v) => v.tone === tone);
   return all;
 }
 
@@ -192,14 +255,40 @@ export async function listVoiceCatalog(filter: VoiceCatalogFilter = {}): Promise
  * Synthesize (or proxy) a short sample for one catalog voice, regardless of
  * provider — backs `GET /voices/sample`.
  */
+export interface VoiceSampleTuning {
+  /** Speaking rate, 1 = normal. */
+  speed?: number | null;
+  /** Sarvam only: -0.75..0.75. */
+  pitch?: number | null;
+  /** Cartesia only (e.g. neutral, happy, calm, excited, sad). */
+  emotion?: string | null;
+  /** 1 = normal. Sarvam (loudness) and Cartesia. */
+  volume?: number | null;
+}
+
+/** Tuning options each provider applies to a sample; the rest are ignored (reported back). */
+export const SAMPLE_TUNING_SUPPORT: Record<CatalogProvider, Array<keyof VoiceSampleTuning>> = {
+  sarvam: ["speed", "pitch", "volume"],
+  elevenlabs: ["speed"],
+  cartesia: ["speed", "volume", "emotion"],
+};
+
+export function ignoredTuning(provider: CatalogProvider, t: VoiceSampleTuning): string[] {
+  return (Object.keys(t) as Array<keyof VoiceSampleTuning>).filter(
+    (k) => t[k] != null && !SAMPLE_TUNING_SUPPORT[provider].includes(k)
+  );
+}
+
 export async function synthesizeVoiceSample(params: {
   provider: CatalogProvider;
   voiceId: string;
   model?: string | null;
   language?: string | null;
   text?: string | null;
+  tuning?: VoiceSampleTuning;
 }): Promise<{ body: Buffer; contentType: string }> {
   const text = (params.text?.trim() || sampleTextForLanguage(params.language)).slice(0, 500);
+  const t = params.tuning ?? {};
 
   if (params.provider === "sarvam") {
     const result = await sarvamTextToSpeech({
@@ -209,6 +298,10 @@ export async function synthesizeVoiceSample(params: {
       speaker: params.voiceId,
       speech_sample_rate: "22050",
       output_audio_codec: "wav",
+      // Same fields (and ranges) agents use on calls: tts_pace / tts_pitch / tts_loudness.
+      ...(t.speed != null ? { pace: Math.min(2, Math.max(0.5, t.speed)) } : {}),
+      ...(t.pitch != null ? { pitch: Math.min(0.75, Math.max(-0.75, t.pitch)) } : {}),
+      ...(t.volume != null ? { loudness: Math.min(3, Math.max(0.3, t.volume)) } : {}),
     });
     if (result.status !== 200 || !result.body || typeof result.body !== "object") {
       throw new Error("Sarvam sample synthesis failed");
@@ -226,6 +319,7 @@ export async function synthesizeVoiceSample(params: {
       modelId,
       outputFormat: "mp3_44100_128",
       languageCode: params.language?.split(/[-_]/)[0] || undefined,
+      ...(t.speed != null ? { voiceSettings: { speed: t.speed } } : {}),
     });
     if (el.status !== 200 || !Buffer.isBuffer(el.body)) {
       throw new Error("ElevenLabs sample synthesis failed");
@@ -240,7 +334,15 @@ export async function synthesizeVoiceSample(params: {
     modelId,
     voiceId: params.voiceId,
     language: params.language?.split(/[-_]/)[0] || "en",
-    generationConfig: { emotion: "neutral" },
+    // With tuning: the same clamp calls use (normalizeCartesiaGenerationConfigForVoice), so it sounds like the agent.
+    generationConfig:
+      t.speed != null || t.volume != null || t.emotion
+        ? normalizeCartesiaGenerationConfigForVoice({
+            speed: t.speed ?? 1,
+            volume: t.volume ?? 1,
+            emotion: t.emotion ?? "neutral",
+          })
+        : { emotion: "neutral" },
     outputFormat: { container: "mp3", sample_rate: 44100, bit_rate: 128000 },
   });
   return { body: tts.body, contentType: tts.contentType };

@@ -119,6 +119,18 @@
     {
       "name": "Logs",
       "description": "One customer's server logs per day"
+    },
+    {
+      "name": "Call Insights",
+      "description": "Post-call disposition, sentiment, voicemail and topic markers (computed after calls end)"
+    },
+    {
+      "name": "Usage",
+      "description": "API key request log and usage counters"
+    },
+    {
+      "name": "Monitoring",
+      "description": "Engine timings and events (admin)"
     }
   ],
   "components": {
@@ -1714,7 +1726,34 @@
           "phone_numbers": {
             "type": "array",
             "items": {
-              "type": "string"
+              "oneOf": [
+                {
+                  "type": "string",
+                  "description": "Phone number (as before)"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "phone_number"
+                  ],
+                  "properties": {
+                    "phone_number": {
+                      "type": "string"
+                    },
+                    "variables": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "description": "Fills the campaign script's `{{name}}` placeholders for this lead. Max 20 variables, names `[A-Za-z_][A-Za-z0-9_]{0,39}`, values ≤ 300 characters, 2 KB per lead."
+                    }
+                  }
+                }
+              ]
             },
             "minItems": 1
           }
@@ -1791,6 +1830,18 @@
           "is_enabled": {
             "type": "boolean",
             "default": true
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "did",
+              "virtual",
+              null
+            ],
+            "description": "Number type (migration 028); null = not set"
           }
         }
       },
@@ -1813,6 +1864,18 @@
           "is_primary": {
             "type": "boolean",
             "description": "If true, unsets any other primary number for this customer first."
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "did",
+              "virtual",
+              null
+            ],
+            "description": "Number type (migration 028); null = not set"
           }
         }
       },
@@ -2831,7 +2894,7 @@
           "Agents"
         ],
         "summary": "Create agent",
-        "description": "Creates an agent with name, description, system prompt.\nRequires x-api-key. Each agent has its own system prompt.",
+        "description": "Creates an agent with name, description, system prompt.\nRequires x-api-key. Each agent has its own system prompt.\n\n**Per-agent answer settings (migration 028):** `temperature` (0–1.5) and `max_tokens` (80–2000), used for this agent's answers, read in the same agent query as today (no extra request on a call). `null` = the customer's settings. Before migration 028, `PUT` with these fields answers **503** `code: migration_pending`.",
         "security": [
           {
             "ApiKey": []
@@ -2934,6 +2997,24 @@
                       "similarity_boost": 0.75,
                       "speed": 1
                     }
+                  },
+                  "temperature": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1.5,
+                    "description": "This agent's answer temperature; null = the customer's setting (as before). GPT-5 models ignore it (they accept only their default)."
+                  },
+                  "max_tokens": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 80,
+                    "maximum": 2000,
+                    "description": "Longest answer for this agent, in tokens; null = the customer's setting (as before)."
                   }
                 }
               }
@@ -2975,7 +3056,7 @@
           "Agents"
         ],
         "summary": "List agents",
-        "description": "Returns all agents for the authenticated customer.\nRequires x-api-key.",
+        "description": "Returns all agents for the authenticated customer.\nRequires x-api-key.\n\nEach agent also has `temperature` and `max_tokens` (null = the customer's settings).",
         "security": [
           {
             "ApiKey": []
@@ -3020,7 +3101,7 @@
           "Agents"
         ],
         "summary": "Get agent",
-        "description": "Returns a single agent by ID.\nRequires x-api-key. Agent must belong to customer.",
+        "description": "Returns a single agent by ID.\nRequires x-api-key. Agent must belong to customer.\n\nEach agent also has `temperature` and `max_tokens` (null = the customer's settings).",
         "security": [
           {
             "ApiKey": []
@@ -3082,7 +3163,7 @@
           "Agents"
         ],
         "summary": "Update agent",
-        "description": "Updates agent name, description, or system_prompt.\nRequires x-api-key. At least one field required.",
+        "description": "Updates agent name, description, or system_prompt.\nRequires x-api-key. At least one field required.\n\n**Per-agent answer settings (migration 028):** `temperature` (0–1.5) and `max_tokens` (80–2000), used for this agent's answers, read in the same agent query as today (no extra request on a call). `null` = the customer's settings. Before migration 028, `PUT` with these fields answers **503** `code: migration_pending`.",
         "security": [
           {
             "ApiKey": []
@@ -3184,6 +3265,24 @@
                       "similarity_boost": 0.75,
                       "speed": 1
                     }
+                  },
+                  "temperature": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1.5,
+                    "description": "This agent's answer temperature; null = the customer's setting (as before). GPT-5 models ignore it (they accept only their default)."
+                  },
+                  "max_tokens": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 80,
+                    "maximum": 2000,
+                    "description": "Longest answer for this agent, in tokens; null = the customer's setting (as before)."
                   }
                 }
               }
@@ -3296,6 +3395,16 @@
                         }
                       }
                     }
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "manual",
+                      "json_upload",
+                      "csv_upload",
+                      "api"
+                    ],
+                    "description": "How these entries were added (default `api`)"
                   }
                 }
               }
@@ -3361,7 +3470,24 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "manual",
+                "json_upload",
+                "csv_upload",
+                "api"
+              ]
+            },
+            "description": "How the file was made: `json_upload` (default) or `csv_upload` (when the SaaS converted a CSV)"
+          }
+        ]
       }
     },
     "/kb/entries": {
@@ -3370,7 +3496,7 @@
           "Knowledgebase"
         ],
         "summary": "List KB entries",
-        "description": "Returns all KB entries for the authenticated customer.\nRequires x-api-key.",
+        "description": "Returns all KB entries for the authenticated customer.\nRequires x-api-key.\n\nStill a plain array. Each entry also has `source` (`manual` | `json_upload` | `csv_upload` | `api` | null for older entries), `status` (`active` | `archived`) and `archived_at`.",
         "security": [
           {
             "ApiKey": []
@@ -3392,7 +3518,59 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "manual",
+                "json_upload",
+                "csv_upload",
+                "api"
+              ]
+            },
+            "description": "Only entries added this way"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "archived",
+                "all"
+              ]
+            },
+            "description": "`active` (default), `archived` or `all`"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "description": "Optional page size (1–1000). Without it every entry is returned, as before."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "With `limit`: rows to skip"
+          }
+        ]
       }
     },
     "/kb/entries/{id}": {
@@ -3519,6 +3697,86 @@
                 "example": {
                   "message": "KB entry deleted",
                   "id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Knowledgebase"
+        ],
+        "summary": "Archive / unarchive a KB entry",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "description": "`{\"archived\": true}` moves the entry (with its translations) out of the knowledgebase into the archive: it is never used for answers. `{\"archived\": false}` moves it back with the same id. /ask is unchanged: answers only read active entries, so there is no extra filter on the KB search. Archived entries: `GET /kb/entries?status=archived`; `GET /kb/entries/{id}` finds both; `DELETE` deletes either. Edit an entry after unarchiving it.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": ""
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "archived"
+                ],
+                "properties": {
+                  "archived": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "example": {
+                "archived": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Done (`changed: false` when it was already in that state)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "6f1c2a3e-1111-4c1e-9d41-5b2f0d9e7a10",
+                  "status": "archived",
+                  "changed": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad body"
+          },
+          "401": {
+            "description": "No valid credentials"
+          },
+          "404": {
+            "description": "No such entry for this customer"
+          },
+          "503": {
+            "description": "Database migration 028 not run yet (`code: migration_pending`)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not available yet: database migration 028_saas_requests.sql has not been run",
+                  "code": "migration_pending"
                 }
               }
             }
@@ -6266,7 +6524,7 @@
           "Vodafone Outbound Campaign"
         ],
         "summary": "Add leads to campaign",
-        "description": "Adds one or more phone numbers to the campaign lead list. For a Vodafone campaign, also pushes the base to VI (staticCampaignDataIngestion) so VI will actually dial these numbers; for Exotel, numbers are only dialed later by POST .../trigger.",
+        "description": "Adds one or more phone numbers to the campaign lead list. For a Vodafone campaign, also pushes the base to VI (staticCampaignDataIngestion) so VI will actually dial these numbers; for Exotel, numbers are only dialed later by POST .../trigger.\n\n**Per-lead variables:** each item may be a number (as before) or `{\"phone_number\": \"9876543210\", \"variables\": {\"first_name\": \"Asha\"}}`. When the lead is called, `{{first_name}}` in the campaign script is filled once at call start (before the opening line is synthesized; nothing per turn). A placeholder with no value becomes empty and the spacing is tidied (\"Hello {{first_name}}, …\" → \"Hello, …\"). Spoken on **Vodafone** calls; Exotel campaigns play a pre-made recording of the script, so placeholders are not filled there. Sending a number already in the campaign with new variables updates them (it is not uploaded to VI again). Stored from migration 028 on (before it, numbers are stored as before).",
         "security": [
           {
             "ApiKey": []
@@ -6480,7 +6738,7 @@
           "Company Phone Numbers"
         ],
         "summary": "List phone numbers",
-        "description": "Returns every number owned by this company, primary first. Requires x-admin-token.",
+        "description": "Returns every number owned by this company, primary first. Requires x-admin-token.\n\nEach number has `type` (`did` | `virtual` | null).",
         "security": [
           {
             "AdminToken": []
@@ -6518,7 +6776,7 @@
           "Company Phone Numbers"
         ],
         "summary": "Add a phone number",
-        "description": "Adds a number to this company. Fails with 409 if the number is already assigned to any company (numbers are globally unique). Requires x-admin-token.",
+        "description": "Adds a number to this company. Fails with 409 if the number is already assigned to any company (numbers are globally unique). Requires x-admin-token.\n\n`type`: `did` | `virtual` | null. Returned on every number. Before migration 028, sending `type` answers **503** `code: migration_pending`.",
         "security": [
           {
             "AdminToken": []
@@ -6595,7 +6853,7 @@
           "Company Phone Numbers"
         ],
         "summary": "Update a phone number",
-        "description": "Partial update. Setting `is_primary: true` unsets any other primary number for this customer first. Requires x-admin-token.",
+        "description": "Partial update. Setting `is_primary: true` unsets any other primary number for this customer first. Requires x-admin-token.\n\n`type`: `did` | `virtual` | null. Returned on every number. Before migration 028, sending `type` answers **503** `code: migration_pending`.",
         "security": [
           {
             "AdminToken": []
@@ -9712,7 +9970,7 @@
           "Voice Catalog"
         ],
         "summary": "List all provider voices",
-        "description": "Returns every Sarvam, ElevenLabs, and Cartesia voice in one flat list. A provider whose API key isn't configured (or whose live call fails) is silently omitted rather than failing the whole request. Requires x-api-key.",
+        "description": "Returns every Sarvam, ElevenLabs, and Cartesia voice in one flat list. A provider whose API key isn't configured (or whose live call fails) is silently omitted rather than failing the whole request. Requires x-api-key.\n\nEach voice has `accent` and `tone` when known, else null. Sarvam voices are Indian; ElevenLabs from its voice labels; Cartesia from its country and description. Nothing is guessed from a voice's name.",
         "security": [
           {
             "ApiKey": []
@@ -9785,6 +10043,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "accent",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only voices with this accent: `indian`, `us`, `uk`, `au`, …"
+          },
+          {
+            "name": "tone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only voices with this tone: `warm`, `calm`, `energetic`, `professional`"
           }
         ]
       }
@@ -9795,7 +10071,7 @@
           "Voice Catalog"
         ],
         "summary": "Synthesize/play a sample for one catalog voice",
-        "description": "Synthesizes (Sarvam) or proxies (ElevenLabs/Cartesia) a short sample for one voice, regardless of provider, so the frontend has a single playback code path. This is the endpoint each catalog entry's `sample_url` points to. Requires x-api-key.",
+        "description": "Synthesizes (Sarvam) or proxies (ElevenLabs/Cartesia) a short sample for one voice, regardless of provider, so the frontend has a single playback code path. This is the endpoint each catalog entry's `sample_url` points to. Requires x-api-key.\n\n**Tuning:** `speed`, `pitch`, `emotion`, `volume` are applied the way calls apply the agent's voice settings. Options a provider does not support are ignored and listed in the `X-Voice-Options-Ignored` response header (e.g. `emotion` for Sarvam; `pitch,volume,emotion` for ElevenLabs; `pitch` for Cartesia).",
         "security": [
           {
             "ApiKey": []
@@ -9849,6 +10125,48 @@
               "maxLength": 500
             },
             "description": "Custom sample text. Defaults to a short greeting in `language` (or English)."
+          },
+          {
+            "name": "speed",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 2
+            },
+            "description": "Speaking rate, 1 = normal (0.5–2). Sarvam, ElevenLabs, Cartesia."
+          },
+          {
+            "name": "pitch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1
+            },
+            "description": "Sarvam only (−0.75..0.75)."
+          },
+          {
+            "name": "emotion",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Cartesia only (e.g. neutral, happy, calm, excited)."
+          },
+          {
+            "name": "volume",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 3
+            },
+            "description": "1 = normal. Sarvam (loudness 0.3–3) and Cartesia."
           }
         ],
         "responses": {
@@ -10745,7 +11063,7 @@
           "Vodafone Campaigns (VI OBD)"
         ],
         "summary": "Create, load and start a Vodafone campaign (one call)",
-        "description": "Runs the campaign on Vodafone's own OBD Campaign API (never Exotel, never per-lead calls): VI `createCampaign` with the tenant's Flow -> `getsampleBaseHeads` -> `staticCampaignDataIngestion` (numbers in chunks of 1000) -> `StartorStop(S)`. VI then dials the numbers itself inside the window; each answered call reaches the bot on the tenant's Vodafone WebSocket with `call_type=outbound` + `campaign_id`, and the bot opens with `script_text`.\n\n**Prerequisites:** the customer's telephony provider is Vodafone and enabled, OBD `credentials` (username/password, optional dni) and `vi_flow_id` are set with `PUT /customers/{customerId}/vodafone-settings`.\n\n**Partial failure:** if VI accepted the campaign but the upload or the start failed, the response is 502 and still carries `campaign.id`. Retry the remaining numbers with `/leads` and/or call `/start`; numbers are saved locally only after VI accepted them.\n\n**Calling number (DNI):** must be an active DNI on the tenant's VI Flow (VI `getActiveDNIList`), sent in VI's 10-digit format; a record with any other DNI is silently dropped by VI (\"Base not loaded\"). The engine uses the campaign's `phone_number_id` number if VI lists it (400 with the active DNIs if not), else the tenant `dni` / primary number if listed, else the Flow's first active DNI. The response's `dni` shows the number used, and `vi_status.baseDetails.totalBaseReceived` shows how many numbers VI actually loaded.\n\n**Start:** VI may refuse `StartorStop` for a With-Flow campaign it already runs on its window; the engine then reads VI's status and treats any live state as started.",
+        "description": "Runs the campaign on Vodafone's own OBD Campaign API (never Exotel, never per-lead calls): VI `createCampaign` with the tenant's Flow -> `getsampleBaseHeads` -> `staticCampaignDataIngestion` (numbers in chunks of 1000) -> `StartorStop(S)`. VI then dials the numbers itself inside the window; each answered call reaches the bot on the tenant's Vodafone WebSocket with `call_type=outbound` + `campaign_id`, and the bot opens with `script_text`.\n\n**Prerequisites:** the customer's telephony provider is Vodafone and enabled, OBD `credentials` (username/password, optional dni) and `vi_flow_id` are set with `PUT /customers/{customerId}/vodafone-settings`.\n\n**Partial failure:** if VI accepted the campaign but the upload or the start failed, the response is 502 and still carries `campaign.id`. Retry the remaining numbers with `/leads` and/or call `/start`; numbers are saved locally only after VI accepted them.\n\n**Calling number (DNI):** must be an active DNI on the tenant's VI Flow (VI `getActiveDNIList`), sent in VI's 10-digit format; a record with any other DNI is silently dropped by VI (\"Base not loaded\"). The engine uses the campaign's `phone_number_id` number if VI lists it (400 with the active DNIs if not), else the tenant `dni` / primary number if listed, else the Flow's first active DNI. The response's `dni` shows the number used, and `vi_status.baseDetails.totalBaseReceived` shows how many numbers VI actually loaded.\n\n**Start:** VI may refuse `StartorStop` for a With-Flow campaign it already runs on its window; the engine then reads VI's status and treats any live state as started.\n\n`phone_numbers` items may carry per-lead `variables` for the script's `{{placeholders}}`, as in `POST /vodafone/campaigns/{id}/leads`.",
         "security": [
           {
             "ApiKey": []
@@ -10780,7 +11098,34 @@
                   "phone_numbers": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "description": "Phone number (as before)"
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "phone_number"
+                          ],
+                          "properties": {
+                            "phone_number": {
+                              "type": "string"
+                            },
+                            "variables": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": [
+                                  "string",
+                                  "number",
+                                  "boolean"
+                                ]
+                              },
+                              "description": "Fills the campaign script's `{{name}}` placeholders for this lead. Max 20 variables, names `[A-Za-z_][A-Za-z0-9_]{0,39}`, values ≤ 300 characters, 2 KB per lead."
+                            }
+                          }
+                        }
+                      ]
                     },
                     "maxItems": 50000,
                     "description": "Numbers VI dials. Any format (+91 98765-43210, 919876543210, 9876543210); de-duplicated on the last 10 digits, invalid ones skipped and counted. Optional: add later with /leads."
@@ -11181,7 +11526,7 @@
             }
           }
         ],
-        "description": "Uploads more numbers to the VI campaign base (chunks of 1000). If the campaign is running VI dials them inside the window. If a chunk fails the response is 502 and `leads.pushed` says how many were accepted. Numbers already in the campaign are skipped (`leads.already_in_campaign`), so a retry never makes VI dial anyone twice; if VI reports an empty base (nothing was loaded), every number is uploaded again.",
+        "description": "Uploads more numbers to the VI campaign base (chunks of 1000). If the campaign is running VI dials them inside the window. If a chunk fails the response is 502 and `leads.pushed` says how many were accepted. Numbers already in the campaign are skipped (`leads.already_in_campaign`), so a retry never makes VI dial anyone twice; if VI reports an empty base (nothing was loaded), every number is uploaded again.\n\n**Per-lead variables:** each item may be a number (as before) or `{\"phone_number\": \"9876543210\", \"variables\": {\"first_name\": \"Asha\"}}`. When the lead is called, `{{first_name}}` in the campaign script is filled once at call start (before the opening line is synthesized; nothing per turn). A placeholder with no value becomes empty and the spacing is tidied (\"Hello {{first_name}}, …\" → \"Hello, …\"). Spoken on **Vodafone** calls; Exotel campaigns play a pre-made recording of the script, so placeholders are not filled there. Sending a number already in the campaign with new variables updates them (it is not uploaded to VI again). Stored from migration 028 on (before it, numbers are stored as before).",
         "requestBody": {
           "required": true,
           "content": {
@@ -11195,7 +11540,34 @@
                   "phone_numbers": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "description": "Phone number (as before)"
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "phone_number"
+                          ],
+                          "properties": {
+                            "phone_number": {
+                              "type": "string"
+                            },
+                            "variables": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": [
+                                  "string",
+                                  "number",
+                                  "boolean"
+                                ]
+                              },
+                              "description": "Fills the campaign script's `{{name}}` placeholders for this lead. Max 20 variables, names `[A-Za-z_][A-Za-z0-9_]{0,39}`, values ≤ 300 characters, 2 KB per lead."
+                            }
+                          }
+                        }
+                      ]
                     },
                     "minItems": 1,
                     "maxItems": 50000
@@ -12007,7 +12379,7 @@
             "AdminToken": []
           }
         ],
-        "description": "Every Vodafone call of this customer that reached the bot, newest first: campaign (outbound) and inbound calls. Paginate with `limit` / `offset`; `total` is the count for the filters.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.",
+        "description": "Every Vodafone call of this customer that reached the bot, newest first: campaign (outbound) and inbound calls. Paginate with `limit` / `offset`; `total` is the count for the filters.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.\n\nEach call also has:\n- `timing` `{ringing_at, answered_at, ended_at, wait_seconds, end_reason}`. VI connects the stream only when the call is answered and sends no ringing event: `answered_at` = stream start, `ringing_at` / `wait_seconds` = null. `end_reason`: `hangup` | `connection_lost` | `ended_by_provider` | `not_recorded` | `other` | null (live).\n- `vi_report` `{type: \"inbound\", call_id, date_ist}`: VI's own row for this call (who disconnected, its recording field) is in VI's **inbound** report under `vi_call_id`, also for campaign calls: `GET /vodafone/reports/calls?type=inbound&call_id=…&from=…&to=…`.\n- `insights`: post-call `{status, disposition, disposition_confidence, sentiment, sentiment_score, is_voicemail, markers, analysed_at}`, or null until analysed (see `GET /calls/{id}/insights`).",
         "parameters": [
           {
             "name": "from",
@@ -12195,7 +12567,7 @@
             "AdminToken": []
           }
         ],
-        "description": "The call (same fields as in the history) plus the full transcript in order. `role` is `bot` or `customer`. A campaign call starts with the campaign script line.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.",
+        "description": "The call (same fields as in the history) plus the full transcript in order. `role` is `bot` or `customer`. A campaign call starts with the campaign script line.\n\n**Auth (one of):** `x-api-key` (the customer's own key), or `x-admin-token` plus the customer to read as header `x-customer-id` or query `customer_id` (customer UUID). If `x-api-key` is sent it is used, and the admin token is ignored.\n\n**Credits (Call Pulses):** each call has `credits` = what was deducted for it: 1 credit per started pulse (with a 60 s pulse: 1–60 s = 1, 61–120 s = 2, …; a connected call under 1 s = 1). `pulse_seconds` is the pulse length frozen for that call, `billed_seconds` the time charged, `final: false` while the call is still being metered. Charged by the SaaS metering job every minute, so a just-ended call can show `deducted: 0` for up to a minute.\n\nEach call also has:\n- `timing` `{ringing_at, answered_at, ended_at, wait_seconds, end_reason}`. VI connects the stream only when the call is answered and sends no ringing event: `answered_at` = stream start, `ringing_at` / `wait_seconds` = null. `end_reason`: `hangup` | `connection_lost` | `ended_by_provider` | `not_recorded` | `other` | null (live).\n- `vi_report` `{type: \"inbound\", call_id, date_ist}`: VI's own row for this call (who disconnected, its recording field) is in VI's **inbound** report under `vi_call_id`, also for campaign calls: `GET /vodafone/reports/calls?type=inbound&call_id=…&from=…&to=…`.\n- `insights`: post-call `{status, disposition, disposition_confidence, sentiment, sentiment_score, is_voicemail, markers, analysed_at}`, or null until analysed (see `GET /calls/{id}/insights`).",
         "parameters": [
           {
             "name": "id",
@@ -14121,6 +14493,879 @@
           },
           "404": {
             "description": "No server log for that day"
+          }
+        }
+      }
+    },
+    "/settings/call-insights": {
+      "get": {
+        "tags": [
+          "Call Insights"
+        ],
+        "summary": "Post-call analysis: settings",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          }
+        ],
+        "description": "Whether ended calls are analysed (disposition, sentiment, voicemail) and whether topic markers are made. No row = analysis on, markers off.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id`.",
+        "responses": {
+          "200": {
+            "description": "Settings",
+            "content": {
+              "application/json": {
+                "example": {
+                  "enabled": true,
+                  "markers_enabled": false,
+                  "updated_at": null,
+                  "note": "Calls are analysed after they end by the call-insights worker (one LLM request per call with a conversation). Markers add a little to that request."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credentials"
+          },
+          "503": {
+            "description": "Database migration 028 not run yet (`code: migration_pending`)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not available yet: database migration 028_saas_requests.sql has not been run",
+                  "code": "migration_pending"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Call Insights"
+        ],
+        "summary": "Post-call analysis: turn on/off, markers on/off",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          }
+        ],
+        "description": "Send `enabled` and/or `markers_enabled`. Affects calls analysed from now on.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "markers_enabled": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "example": {
+                "markers_enabled": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved settings",
+            "content": {
+              "application/json": {
+                "example": {
+                  "enabled": true,
+                  "markers_enabled": true,
+                  "updated_at": null,
+                  "note": "Calls are analysed after they end by the call-insights worker (one LLM request per call with a conversation). Markers add a little to that request."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty or bad body"
+          },
+          "401": {
+            "description": "No valid credentials"
+          },
+          "503": {
+            "description": "Database migration 028 not run yet (`code: migration_pending`)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not available yet: database migration 028_saas_requests.sql has not been run",
+                  "code": "migration_pending"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calls/{id}/insights": {
+      "get": {
+        "tags": [
+          "Call Insights"
+        ],
+        "summary": "Post-call analysis of one call (any provider)",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "exotel_call_sessions.id"
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          }
+        ],
+        "description": "Made by the call-insights worker after the call ends (never during it), from the transcript, with the customer's OpenAI model. `status`: `done` | `error` (retried up to 3 times) | `pending` (ended, not analysed yet) | `call_in_progress`. `disposition`: interested | not_interested | callback | qualified | converted | voicemail | wrong_number | no_conversation. A call where the caller never spoke is `no_conversation` (no LLM request). `markers` only when markers are on for the customer.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id`.",
+        "responses": {
+          "200": {
+            "description": "Result",
+            "content": {
+              "application/json": {
+                "example": {
+                  "call_id": "3b0c7f2e-1e4b-4c55-8a6e-1f0d6f1b2c3d",
+                  "status": "done",
+                  "insights": {
+                    "disposition": "callback",
+                    "disposition_confidence": 0.98,
+                    "sentiment": "positive",
+                    "sentiment_score": 0.4,
+                    "is_voicemail": false,
+                    "markers": [
+                      {
+                        "at_seconds": 1,
+                        "label": "Diwali offer"
+                      },
+                      {
+                        "at_seconds": 8,
+                        "label": "Discount inquiry"
+                      },
+                      {
+                        "at_seconds": 30,
+                        "label": "Callback request"
+                      }
+                    ],
+                    "model": "gpt-6-luna",
+                    "analysed_at": "2026-11-24T08:19:44.000Z"
+                  },
+                  "error": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credentials"
+          },
+          "404": {
+            "description": "No such call for this customer"
+          },
+          "503": {
+            "description": "Database migration 028 not run yet (`code: migration_pending`)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not available yet: database migration 028_saas_requests.sql has not been run",
+                  "code": "migration_pending"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{id}/api-keys/{keyId}/requests": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Requests made with one API key (newest first, 30 days)",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The authenticated customer"
+          },
+          {
+            "name": "keyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "api_keys.id of one of the customer's keys"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "description": "1–500 (default 100)"
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "ISO time: only requests before it (pass `next_before` for the next page)"
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          }
+        ],
+        "description": "Method, path (no query string), status, duration and time of each request made with the key. Never bodies or headers. Written in batches a few seconds after each request (never inside it); kept 30 days.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id`.",
+        "responses": {
+          "200": {
+            "description": "Requests",
+            "content": {
+              "application/json": {
+                "example": {
+                  "key_id": "9a1d7e40-5c2b-4f0e-8d3a-2b6c1e9f0a11",
+                  "retention_days": 30,
+                  "limit": 2,
+                  "next_before": "2026-11-24T08:20:03.512Z",
+                  "requests": [
+                    {
+                      "method": "GET",
+                      "path": "/vodafone/reports/history",
+                      "status": 200,
+                      "duration_ms": 41,
+                      "at": "2026-11-24T08:20:05.118Z"
+                    },
+                    {
+                      "method": "PUT",
+                      "path": "/agents/2f4e6a1c-8b9d-4c3e-a1f2-7d5e9b0c3a64",
+                      "status": 200,
+                      "duration_ms": 12,
+                      "at": "2026-11-24T08:20:03.512Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credentials"
+          },
+          "404": {
+            "description": "Not this customer, or not its key"
+          },
+          "503": {
+            "description": "Database migration 028 not run yet (`code: migration_pending`)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "Not available yet: database migration 028_saas_requests.sql has not been run",
+                  "code": "migration_pending"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customers/{id}/usage": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Usage counters for a period",
+        "security": [
+          {
+            "ApiKey": []
+          },
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The authenticated customer"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "IST date (default: 29 days before `to`)"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "IST date (default today); range ≤ 366 days"
+          },
+          {
+            "name": "x-customer-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With `x-admin-token` only: the customer."
+          }
+        ],
+        "description": "Counted from existing tables when asked (no counter on the call path). `api_requests` is null before migration 028.\n\n**Auth (one of):** `x-api-key`, or `x-admin-token` with `x-customer-id`.",
+        "responses": {
+          "200": {
+            "description": "Usage",
+            "content": {
+              "application/json": {
+                "example": {
+                  "customer_id": "4c9a8c38-4949-4af2-917f-d248c9d50c86",
+                  "period": {
+                    "from": "2026-10-26",
+                    "to": "2026-11-24",
+                    "timezone": "Asia/Kolkata"
+                  },
+                  "api_requests": 1840,
+                  "api_requests_note": "Requests made with this customer's API keys (kept 30 days)",
+                  "kb_entries": {
+                    "active": 96,
+                    "archived": 3
+                  },
+                  "storage": {
+                    "campaign_audio_bytes": 0,
+                    "campaign_audio_files": 0,
+                    "recordings_bytes": 0,
+                    "total_bytes": 0,
+                    "note": "Call recordings are not stored by the engine (Vodafone keeps its own; Exotel links are kept by Exotel)."
+                  },
+                  "calls": {
+                    "calls": 519,
+                    "vodafone": 519,
+                    "exotel": 0,
+                    "talk_seconds": 21233
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad range"
+          },
+          "401": {
+            "description": "No valid credentials"
+          },
+          "404": {
+            "description": "Not this customer"
+          }
+        }
+      }
+    },
+    "/health/dependencies": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "All outside services: Sarvam, Cartesia, ElevenLabs, Google TTS, OpenAI, Vodafone, Exotel, Redis",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "One light request per provider (a list/status endpoint, or an empty request the provider rejects without billing), cached 60 s; never run on the call path. `ok`: true = reachable and key accepted; false = down or key refused; null = not configured / not used.\n\n**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "latency_ms": 954,
+                  "checked_at": "2026-11-24T08:21:00.000Z",
+                  "providers": {
+                    "sarvam": {
+                      "ok": true,
+                      "latency_ms": 312,
+                      "checked_at": "2026-11-24T08:21:00.000Z",
+                      "http_status": 400,
+                      "detail": "reachable, key accepted",
+                      "cached": true
+                    },
+                    "cartesia": {
+                      "ok": true,
+                      "latency_ms": 312,
+                      "checked_at": "2026-11-24T08:21:00.000Z",
+                      "http_status": 200,
+                      "detail": "reachable, key accepted",
+                      "cached": true
+                    },
+                    "redis": {
+                      "ok": null,
+                      "latency_ms": null,
+                      "checked_at": "2026-11-24T08:21:00.000Z",
+                      "detail": "Redis is not used by the engine"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credentials"
+          }
+        }
+      }
+    },
+    "/health/dep/{name}": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "One outside service",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "sarvam",
+                "cartesia",
+                "elevenlabs",
+                "google_tts",
+                "openai",
+                "vodafone",
+                "exotel",
+                "redis"
+              ]
+            }
+          }
+        ],
+        "description": "One light request per provider (a list/status endpoint, or an empty request the provider rejects without billing), cached 60 s; never run on the call path. `ok`: true = reachable and key accepted; false = down or key refused; null = not configured / not used.\n\n**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "latency_ms": 312,
+                  "checked_at": "2026-11-24T08:21:00.000Z",
+                  "http_status": 200,
+                  "detail": "reachable, key accepted",
+                  "cached": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credentials"
+          },
+          "404": {
+            "description": "Unknown name"
+          }
+        }
+      }
+    },
+    "/health/stt": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "STT: Sarvam, Cartesia, ElevenLabs",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "One light request per provider (a list/status endpoint, or an empty request the provider rejects without billing), cached 60 s; never run on the call path. `ok`: true = reachable and key accepted; false = down or key refused; null = not configured / not used. `ok` = every configured one is ok; `latency_ms` = the slowest.\n\n**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Status per provider in `providers`"
+          },
+          "401": {
+            "description": "No valid credentials"
+          }
+        }
+      }
+    },
+    "/health/tts": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "TTS: Sarvam, Cartesia, ElevenLabs, Google TTS",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "One light request per provider (a list/status endpoint, or an empty request the provider rejects without billing), cached 60 s; never run on the call path. `ok`: true = reachable and key accepted; false = down or key refused; null = not configured / not used. `ok` = every configured one is ok; `latency_ms` = the slowest.\n\n**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Status per provider in `providers`"
+          },
+          "401": {
+            "description": "No valid credentials"
+          }
+        }
+      }
+    },
+    "/health/telephony": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Telephony: Vodafone (VI CPaaS API), Exotel API",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "One light request per provider (a list/status endpoint, or an empty request the provider rejects without billing), cached 60 s; never run on the call path. `ok`: true = reachable and key accepted; false = down or key refused; null = not configured / not used. `ok` = every configured one is ok; `latency_ms` = the slowest.\n\n**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Status per provider in `providers`"
+          },
+          "401": {
+            "description": "No valid credentials"
+          }
+        }
+      }
+    },
+    "/health/redis": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Redis (not used by the engine: always ok null)",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "description": "**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Status"
+          },
+          "401": {
+            "description": "No valid credentials"
+          }
+        }
+      }
+    },
+    "/admin/metrics": {
+      "get": {
+        "tags": [
+          "Monitoring"
+        ],
+        "summary": "Engine timings: latency per route + per-turn call timings",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "minutes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1440
+            },
+            "description": "Window, 1–1440 (default 15)"
+          }
+        ],
+        "description": "From the server log lines the engine already writes (`http.out` and the voicebot timing lines), computed when asked and cached 15 s: nothing is added to requests or calls. WebSocket call routes are left out of request latency. Call turns: `stt`, `ask_kb_and_llm`, `llm_first_token_since_caller_stopped`, `tts`, `first_audio_since_caller_stopped`, `total_since_caller_stopped`. History = log retention (~7 days).\n\n**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Metrics",
+            "content": {
+              "application/json": {
+                "example": {
+                  "minutes": 15,
+                  "from": "2026-11-24T08:06:00.000Z",
+                  "to": "2026-11-24T08:21:00.000Z",
+                  "source": "server log files (http.out and voicebot timing lines)",
+                  "requests": {
+                    "count": 412,
+                    "p50_ms": 38,
+                    "p95_ms": 210,
+                    "p99_ms": 640,
+                    "max_ms": 1180,
+                    "routes": [
+                      {
+                        "method": "GET",
+                        "route": "/vodafone/reports/history",
+                        "count": 412,
+                        "p50_ms": 38,
+                        "p95_ms": 210,
+                        "p99_ms": 640,
+                        "max_ms": 1180,
+                        "errors_4xx": 0,
+                        "errors_5xx": 0
+                      }
+                    ]
+                  },
+                  "call_turns": {
+                    "turns": 37,
+                    "stt": {
+                      "count": 37,
+                      "p50_ms": 230,
+                      "p95_ms": 610,
+                      "p99_ms": 900,
+                      "max_ms": 1960
+                    },
+                    "ask_kb_and_llm": {
+                      "count": 412,
+                      "p50_ms": 38,
+                      "p95_ms": 210,
+                      "p99_ms": 640,
+                      "max_ms": 1180
+                    },
+                    "llm_first_token_since_caller_stopped": {
+                      "count": 412,
+                      "p50_ms": 38,
+                      "p95_ms": 210,
+                      "p99_ms": 640,
+                      "max_ms": 1180
+                    },
+                    "tts": {
+                      "count": 412,
+                      "p50_ms": 38,
+                      "p95_ms": 210,
+                      "p99_ms": 640,
+                      "max_ms": 1180
+                    },
+                    "first_audio_since_caller_stopped": {
+                      "count": 412,
+                      "p50_ms": 38,
+                      "p95_ms": 210,
+                      "p99_ms": 640,
+                      "max_ms": 1180
+                    },
+                    "total_since_caller_stopped": {
+                      "count": 412,
+                      "p50_ms": 38,
+                      "p95_ms": 210,
+                      "p99_ms": 640,
+                      "max_ms": 1180
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad minutes"
+          },
+          "401": {
+            "description": "No valid credentials"
+          }
+        }
+      }
+    },
+    "/admin/events": {
+      "get": {
+        "tags": [
+          "Monitoring"
+        ],
+        "summary": "Engine events: restarts, slow requests, server errors, errors, warnings",
+        "security": [
+          {
+            "AdminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "ISO time (default 24 h ago; at most 7 days back)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "description": "1–500 (default 100)"
+          },
+          {
+            "name": "slow_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 100
+            },
+            "description": "A request at least this slow is `slow_request` (default 3000)"
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma list: restart, slow_request, server_error, error, warning"
+          }
+        ],
+        "description": "Newest first, from the server log files (nothing extra is written). `counts` covers the whole range; secrets are masked.\n\n**Auth:** `x-admin-token` only.",
+        "responses": {
+          "200": {
+            "description": "Events",
+            "content": {
+              "application/json": {
+                "example": {
+                  "since": "2026-11-23T08:21:00.000Z",
+                  "slow_ms": 3000,
+                  "counts": {
+                    "restart": 1,
+                    "slow_request": 2,
+                    "warning": 5
+                  },
+                  "total": 8,
+                  "events": [
+                    {
+                      "at": "2026-11-24T07:59:12.000Z",
+                      "at_ist": "2026-11-24 13:29:12",
+                      "type": "slow_request",
+                      "level": "info",
+                      "message": "http.out",
+                      "detail": {
+                        "method": "GET",
+                        "route": "/vodafone/reports/calls",
+                        "status": 200,
+                        "duration_ms": 4120
+                      }
+                    },
+                    {
+                      "at": "2026-11-24T07:30:02.000Z",
+                      "at_ist": "2026-11-24 13:00:02",
+                      "type": "restart",
+                      "level": "info",
+                      "message": "Server listening on http://0.0.0.0:8080",
+                      "detail": {
+                        "pid": 3970369
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad parameter"
+          },
+          "401": {
+            "description": "No valid credentials"
           }
         }
       }

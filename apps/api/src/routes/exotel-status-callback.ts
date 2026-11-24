@@ -106,6 +106,30 @@ export async function exotelStatusCallbackRoutes(app: FastifyInstance): Promise<
         }
       }
 
+      // Recording link and final state (A2 / A3), when Exotel sends them. Written
+      // into the call row's metadata; this webhook is not part of the call audio.
+      const recordingUrl = typeof payload.RecordingUrl === "string" && /^https:\/\//.test(payload.RecordingUrl) ? payload.RecordingUrl : null;
+      const eventType = String(payload.EventType ?? payload.eventType ?? "").toLowerCase();
+      const callStatus = typeof payload.Status === "string" ? payload.Status : null;
+      if (recordingUrl || eventType === "terminal") {
+        const patch = JSON.stringify({
+          ...(recordingUrl ? { exotel_recording_url: recordingUrl } : {}),
+          ...(callStatus ? { exotel_status: callStatus } : {}),
+          ...(eventType === "terminal" ? { exotel_terminal_at: new Date().toISOString() } : {}),
+          ...(payload.ConversationDuration != null ? { exotel_conversation_seconds: Number(payload.ConversationDuration) || 0 } : {}),
+        });
+        const where = sessionFromCf ? `id = $2::uuid` : callSid ? `exotel_call_sid = $2` : null;
+        if (where) {
+          await pool
+            .query(
+              `UPDATE exotel_call_sessions SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+                WHERE ${where} AND customer_id = $3::uuid`,
+              [patch, sessionFromCf ?? callSid, customerId]
+            )
+            .catch((err) => request.log.warn({ err, customerId }, "exotel status callback: could not save recording / final status"));
+        }
+      }
+
       return reply.send({ ok: true });
     }
   );

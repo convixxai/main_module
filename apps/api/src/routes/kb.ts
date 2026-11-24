@@ -3,6 +3,41 @@ import { z } from "zod";
 import { pool } from "../config/db";
 import { generateEmbedding } from "../services/llm";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
+import { columnExists, tableExists, MIGRATION_028_MISSING } from "../services/schema-features";
+
+// ------------------------------------------------------------
+// Source and archive (migration 028).
+//   source    how an entry was added: manual | json_upload | csv_upload | api
+//             (null for entries added before it was recorded).
+//   archive   PATCH /kb/entries/:id {"archived": true} moves the entry (and
+//             its translations) to kb_entries_archived; {"archived": false}
+//             moves it back with the same id. Answers only ever read
+//             kb_entries, so an archived entry is never used, and /ask is
+//             unchanged (no extra filter on the KB search).
+// GET /kb/entries keeps returning a plain array; new keys only.
+// ------------------------------------------------------------
+const KB_SOURCES = ["manual", "json_upload", "csv_upload", "api"] as const;
+const kbSource = z.enum(KB_SOURCES);
+
+const listQuery = z.object({
+  source: kbSource.optional(),
+  /** active (default) | archived | all */
+  status: z.enum(["active", "archived", "all"]).default("active"),
+  /** Optional paging; without limit every entry is returned, as before. */
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+});
+
+const patchSchema = z.object({ archived: z.boolean() }).strict();
+
+/** Saves `source` on entries just created, inside the caller's transaction (skipped before migration 028). */
+async function tagSource(client: { query: typeof pool.query }, ids: string[], source: string | null, hasColumn: boolean): Promise<void> {
+  if (!source || ids.length === 0 || !hasColumn) return;
+  await client.query(`UPDATE kb_entries SET source = $1 WHERE id = ANY($2::uuid[])`, [source, ids]);
+}
+
+const ACTIVE_COLS = `id, question, answer, created_at, (to_jsonb(kb_entries) ->> 'source') AS source, 'active' AS status, NULL::timestamptz AS archived_at`;
+const ARCHIVED_COLS = `id, question, answer, created_at, source, 'archived' AS status, archived_at`;
 
 const uploadSchema = z.object({
   entries: z
@@ -13,6 +48,8 @@ const uploadSchema = z.object({
       })
     )
     .min(1),
+  /** How these entries were added (default "api"). */
+  source: kbSource.optional(),
 });
 
 const updateSchema = z.object({
@@ -37,19 +74,23 @@ export async function kbRoutes(app: FastifyInstance) {
       const embeddings = await Promise.all(
         entries.map((e) => generateEmbedding(e.question))
       );
+      const hasSource = await columnExists("kb_entries", "source");
 
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
 
+        const ids: string[] = [];
         for (let i = 0; i < entries.length; i++) {
           const embeddingStr = `[${embeddings[i].join(",")}]`;
-          await client.query(
+          const r = await client.query(
             `INSERT INTO kb_entries (customer_id, question, answer, embedding)
-             VALUES ($1, $2, $3, $4)`,
+             VALUES ($1, $2, $3, $4) RETURNING id`,
             [customerId, entries[i].question, entries[i].answer, embeddingStr]
           );
+          ids.push(r.rows[0].id);
         }
+        await tagSource(client, ids, body.data.source ?? "api", hasSource);
 
         await client.query("COMMIT");
       } catch (err) {
@@ -70,15 +111,24 @@ export async function kbRoutes(app: FastifyInstance) {
   app.get(
     "/kb/entries",
     { preHandler: apiKeyAuth },
-    async (request: AuthenticatedRequest) => {
+    async (request: AuthenticatedRequest, reply) => {
       const customerId = request.customerId!;
-      const result = await pool.query(
-        `SELECT id, question, answer, created_at
-         FROM kb_entries
-         WHERE customer_id = $1
-         ORDER BY created_at DESC`,
-        [customerId]
-      );
+      const q = listQuery.safeParse(request.query ?? {});
+      if (!q.success) return reply.status(400).send({ error: q.error.flatten() });
+      const f = q.data;
+      const archive = f.status !== "active" && (await tableExists("kb_entries_archived"));
+      if (f.status === "archived" && !archive) return [];
+      const params: unknown[] = [customerId];
+      const sourceFilter = f.source ? (params.push(f.source), ` AND source = $${params.length}`) : "";
+      const parts: string[] = [];
+      if (f.status !== "archived") {
+        parts.push(`SELECT * FROM (SELECT ${ACTIVE_COLS} FROM kb_entries WHERE customer_id = $1) a WHERE TRUE${sourceFilter}`);
+      }
+      if (archive) {
+        parts.push(`SELECT ${ARCHIVED_COLS} FROM kb_entries_archived WHERE customer_id = $1${sourceFilter}`);
+      }
+      const page = f.limit ? ` LIMIT ${f.limit} OFFSET ${f.offset}` : f.offset ? ` OFFSET ${f.offset}` : "";
+      const result = await pool.query(`${parts.join(" UNION ALL ")} ORDER BY created_at DESC${page}`, params);
       return result.rows;
     }
   );
@@ -91,14 +141,19 @@ export async function kbRoutes(app: FastifyInstance) {
       const customerId = request.customerId!;
       const { id } = request.params as { id: string };
 
+      if (!z.string().uuid().safeParse(id).success) return reply.status(404).send({ error: "KB entry not found" });
       const result = await pool.query(
-        `SELECT id, question, answer, created_at
+        `SELECT ${ACTIVE_COLS}
          FROM kb_entries
          WHERE id = $1 AND customer_id = $2`,
         [id, customerId]
       );
 
       if (result.rows.length === 0) {
+        if (await tableExists("kb_entries_archived")) {
+          const archived = await pool.query(`SELECT ${ARCHIVED_COLS} FROM kb_entries_archived WHERE id = $1 AND customer_id = $2`, [id, customerId]);
+          if (archived.rows[0]) return archived.rows[0];
+        }
         return reply.status(404).send({ error: "KB entry not found" });
       }
 
@@ -171,16 +226,90 @@ export async function kbRoutes(app: FastifyInstance) {
       const customerId = request.customerId!;
       const { id } = request.params as { id: string };
 
+      if (!z.string().uuid().safeParse(id).success) return reply.status(404).send({ error: "KB entry not found" });
       const result = await pool.query(
         "DELETE FROM kb_entries WHERE id = $1 AND customer_id = $2 RETURNING id",
         [id, customerId]
       );
 
       if (result.rows.length === 0) {
-        return reply.status(404).send({ error: "KB entry not found" });
+        const archived = (await tableExists("kb_entries_archived"))
+          ? await pool.query("DELETE FROM kb_entries_archived WHERE id = $1 AND customer_id = $2 RETURNING id", [id, customerId])
+          : { rows: [] };
+        if (archived.rows.length === 0) return reply.status(404).send({ error: "KB entry not found" });
       }
 
       return { message: "KB entry deleted", id };
+    }
+  );
+
+  // Archive / unarchive one KB entry (B5). Archived entries are never used for answers.
+  app.patch(
+    "/kb/entries/:id",
+    { preHandler: apiKeyAuth },
+    async (request: AuthenticatedRequest, reply) => {
+      const customerId = request.customerId!;
+      const { id } = request.params as { id: string };
+      const body = patchSchema.safeParse(request.body ?? {});
+      if (!body.success) return reply.status(400).send({ error: body.error.flatten() });
+      if (!z.string().uuid().safeParse(id).success) return reply.status(404).send({ error: "KB entry not found" });
+      if (!(await tableExists("kb_entries_archived"))) return reply.status(503).send(MIGRATION_028_MISSING);
+
+      let moved = false;
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        if (body.data.archived) {
+          const archivedRow = await client.query(
+            `INSERT INTO kb_entries_archived (id, customer_id, question, answer, embedding, agent_id, source_language_code, source, created_at, translations)
+             SELECT e.id, e.customer_id, e.question, e.answer, e.embedding, e.agent_id, e.source_language_code, e.source, e.created_at,
+                    COALESCE((SELECT jsonb_agg(to_jsonb(t)) FROM kb_entry_translations t WHERE t.kb_entry_id = e.id), '[]'::jsonb)
+               FROM kb_entries e WHERE e.id = $1 AND e.customer_id = $2
+             ON CONFLICT (id) DO NOTHING
+             RETURNING id`,
+            [id, customerId]
+          );
+          if (archivedRow.rows.length > 0) {
+            await client.query(`DELETE FROM kb_entries WHERE id = $1 AND customer_id = $2`, [id, customerId]);
+            moved = true;
+          }
+        } else {
+          const restored = await client.query(
+            `INSERT INTO kb_entries (id, customer_id, question, answer, embedding, agent_id, source_language_code, source, created_at)
+             SELECT id, customer_id, question, answer, embedding, agent_id, source_language_code, source, created_at
+               FROM kb_entries_archived WHERE id = $1 AND customer_id = $2
+             ON CONFLICT (id) DO NOTHING
+             RETURNING id`,
+            [id, customerId]
+          );
+          if (restored.rows.length > 0) {
+            await client.query(
+              `INSERT INTO kb_entry_translations
+               SELECT r.* FROM kb_entries_archived a,
+                      jsonb_populate_recordset(NULL::kb_entry_translations, a.translations) r
+                WHERE a.id = $1 AND a.customer_id = $2
+               ON CONFLICT DO NOTHING`,
+              [id, customerId]
+            );
+            await client.query(`DELETE FROM kb_entries_archived WHERE id = $1 AND customer_id = $2`, [id, customerId]);
+            moved = true;
+          }
+        }
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+      const status = body.data.archived ? "archived" : "active";
+      if (moved) return reply.send({ id, status, changed: true });
+      // Nothing moved: already in the asked state, or not this customer's entry.
+      const where = body.data.archived ? "kb_entries_archived" : "kb_entries";
+      const already = await pool.query(`SELECT 1 FROM ${where} WHERE id = $1 AND customer_id = $2`, [id, customerId]);
+      return already.rows.length
+        ? reply.send({ id, status, changed: false })
+        : reply.status(404).send({ error: "KB entry not found" });
     }
   );
 
@@ -212,6 +341,8 @@ export async function kbRoutes(app: FastifyInstance) {
     { preHandler: apiKeyAuth },
     async (request: any, reply) => {
       const customerId = request.customerId!;
+      const srcQ = kbSource.safeParse((request.query as Record<string, unknown> | undefined)?.source ?? "json_upload");
+      if (!srcQ.success) return reply.status(400).send({ error: `source must be one of ${KB_SOURCES.join(", ")}` });
       let rawData = "";
 
       if (request.isMultipart?.()) {
@@ -256,19 +387,23 @@ export async function kbRoutes(app: FastifyInstance) {
           return generateEmbedding(e.question);
         })
       );
+      const hasSource = await columnExists("kb_entries", "source");
 
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
 
+        const ids: string[] = [];
         for (let i = 0; i < entries.length; i++) {
           const embeddingStr = `[${embeddings[i].join(",")}]`;
-          await client.query(
+          const r = await client.query(
             `INSERT INTO kb_entries (customer_id, question, answer, embedding)
-             VALUES ($1, $2, $3, $4)`,
+             VALUES ($1, $2, $3, $4) RETURNING id`,
             [customerId, entries[i].question, entries[i].answer, embeddingStr]
           );
+          ids.push(r.rows[0].id);
         }
+        await tagSource(client, ids, srcQ.data, hasSource);
 
         await client.query("COMMIT");
       } catch (err: any) {

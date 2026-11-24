@@ -15,6 +15,24 @@ import {
   setPrimaryPhoneNumber,
   deletePhoneNumber,
 } from "../services/company-phone-numbers";
+import { columnExists, MIGRATION_028_MISSING } from "../services/schema-features";
+
+/** Number type (migration 028): "did" | "virtual"; null = not set. */
+const numberType = z.enum(["did", "virtual"]).nullable().optional();
+
+/** Adds `type` (company_phone_numbers.number_type) to a number row; null before migration 028. */
+function withType<T extends Record<string, any>>(row: T): T & { type: string | null } {
+  const { number_type, ...rest } = row as Record<string, any>;
+  return { ...(rest as T), type: number_type ?? null };
+}
+
+async function saveType(customerId: string, id: string, type: string | null): Promise<Record<string, any> | null> {
+  const r = await pool.query(
+    `UPDATE company_phone_numbers SET number_type = $1 WHERE id = $2 AND customer_id = $3 RETURNING *`,
+    [type, id, customerId]
+  );
+  return r.rows[0] ?? null;
+}
 
 const createPhoneNumberSchema = z.object({
   phone_number: z.string().min(3),
@@ -22,6 +40,7 @@ const createPhoneNumberSchema = z.object({
   default_agent_id: z.string().uuid().optional(),
   is_primary: z.boolean().optional(),
   is_enabled: z.boolean().optional(),
+  type: numberType,
 });
 
 const updatePhoneNumberSchema = z.object({
@@ -29,6 +48,7 @@ const updatePhoneNumberSchema = z.object({
   default_agent_id: z.string().uuid().nullable().optional(),
   is_enabled: z.boolean().optional(),
   is_primary: z.boolean().optional(),
+  type: numberType,
 });
 
 export async function companyPhoneNumbersRoutes(app: FastifyInstance): Promise<void> {
@@ -38,7 +58,7 @@ export async function companyPhoneNumbersRoutes(app: FastifyInstance): Promise<v
     async (request, reply) => {
       const { customerId } = request.params;
       const numbers = await getPhoneNumbersForCustomer(customerId);
-      return reply.send(numbers);
+      return reply.send(numbers.map((n) => withType(n as unknown as Record<string, any>)));
     }
   );
 
@@ -65,6 +85,9 @@ export async function companyPhoneNumbersRoutes(app: FastifyInstance): Promise<v
         if (agent.rows.length === 0) {
           return reply.status(400).send({ error: "default_agent_id does not belong to this customer" });
         }
+      }
+      if (body.data.type != null && !(await columnExists("company_phone_numbers", "number_type"))) {
+        return reply.status(503).send(MIGRATION_028_MISSING);
       }
 
       // UNIQUE(phone_number) only compares exact strings, so "+918898442005" and
@@ -98,7 +121,8 @@ export async function companyPhoneNumbersRoutes(app: FastifyInstance): Promise<v
           isPrimary: body.data.is_primary,
           isEnabled: body.data.is_enabled,
         });
-        return reply.status(201).send(created);
+        const row = body.data.type != null ? (await saveType(customerId, created.id, body.data.type)) ?? created : created;
+        return reply.status(201).send(withType(row as unknown as Record<string, any>));
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Failed to create phone number";
         if (msg.includes("duplicate key") || msg.includes("unique")) {
@@ -130,6 +154,10 @@ export async function companyPhoneNumbersRoutes(app: FastifyInstance): Promise<v
         }
       }
 
+      if (body.data.type !== undefined && !(await columnExists("company_phone_numbers", "number_type"))) {
+        return reply.status(503).send(MIGRATION_028_MISSING);
+      }
+
       if (body.data.is_primary === true) {
         const ok = await setPrimaryPhoneNumber(customerId, id);
         if (!ok) return reply.status(404).send({ error: "Phone number not found for this customer" });
@@ -141,7 +169,8 @@ export async function companyPhoneNumbersRoutes(app: FastifyInstance): Promise<v
         isEnabled: body.data.is_enabled,
       });
       if (!updated) return reply.status(404).send({ error: "Phone number not found for this customer" });
-      return reply.send(updated);
+      const row = body.data.type !== undefined ? (await saveType(customerId, id, body.data.type ?? null)) ?? updated : updated;
+      return reply.send(withType(row as unknown as Record<string, any>));
     }
   );
 

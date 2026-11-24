@@ -1,5 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { leadInputSchema, splitLeads } from "../services/lead-variables";
+import { columnExists } from "../services/schema-features";
 import fs from "fs";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -183,7 +185,8 @@ const createCampaignSchema = z.object({
 });
 
 const addLeadsSchema = z.object({
-  phone_numbers: z.array(z.string().min(3)).min(1),
+  /** Numbers, or {phone_number, variables} (variables fill the script's {{placeholders}} for that lead; Vodafone calls only). */
+  phone_numbers: z.array(leadInputSchema).min(1),
 });
 
 const normalOutboundCallSchema = z.object({
@@ -373,7 +376,8 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       }
 
       const customerId = request.customerId!;
-      const { phone_numbers } = body.data;
+      const { phones: phone_numbers, variables } = splitLeads(body.data.phone_numbers);
+      const withVariables = variables.size > 0 && (await columnExists("outbound_campaign_leads", "variables"));
 
       // Verify campaign ownership
       const campaign = await pool.query(
@@ -389,10 +393,18 @@ export async function outboundCampaignRoutes(app: FastifyInstance) {
       try {
         await client.query("BEGIN");
         for (const phone of phone_numbers) {
-          await client.query(
-            "INSERT INTO outbound_campaign_leads (campaign_id, phone_number) VALUES ($1, $2)",
-            [id, phone]
-          );
+          const vars = withVariables ? variables.get(phone.replace(/\D/g, "").slice(-10)) : undefined;
+          if (vars) {
+            await client.query(
+              "INSERT INTO outbound_campaign_leads (campaign_id, phone_number, variables) VALUES ($1, $2, $3::jsonb)",
+              [id, phone, JSON.stringify(vars)]
+            );
+          } else {
+            await client.query(
+              "INSERT INTO outbound_campaign_leads (campaign_id, phone_number) VALUES ($1, $2)",
+              [id, phone]
+            );
+          }
         }
         await client.query("COMMIT");
       } catch (err) {

@@ -112,13 +112,15 @@ export async function createCallSession(params: {
   defaultLanguageCode?: string | null;
   /** Usually same as default until first STT updates it */
   currentLanguageCode?: string | null;
+  /** Agent handling the call (same INSERT, no extra query). */
+  agentId?: string | null;
 }): Promise<string> {
   const result = await pool.query(
     `INSERT INTO exotel_call_sessions
        (customer_id, exotel_call_sid, exotel_stream_sid, direction,
         from_number, to_number, status, chat_session_id, metadata,
-        voicebot_multilingual, default_language_code, current_language_code)
-     VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10, $11)
+        voicebot_multilingual, default_language_code, current_language_code, agent_id)
+     VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10, $11, $12)
      RETURNING id`,
     [
       params.customerId,
@@ -132,6 +134,7 @@ export async function createCallSession(params: {
       params.voicebotMultilingual ?? null,
       params.defaultLanguageCode ?? null,
       params.currentLanguageCode ?? params.defaultLanguageCode ?? null,
+      params.agentId ?? null,
     ]
   );
   return result.rows[0].id;

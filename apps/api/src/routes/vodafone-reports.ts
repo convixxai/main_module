@@ -27,6 +27,7 @@ import { getObdCampaignStatus, pullViCallReport, VodafoneObdError, type PullRepo
 import { loadVodafoneCampaign, leadCounts, statusIdOf, pickDni, publicCampaign, viErrorReply } from "./vodafone-campaigns";
 import { digitsOnly } from "./outbound-campaigns";
 import { decrypt } from "../services/crypto";
+import { tableExists } from "../services/schema-features";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Longest date range one history request may ask VI for. */
@@ -302,7 +303,7 @@ function hasCallCharges(): Promise<boolean> {
 }
 
 /** Shared FROM/WHERE for Vodafone call rows of one customer. $1 = customer id. */
-function callRowsSql(f: z.infer<typeof historyQuery>, params: unknown[], withCharges = false): string {
+function callRowsSql(f: z.infer<typeof historyQuery>, params: unknown[], withCharges = false, withInsights = false): string {
   const where = [`s.customer_id = $1`, `s.metadata->>'provider' = 'vodafone'`];
   const add = (v: unknown) => {
     params.push(v);
@@ -326,6 +327,7 @@ function callRowsSql(f: z.infer<typeof historyQuery>, params: unknown[], withCha
      LEFT JOIN outbound_campaigns c ON c.id = l.campaign_id
      LEFT JOIN agents a ON a.id = s.agent_id
      ${withCharges ? "LEFT JOIN call_charges cc ON cc.call_session_id = s.id::text" : ""}
+     ${withInsights ? "LEFT JOIN call_insights ci ON ci.call_session_id = s.id" : ""}
     WHERE ${where.join(" AND ")}`;
 }
 
@@ -341,11 +343,61 @@ const CALL_COLUMNS = `s.id, s.direction, s.from_number, s.to_number, s.status, s
        l.campaign_id, c.name AS campaign_name, s.metadata,
        ${DURATION_SQL} AS duration_seconds, ${OUTCOME_SQL} AS outcome`;
 const CHARGE_COLUMNS = `, cc.pulses_charged, cc.pulse_seconds, cc.billed_seconds, cc.status AS charge_status`;
+/** Post-call analysis (call_insights, migration 028). */
+const INSIGHT_COLUMNS = `, ci.status AS insight_status, ci.disposition, ci.disposition_confidence, ci.sentiment, ci.sentiment_score,
+       ci.is_voicemail, ci.markers, ci.updated_at AS insight_at`;
 
-/** Columns + FROM for call rows, with the credit columns when call_charges exists. */
+/** Columns + FROM for call rows, with the credit columns when call_charges exists (and insights when call_insights does). */
 async function callSelect(f: z.infer<typeof historyQuery>, params: unknown[]): Promise<{ cols: string; from: string; charges: boolean }> {
-  const charges = await hasCallCharges();
-  return { cols: CALL_COLUMNS + (charges ? CHARGE_COLUMNS : ""), from: callRowsSql(f, params, charges), charges };
+  const [charges, insights] = await Promise.all([hasCallCharges(), tableExists("call_insights")]);
+  return {
+    cols: CALL_COLUMNS + (charges ? CHARGE_COLUMNS : "") + (insights ? INSIGHT_COLUMNS : ""),
+    from: callRowsSql(f, params, charges, insights),
+    charges,
+  };
+}
+
+/**
+ * Call states (A3). VI connects the stream only once the call is answered, and
+ * sends no ringing event, so: answered_at = start of the stream, ringing_at /
+ * wait_seconds = null. end_reason from how the stream ended. Who hung up is
+ * in VI's own report row: GET /vodafone/reports/calls?type=inbound&call_id=<vi_call_id>
+ * ("DISCONNECTED BY"); see vi_report.
+ */
+function endReason(status: string | null, ended: boolean): string | null {
+  if (!status || (status === "active" && !ended)) return null;
+  if (status.startsWith("stopped:")) return "ended_by_provider";
+  if (/^ws_closed:(1000|1005)$/.test(status)) return "hangup";
+  if (status === "ws_closed:1006") return "connection_lost";
+  if (status === "active") return "not_recorded";
+  return "other";
+}
+
+function presentTiming(r: Record<string, any>, started: string | null, ended: string | null) {
+  return {
+    ringing_at: null,
+    answered_at: started,
+    ended_at: ended,
+    wait_seconds: null,
+    end_reason: endReason(r.status ?? null, !!ended),
+  };
+}
+
+/** Post-call disposition / sentiment / voicemail / markers (null until the call-insights worker has seen the call). */
+function presentInsights(r: Record<string, any>) {
+  if (!("insight_status" in r) || r.insight_status == null) return null;
+  if (r.insight_status !== "done") return { status: r.insight_status };
+  const num = (v: unknown) => (v == null ? null : Number(v));
+  return {
+    status: "done",
+    disposition: r.disposition ?? null,
+    disposition_confidence: num(r.disposition_confidence),
+    sentiment: r.sentiment ?? null,
+    sentiment_score: num(r.sentiment_score),
+    is_voicemail: r.is_voicemail ?? null,
+    markers: Array.isArray(r.markers) ? r.markers : null,
+    analysed_at: r.insight_at ? new Date(r.insight_at).toISOString() : null,
+  };
 }
 
 /**
@@ -401,6 +453,11 @@ function presentCall(r: Record<string, any>) {
     vi_call_id: r.vi_call_id ?? null,
     chat_session_id: r.chat_session_id ?? null,
     credits: presentCredits(r),
+    timing: presentTiming(r, started, ended),
+    // VI's own row for this call (recording field, who disconnected) is in its
+    // INBOUND report under this call id, also for campaign calls.
+    vi_report: r.vi_call_id ? { type: "inbound", call_id: String(r.vi_call_id), date_ist: started ? istDate(started) : null } : null,
+    insights: presentInsights(r),
   };
 }
 

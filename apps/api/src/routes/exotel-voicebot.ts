@@ -4703,7 +4703,8 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                      SET exotel_stream_sid = $1,
                          exotel_call_sid = COALESCE(exotel_call_sid, $2),
                          metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
-                         status = 'active'
+                         status = 'active',
+                         agent_id = COALESCE($6::uuid, agent_id)
                      WHERE id = $4::uuid AND customer_id = $5::uuid AND direction = 'outbound'
                      RETURNING id`,
                     [
@@ -4712,6 +4713,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                       patch,
                       outboundLinkedId,
                       customerId,
+                      session.agentId ?? null,
                     ]
                   );
                   session.callSessionDbId =
@@ -4732,6 +4734,7 @@ export async function exotelVoicebotRoutes(app: FastifyInstance): Promise<void> 
                     voicebotMultilingual: session.voicebotMultilingualEffective,
                     defaultLanguageCode: session.defaultLanguageCode,
                     currentLanguageCode: session.defaultLanguageCode,
+                    agentId: session.agentId ?? null,
                   });
                 }
                 session.currentLanguageCode = normalizeBcp47Tag(

@@ -25,6 +25,9 @@ import { exotelStatusCallbackRoutes } from "./routes/exotel-status-callback";
 import { adminLogsRoutes } from "./routes/adminLogs";
 import { callingRoutes } from "./routes/calling";
 import { customerLogRoutes } from "./routes/customer-logs";
+import { usageRoutes } from "./routes/usage";
+import { adminMetricsRoutes } from "./routes/admin-metrics";
+import { callInsightRoutes } from "./routes/call-insights";
 import { outboundCampaignRoutes } from "./routes/outbound-campaigns";
 import { vodafoneCampaignRoutes } from "./routes/vodafone-campaigns";
 import { vodafoneReportRoutes, vodafoneOwnReportRoutes } from "./routes/vodafone-reports";
@@ -44,6 +47,7 @@ import { vodafoneWsSimulatorRoutes } from "./routes/vodafone-ws-simulator";
 import { toolCallingSettingsRoutes } from "./routes/tool-calling-settings";
 import { qaMockCrmRoutes } from "./routes/qa-mock-crm";
 import { createRootLogger } from "./config/logger-factory";
+import { startApiRequestLog } from "./services/api-request-log";
 import { attachPoolQueryLogging } from "./config/db";
 import { registerRequestLogging } from "./plugins/request-logging";
 import { registerSwagger } from "./plugins/swagger";
@@ -58,6 +62,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   setSuggestedKbLogger(app.log);
 
   registerRequestLogging(app);
+  startApiRequestLog(app.log);
   
   // Debug hook to trace all Exotel Voicebot connection attempts
   app.addHook("preHandler", async (request) => {
@@ -104,6 +109,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.register(adminLogsRoutes);                // Daily log file list + download (admin)
   app.register(callingRoutes);                  // Calling switch on/off (0 credits) + calling logs + activity per hour/day/week/month
   app.register(customerLogRoutes);              // One customer's server log lines per IST day, with frequency summary
+  app.register(usageRoutes);                    // API key request log + usage counters per customer (SaaS C1/C2)
+  app.register(adminMetricsRoutes);             // Engine timings + events from the server logs (admin, SaaS C4/C5)
+  app.register(callInsightRoutes);              // Post-call analysis settings + results (worker: jobs/call-insights-worker.ts)
   app.register(outboundCampaignRoutes);         // Outbound Campaign management & triggering
   app.register(vodafoneCampaignRoutes);         // Vodafone OBD campaigns (VI dials; never Exotel)
   app.register(vodafoneReportRoutes);           // Vodafone reports: campaign status/report/summary, call history (VI, read-only)

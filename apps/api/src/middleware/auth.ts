@@ -7,6 +7,8 @@ export interface AuthenticatedRequest extends FastifyRequest {
   customerPrompt?: string;
   /** When true, RAG uses OpenAI only (no self-hosted LLM). From `customer_settings` / `customers`. */
   ragUseOpenaiOnly?: boolean;
+  /** api_keys.id of the x-api-key used (set by apiKeyAuth; for the API request log). */
+  apiKeyId?: string;
 }
 
 export async function apiKeyAuth(
@@ -21,6 +23,7 @@ export async function apiKeyAuth(
 
   const result = await pool.query(
     `SELECT ak.customer_id,
+            ak.id AS api_key_id,
             c.system_prompt,
             c.rag_use_openai_only           AS legacy_rag_openai_only,
             cs.rag_use_openai_only          AS settings_rag_openai_only
@@ -38,6 +41,7 @@ export async function apiKeyAuth(
   const row = result.rows[0];
   request.customerId = row.customer_id;
   request.customerPrompt = row.system_prompt;
+  request.apiKeyId = row.api_key_id;
   // Prefer the new customer_settings row; fall back to legacy `customers` column
   // for databases where migration 005 has not been applied yet.
   request.ragUseOpenaiOnly =

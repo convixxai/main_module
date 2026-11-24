@@ -2,6 +2,20 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "../config/db";
 import { apiKeyAuth, AuthenticatedRequest } from "../middleware/auth";
+import { columnExists, MIGRATION_028_MISSING } from "../services/schema-features";
+
+/**
+ * Per-agent answer settings (migration 028): `temperature` 0-1.5 and
+ * `max_tokens` 80-2000, used for this agent's answers; null = the customer's
+ * settings (as before). GPT-5 models only accept their default temperature,
+ * so `temperature` has no effect on them. Read through to_jsonb() so these
+ * routes keep working before the migration (the fields are then null).
+ */
+const llmFields = {
+  temperature: z.number().min(0).max(1.5).optional().nullable(),
+  max_tokens: z.number().int().min(80).max(2000).optional().nullable(),
+};
+const LLM_COLS = `, (to_jsonb(agents) ->> 'llm_temperature')::float8 AS temperature, (to_jsonb(agents) ->> 'llm_max_tokens')::int AS max_tokens`;
 
 // voice_id is a convenience alias for tts_speaker: pick an entry from
 // GET /voices and send its `voice_id` here (plus `tts_provider`/`tts_model`
@@ -29,6 +43,7 @@ const createAgentSchema = z.object({
   avatar_id: z.string().uuid().optional().nullable(),
   elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
   cartesia_avatar_id: z.string().uuid().optional().nullable(),
+  ...llmFields,
 });
 
 const updateAgentSchema = z.object({
@@ -49,6 +64,7 @@ const updateAgentSchema = z.object({
   avatar_id: z.string().uuid().optional().nullable(),
   elevenlabs_avatar_id: z.string().uuid().optional().nullable(),
   cartesia_avatar_id: z.string().uuid().optional().nullable(),
+  ...llmFields,
 });
 
 export async function agentRoutes(app: FastifyInstance) {
@@ -115,7 +131,20 @@ export async function agentRoutes(app: FastifyInstance) {
         ]
       );
 
-      return reply.status(201).send(result.rows[0]);
+      const created = result.rows[0];
+      const { temperature, max_tokens } = body.data;
+      if (temperature != null || max_tokens != null) {
+        if (!(await columnExists("agents", "llm_temperature"))) {
+          // The agent is created; only its answer settings could not be saved yet.
+          return reply.status(201).send({ ...created, temperature: null, max_tokens: null, warning: MIGRATION_028_MISSING.error });
+        }
+        await pool.query(`UPDATE agents SET llm_temperature = $1, llm_max_tokens = $2 WHERE id = $3`, [
+          temperature ?? null,
+          max_tokens ?? null,
+          created.id,
+        ]);
+      }
+      return reply.status(201).send({ ...created, temperature: temperature ?? null, max_tokens: max_tokens ?? null });
     }
   );
 
@@ -128,7 +157,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const result = await pool.query(
         `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_pitch, tts_loudness,
                 tts_model, tts_speaker, tts_sample_rate, tts_voice_settings,
-                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at
+                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at${LLM_COLS}
          FROM agents
          WHERE customer_id = $1
          ORDER BY created_at DESC`,
@@ -149,7 +178,7 @@ export async function agentRoutes(app: FastifyInstance) {
       const result = await pool.query(
         `SELECT id, name, description, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_pitch, tts_loudness,
                 tts_model, tts_speaker, tts_sample_rate, tts_voice_settings,
-                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at
+                avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at${LLM_COLS}
          FROM agents
          WHERE id = $1 AND customer_id = $2`,
         [id, customerId]
@@ -192,6 +221,8 @@ export async function agentRoutes(app: FastifyInstance) {
         avatar_id,
         elevenlabs_avatar_id,
         cartesia_avatar_id,
+        temperature,
+        max_tokens,
       } = body.data;
       // voice_id is a convenience alias for tts_speaker (see createAgentSchema's comment).
       const resolvedTtsSpeaker = tts_speaker !== undefined ? tts_speaker : voice_id;
@@ -212,7 +243,9 @@ export async function agentRoutes(app: FastifyInstance) {
         tts_voice_settings === undefined &&
         avatar_id === undefined &&
         elevenlabs_avatar_id === undefined &&
-        cartesia_avatar_id === undefined
+        cartesia_avatar_id === undefined &&
+        temperature === undefined &&
+        max_tokens === undefined
       ) {
         return reply
           .status(400)
@@ -226,6 +259,9 @@ export async function agentRoutes(app: FastifyInstance) {
 
       if (existing.rows.length === 0) {
         return reply.status(404).send({ error: "Agent not found" });
+      }
+      if ((temperature !== undefined || max_tokens !== undefined) && !(await columnExists("agents", "llm_temperature"))) {
+        return reply.status(503).send(MIGRATION_028_MISSING);
       }
 
       const sets: string[] = [];
@@ -296,6 +332,14 @@ export async function agentRoutes(app: FastifyInstance) {
         sets.push(`cartesia_avatar_id = $${idx++}`);
         values.push(cartesia_avatar_id);
       }
+      if (temperature !== undefined) {
+        sets.push(`llm_temperature = $${idx++}`);
+        values.push(temperature);
+      }
+      if (max_tokens !== undefined) {
+        sets.push(`llm_max_tokens = $${idx++}`);
+        values.push(max_tokens);
+      }
 
       sets.push(`updated_at = NOW()`);
       values.push(id);
@@ -306,7 +350,7 @@ export async function agentRoutes(app: FastifyInstance) {
          WHERE id = $${idx++} AND customer_id = $${idx}
          RETURNING id, name, description, system_prompt, greeting_text, error_text, tts_provider, tts_pace, tts_pitch, tts_loudness,
                    tts_model, tts_speaker, tts_sample_rate, tts_voice_settings,
-                   avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at`,
+                   avatar_id, elevenlabs_avatar_id, cartesia_avatar_id, is_active, created_at, updated_at${LLM_COLS}`,
         values
       );
 

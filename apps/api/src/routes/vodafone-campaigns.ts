@@ -40,6 +40,8 @@ import {
   VodafoneObdError,
 } from "../services/vodafone-obd";
 import { resolveObdDni, digitsOnly, buildObdBaseRecord, DEFAULT_OBD_BASE_VARIABLES } from "./outbound-campaigns";
+import { leadInputSchema, splitLeads, type LeadVariables } from "../services/lead-variables";
+import { columnExists } from "../services/schema-features";
 
 /** Records per staticCampaignDataIngestion request. */
 const VI_BASE_CHUNK = 1000;
@@ -48,7 +50,8 @@ const MAX_NUMBERS_PER_REQUEST = 50_000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}(:\d{2})?$/;
 
-const phoneList = z.array(z.string().min(3)).min(1).max(MAX_NUMBERS_PER_REQUEST);
+/** Numbers, or {phone_number, variables} objects (variables fill the script's {{placeholders}} for that lead). */
+const phoneList = z.array(leadInputSchema).min(1).max(MAX_NUMBERS_PER_REQUEST);
 
 const createSchema = z.object({
   name: z.string().min(1).max(200),
@@ -215,7 +218,8 @@ export async function pickDni(
 async function pushNumbers(
   customerId: string,
   campaign: Record<string, any>,
-  numbers: string[]
+  numbers: string[],
+  variables: Map<string, LeadVariables> = new Map()
 ): Promise<{ pushed: number; alreadyInCampaign: number; dni?: string; error?: unknown }> {
   // A retry re-sends the whole list: never upload a number VI already has
   // (it would be dialed twice). Matched on the last 10 digits. Exception: if
@@ -238,6 +242,17 @@ async function pushNumbers(
   }
   const fresh = viBaseEmpty ? numbers : numbers.filter((n) => !local.has(n.slice(-10)));
   const alreadyInCampaign = numbers.length - fresh.length;
+  // Per-lead variables need migration 028; before it, numbers are stored as before.
+  if (variables.size > 0 && !(await columnExists("outbound_campaign_leads", "variables"))) variables = new Map();
+  // Numbers already in the campaign: not uploaded again, but new variables are kept.
+  const known = numbers.filter((n) => local.has(n.slice(-10)) && variables.has(n.slice(-10)));
+  for (const n of known) {
+    await pool.query(
+      `UPDATE outbound_campaign_leads SET variables = $3::jsonb
+        WHERE campaign_id = $1 AND RIGHT(regexp_replace(phone_number, '\\D', '', 'g'), 10) = $2`,
+      [campaign.id, n.slice(-10), JSON.stringify(variables.get(n.slice(-10)))]
+    );
+  }
   numbers = fresh;
   if (numbers.length === 0) return { pushed: 0, alreadyInCampaign };
   const dni = await pickDni(customerId, campaign.vi_flow_id, campaign.phone_number_id);
@@ -257,11 +272,19 @@ async function pushNumbers(
     }
     const newLocal = chunk.filter((n) => !local.has(n.slice(-10)));
     if (newLocal.length > 0) {
-      await pool.query(
-        `INSERT INTO outbound_campaign_leads (campaign_id, phone_number)
-         SELECT $1, UNNEST($2::text[])`,
-        [campaign.id, newLocal]
-      );
+      if (variables.size > 0) {
+        await pool.query(
+          `INSERT INTO outbound_campaign_leads (campaign_id, phone_number, variables)
+           SELECT $1, n, v::jsonb FROM UNNEST($2::text[], $3::text[]) AS t(n, v)`,
+          [campaign.id, newLocal, newLocal.map((n) => (variables.has(n.slice(-10)) ? JSON.stringify(variables.get(n.slice(-10))) : null))]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO outbound_campaign_leads (campaign_id, phone_number)
+           SELECT $1, UNNEST($2::text[])`,
+          [campaign.id, newLocal]
+        );
+      }
     }
     pushed += chunk.length;
   }
@@ -337,7 +360,8 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     if (window.totime <= window.fromtime) return reply.status(400).send({ error: "totime must be after fromtime" });
     if (window.todate < today) return reply.status(400).send({ error: "The dialing window has already ended" });
 
-    const numbers = normalizeNumbers(d.phone_numbers ?? []);
+    const leadInput = splitLeads(d.phone_numbers ?? []);
+    const numbers = normalizeNumbers(leadInput.phones);
     if (d.phone_numbers && numbers.valid.length === 0) {
       return reply.status(400).send({ error: "None of phone_numbers is a valid number (10-13 digits)" });
     }
@@ -414,7 +438,7 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
 
     const leads = { received: d.phone_numbers?.length ?? 0, valid: numbers.valid.length, invalid: numbers.invalid, duplicates: numbers.duplicates, pushed: 0 };
     if (numbers.valid.length > 0) {
-      const push = await pushNumbers(customerId, campaign, numbers.valid);
+      const push = await pushNumbers(customerId, campaign, numbers.valid, leadInput.variables);
       leads.pushed = push.pushed;
       if (push.error) {
         app.log.error({ err: push.error, campaignId: id }, "vodafone-campaigns: base upload to VI failed");
@@ -547,11 +571,12 @@ export async function vodafoneCampaignRoutes(app: FastifyInstance) {
     const campaign = await loadVodafoneCampaign(customerId, id);
     if (!campaign) return reply.status(404).send({ error: "Vodafone campaign not found" });
 
-    const numbers = normalizeNumbers(body.data.phone_numbers);
+    const leadInput = splitLeads(body.data.phone_numbers);
+    const numbers = normalizeNumbers(leadInput.phones);
     if (numbers.valid.length === 0) return reply.status(400).send({ error: "None of phone_numbers is a valid number (10-13 digits)" });
     let push: { pushed: number; alreadyInCampaign: number; error?: unknown };
     try {
-      push = await pushNumbers(customerId, campaign, numbers.valid);
+      push = await pushNumbers(customerId, campaign, numbers.valid, leadInput.variables);
     } catch (err) {
       return viErrorReply(reply, err, "Could not upload the numbers to Vodafone");
     }

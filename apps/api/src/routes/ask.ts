@@ -68,6 +68,25 @@ interface ResolvedAgent {
   noKbFallbackInstruction: string | null;
   /** Agent row \`tts_model\` (ElevenLabs id); combined with customer_settings for RAG v3 hints. */
   ttsModel: string | null;
+  /** agents.llm_temperature / llm_max_tokens (migration 028); null = the customer's settings, as before. */
+  llmTemperature: number | null;
+  llmMaxTokens: number | null;
+}
+
+/**
+ * Per-agent answer settings, read in the same agent query (no extra query).
+ * to_jsonb() so the query still works before migration 028 adds the columns.
+ */
+const AGENT_LLM_COLUMNS = (t: string) =>
+  `(to_jsonb(${t}) ->> 'llm_temperature') AS llm_temperature, (to_jsonb(${t}) ->> 'llm_max_tokens') AS llm_max_tokens`;
+
+function agentLlmFields(row: Record<string, unknown>): Pick<ResolvedAgent, "llmTemperature" | "llmMaxTokens"> {
+  const t = row.llm_temperature != null ? Number(row.llm_temperature) : NaN;
+  const m = row.llm_max_tokens != null ? Number(row.llm_max_tokens) : NaN;
+  return {
+    llmTemperature: Number.isFinite(t) ? Math.min(1.5, Math.max(0, t)) : null,
+    llmMaxTokens: Number.isFinite(m) ? Math.min(2000, Math.max(80, Math.floor(m))) : null,
+  };
 }
 
 interface KBMatch {
@@ -178,7 +197,7 @@ async function resolveAgent(
 ): Promise<ResolvedAgent | null> {
   if (agentId) {
     const result = await pool.query(
-      `SELECT id, name, system_prompt, no_kb_fallback_instruction, tts_model FROM agents
+      `SELECT id, name, system_prompt, no_kb_fallback_instruction, tts_model, ${AGENT_LLM_COLUMNS("agents")} FROM agents
        WHERE id = $1 AND customer_id = $2 AND is_active = TRUE`,
       [agentId, customerId]
     );
@@ -189,11 +208,12 @@ async function resolveAgent(
       systemPrompt: result.rows[0].system_prompt,
       noKbFallbackInstruction: result.rows[0].no_kb_fallback_instruction ?? null,
       ttsModel: result.rows[0].tts_model ?? null,
+      ...agentLlmFields(result.rows[0]),
     };
   }
 
   const agents = await pool.query(
-    `SELECT id, name, description, system_prompt, no_kb_fallback_instruction, tts_model FROM agents
+    `SELECT id, name, description, system_prompt, no_kb_fallback_instruction, tts_model, ${AGENT_LLM_COLUMNS("agents")} FROM agents
      WHERE customer_id = $1 AND is_active = TRUE
      ORDER BY created_at ASC`,
     [customerId]
@@ -208,6 +228,7 @@ async function resolveAgent(
       systemPrompt: a.system_prompt,
       noKbFallbackInstruction: a.no_kb_fallback_instruction ?? null,
       ttsModel: a.tts_model ?? null,
+      ...agentLlmFields(a),
     };
   }
 
@@ -255,6 +276,7 @@ async function resolveAgent(
           systemPrompt: matched.system_prompt,
           noKbFallbackInstruction: matched.no_kb_fallback_instruction ?? null,
           ttsModel: matched.tts_model ?? null,
+          ...agentLlmFields(matched),
         };
       }
     }
@@ -267,6 +289,7 @@ async function resolveAgent(
     systemPrompt: fallback.system_prompt,
     noKbFallbackInstruction: fallback.no_kb_fallback_instruction ?? null,
     ttsModel: fallback.tts_model ?? null,
+    ...agentLlmFields(fallback),
   };
 }
 
@@ -275,7 +298,7 @@ async function resolveAgentFromSession(
 ): Promise<ResolvedAgent | null> {
   if (!sessionId) return null;
   const result = await pool.query(
-    `SELECT a.id, a.name, a.system_prompt, a.no_kb_fallback_instruction, a.tts_model FROM chat_sessions cs
+    `SELECT a.id, a.name, a.system_prompt, a.no_kb_fallback_instruction, a.tts_model, ${AGENT_LLM_COLUMNS("a")} FROM chat_sessions cs
      JOIN agents a ON a.id = cs.agent_id AND a.is_active = TRUE
      WHERE cs.id = $1`,
     [sessionId]
@@ -287,6 +310,7 @@ async function resolveAgentFromSession(
     systemPrompt: result.rows[0].system_prompt,
     noKbFallbackInstruction: result.rows[0].no_kb_fallback_instruction ?? null,
     ttsModel: result.rows[0].tts_model ?? null,
+    ...agentLlmFields(result.rows[0]),
   };
 }
 
@@ -901,8 +925,13 @@ async function runAskPipelineCore(params: {
     }
   );
 
-  const maxTok = llmMaxTokensAsk(custSettings ?? null);
-  const openaiOpts = openAiRagOptsFromCs(custSettings ?? null);
+  // Agent's own answer settings (B1) win over the customer's; null = as before.
+  // (GPT-5 models ignore temperature: see openAiGenerationParams.)
+  const maxTok = agent?.llmMaxTokens ?? llmMaxTokensAsk(custSettings ?? null);
+  const openaiOpts = {
+    ...openAiRagOptsFromCs(custSettings ?? null),
+    ...(agent?.llmTemperature != null ? { temperature: agent.llmTemperature } : {}),
+  };
   const selfHostedModelOpts = {
     model: custSettings?.llm_model_override?.trim() || undefined,
   };
