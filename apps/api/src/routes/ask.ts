@@ -649,6 +649,11 @@ async function runAskPipelineCore(params: {
     languageCode?: string | null;
     onToolHold?: (holdText: string) => void | Promise<void>;
     log?: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void };
+    /**
+     * The route runs live capture itself (toolset.captureFromConversation after
+     * every caller turn): the answering model then gets no SAVE tools.
+     */
+    liveCapture?: boolean;
   };
 }): Promise<AskPipelineResult> {
   const {
@@ -812,6 +817,13 @@ async function runAskPipelineCore(params: {
   // kb_direct) are skipped: a personal question ("where is my order?") must
   // reach the model so it can fetch the caller's data.
   const toolset = await toolsetP;
+  // Live capture (voice routes pass liveCapture): SAVE tools run in the
+  // background from the conversation, so the answering model gets only the
+  // other tools (none: the plain, tool-free LLM path). The KB gates above and
+  // below still see `toolset`, so the call flow behaves as before.
+  const live = !!(toolset && toolContext?.liveCapture && toolset.hasLiveCapture);
+  const answerTools = toolset ? (live ? toolset.liveTools : toolset.tools) : [];
+  const answerPromptBlock = toolset ? (live ? toolset.livePromptBlock : toolset.promptBlock) : "";
 
   const baseTimings = (): AskPipelineTimings => ({
     parallel_init_ms: parallelInitMs,
@@ -938,10 +950,10 @@ async function runAskPipelineCore(params: {
   const selfHostedOnly =
     custSettings?.llm_fallback_to_openai === false && ragOpenaiOnly !== true;
 
-  if (toolset && ragMessages[0]?.role === "system") {
+  if (toolset && answerPromptBlock && ragMessages[0]?.role === "system") {
     ragMessages[0] = { ...ragMessages[0], content: `${ragMessages[0].content}
 
-${toolset.promptBlock}` };
+${answerPromptBlock}` };
   }
   const turnNote = turnSystemNote?.trim();
   if (turnNote && ragMessages.length > 0 && ragMessages[ragMessages.length - 1].role === "user") {
@@ -962,7 +974,7 @@ ${toolset.promptBlock}` };
   if (ragOpenaiOnly) {
     trace?.("rag_llm_mode", { mode: onLlmTextDelta ? "openai_only_streaming" : "openai_only" });
     try {
-      if (toolset && toolContext) {
+      if (toolset && toolContext && answerTools.length > 0) {
         const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? null;
         const ctx = {
           customerId,
@@ -976,7 +988,7 @@ ${toolset.promptBlock}` };
         const r = await streamChatOpenAIWithTools({
           messages: ragMessages,
           maxTokens: maxTok,
-          tools: toolset.tools,
+          tools: answerTools,
           onTextDelta: onLlmTextDelta,
           onToolCallsStart: async ({ names, textAlreadyEmitted }) => {
             // "Please hold" only while READING data, once per turn, and not

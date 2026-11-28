@@ -25,6 +25,7 @@ import dns from "dns/promises";
 import net from "net";
 import type OpenAI from "openai";
 import { pool } from "../../config/db";
+import { env } from "../../config/env";
 import { getCustomerSettings } from "../customer-settings";
 import { decryptLaravelString } from "./laravel-crypt";
 
@@ -74,6 +75,31 @@ export interface CallToolset {
   /** SAVE tools (fire-and-forget capture): the reply never waits on their result. */
   isSilentTool: (name: string) => boolean;
   summary: { native: boolean; custom: string[] };
+  /**
+   * LIVE CAPTURE (2026-11-28): the tenant has SAVE tools. Voice routes that
+   * pass `liveCapture` to runAskPipeline call `captureFromConversation` after
+   * every caller turn (background, never awaited by the reply); the answering
+   * model then gets `liveTools` / `livePromptBlock` (no SAVE tools), so a save
+   * never costs the caller an extra LLM round (~1 s seen on 2026-11-28).
+   */
+  hasLiveCapture: boolean;
+  liveTools: ToolDef[];
+  livePromptBlock: string;
+  captureFromConversation: (getLines: () => CaptureLine[], ctx: CallToolContext) => void;
+  /** QA: the fields live capture would extract from the customer lines from `fromIndex` on, per SAVE tool. Sends nothing. */
+  previewCapture: (
+    lines: CaptureLine[],
+    fromIndex: number,
+    saved: Record<string, string>
+  ) => Promise<Record<string, Record<string, string>>>;
+}
+
+/** One line of the call, for live capture. */
+export interface CaptureLine {
+  role: "bot" | "customer";
+  text: string;
+  /** Language the speech-to-text heard on a customer line (BCP-47, e.g. mr-IN). */
+  lang?: string | null;
 }
 
 export interface ToolExecution {
@@ -124,6 +150,17 @@ You can call tools to fetch live data about THIS caller and their account (CRM r
 - ACTION tools (marked "ACTION": they book, schedule, cancel or pay for something) need the caller's confirmation ONCE: repeat the exact details, ask "shall I go ahead?", and call the tool only after a clear yes. Never ask for confirmation again in this call for something already confirmed; a correction the caller makes afterwards is sent without asking again.
 - A tool result of submitted=true means it has been sent: treat it as done and move on.
 - Keep the reply short and spoken, in the call's current language.`;
+
+const LIVE_CAPTURE_RULES = `--- CUSTOMER DETAILS ---
+Everything the customer tells you (interest, name, visit day/time, budget, preferences...) is recorded automatically in the background from this conversation. You have no save tool and nothing to call for it.
+- Just follow your call flow: ask your next question in the same reply.
+- Never say you are saving, noting or updating anything, never mention a CRM or system, and never read the customer's details back only to confirm them.
+- The phone number is already known: never ask for it or read it aloud.`;
+
+/** Prompt block when SAVE tools are replaced by live capture (any remaining READ/ACTION tools keep their rules). */
+function buildLivePromptBlock(hasOtherTools: boolean): string {
+  return hasOtherTools ? `${DEFAULT_TOOL_RULES}\n\n${LIVE_CAPTURE_RULES}` : LIVE_CAPTURE_RULES;
+}
 
 function buildPromptBlock(customerPrompt: string | null | undefined): string {
   const extra = String(customerPrompt ?? "").trim();
@@ -182,6 +219,7 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
 
   const tools: ToolDef[] = [];
   const customByName = new Map<string, CustomToolRow>();
+  const captureTools: { name: string; row: CustomToolRow; fields: string[] }[] = [];
 
   if (native) {
     tools.push({
@@ -215,6 +253,7 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
     const llmParams = placeholders(row).filter((p) => paramSource(row, p) === "conversation");
     const isWrite = !["GET", "HEAD"].includes((row.method || "GET").toUpperCase());
     const capture = isWrite && isCaptureTool(row);
+    if (capture && llmParams.length > 0) captureTools.push({ name, row, fields: llmParams });
     const properties: Record<string, { type: "string"; description: string }> = {};
     for (const p of llmParams) {
       properties[p] = {
@@ -247,10 +286,33 @@ async function buildToolset(customerId: string): Promise<CallToolset | null> {
   if (tools.length === 0) return null;
 
   const companyId = company.id;
+  const captureNames = new Set(captureTools.map((c) => c.name));
+  const liveTools = tools.filter((t) => !(t.type === "function" && captureNames.has(t.function.name)));
+  const liveOpts = {
+    // Not the tenant's (fast) answering model: extraction runs in the
+    // background, so accuracy wins. gpt-4.1-mini copied the bot's quoted price
+    // into "budget" in the 2026-11-28 replay; gpt-5-mini did not.
+    model: (process.env.CRM_LIVE_CAPTURE_MODEL || "gpt-5-mini").trim(),
+    companyPrompt: String(settings?.tool_calling_prompt ?? "").trim(),
+  };
   return {
     companyId,
     tools,
     promptBlock: buildPromptBlock(settings?.tool_calling_prompt),
+    hasLiveCapture: captureTools.length > 0,
+    liveTools,
+    livePromptBlock: buildLivePromptBlock(liveTools.length > 0),
+    captureFromConversation: (getLines, ctx) => {
+      if (captureTools.length === 0) return;
+      queueLiveCapture(captureTools, getLines, ctx, companyId, liveOpts);
+    },
+    previewCapture: async (lines, fromIndex, saved) => {
+      const out: Record<string, Record<string, string>> = {};
+      for (const t of captureTools) {
+        out[t.name] = await extractCaptureFields(t.row, t.fields, lines, fromIndex, saved, liveOpts.model, liveOpts.companyPrompt);
+      }
+      return out;
+    },
     summary: { native, custom: [...customByName.keys()] },
     isSilentTool: (name) => {
       const row = customByName.get(name);
@@ -362,6 +424,11 @@ export function isCaptureTool(row: { url: string; title: string }): boolean {
   return /\b(save|saves|capture|update|updates|note|notes|log|record|lead)\b/i.test(row.title || "");
 }
 
+function sameValue(a: string, b: string): boolean {
+  const n = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  return n(a) === n(b);
+}
+
 const EMPTY_VALUES = new Set(["", "null", "none", "n/a", "na", "unknown", "-", "not provided", "not mentioned"]);
 
 /**
@@ -388,7 +455,8 @@ function submitCapture(
   for (const [k, v] of Object.entries(args)) {
     const val = String(v ?? "").trim();
     if (EMPTY_VALUES.has(val.toLowerCase())) continue;
-    if (st.sent[k] === val) continue;
+    // Same value up to case/punctuation ("3-4 pm" vs ", 3-4 PM"): not resent.
+    if (st.sent[k] !== undefined && sameValue(st.sent[k], val)) continue;
     changed[k] = val;
     changedKeys.push(k);
   }
@@ -455,6 +523,216 @@ function submitWriteInBackground(
     submitted: true,
     instruction: "The request has been sent. Briefly confirm to the caller that it is done, then continue. Do not say you are waiting or checking.",
   });
+}
+
+// ---------- live capture (background extraction after every caller turn) ----------
+//
+// User rule 2026-11-28: whatever the bot learns on the call (interest first,
+// then name, visit time, any other field) goes to the CRM in real time,
+// without delaying or disturbing the call. The answering model proved
+// unreliable at calling the SAVE tool (one save in an 8-turn call; the visit
+// time was never saved) and each save cost the reply an extra LLM round. So a
+// separate small LLM request reads the conversation after every caller turn,
+// returns the tool's fields, and submitCapture sends only what changed. Runs
+// one at a time per call; a turn that arrives meanwhile re-runs it once with
+// the latest conversation.
+
+const LIVE_MAX_LINES = 40;
+const LIVE_TIMEOUT_MS = 20_000;
+
+interface LiveRun {
+  at: number;
+  running: boolean;
+  again: boolean;
+  phoneWarned: boolean;
+  /** Per SAVE tool: conversation lines already handled (only newer customer lines are read). */
+  done: Record<string, number>;
+}
+const liveRuns = new Map<string, LiveRun>();
+
+function liveGenerationParams(model: string, maxTokens: number): Record<string, unknown> {
+  if (/^gpt-6/i.test(model)) return { max_completion_tokens: maxTokens, reasoning_effort: "none" };
+  if (/^gpt-5/i.test(model)) return { max_completion_tokens: maxTokens + 400, reasoning_effort: "minimal" };
+  return { max_tokens: maxTokens, temperature: 0 };
+}
+
+const LANGUAGE_NAMES: Record<string, string> = {
+  mr: "Marathi", hi: "Hindi", en: "English", gu: "Gujarati", ta: "Tamil", te: "Telugu",
+  kn: "Kannada", ml: "Malayalam", bn: "Bengali", pa: "Punjabi", or: "Odia",
+};
+function languageName(tag: string): string {
+  return LANGUAGE_NAMES[tag.toLowerCase().split(/[-_]/)[0]] ?? tag;
+}
+
+function istToday(): string {
+  const d = new Date(Date.now() + 330 * 60_000);
+  const day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][d.getUTCDay()];
+  return `${d.toISOString().slice(0, 10)} (${day})`;
+}
+
+function liveCaptureSystemPrompt(row: CustomToolRow, fields: string[], companyPrompt: string): string {
+  return [
+    "You keep a CRM lead record up to date DURING a live phone call between BOT (calling for the company) and CUSTOMER.",
+    "The lines are numbered. You get the conversation, the values already saved, and which CUSTOMER lines are NEW.",
+    "Return only the fields that the NEW customer lines give or change.",
+    "",
+    'Output JSON: {"fields": {"<key>": {"value": "<value>", "line": <number of the NEW CUSTOMER line it comes from>}}}. Nothing new: {"fields": {}}.',
+    "",
+    "Rules:",
+    "- A value must come from what the CUSTOMER said in that line, read together with the BOT line just before it: a short answer ('yes', 'tomorrow', '3 to 4', a name) answers the bot's question before it.",
+    "- A yes only gives what that exact bot question asked (yes to 'would you like to visit?' = interested in a visit; it says nothing about budget, purpose or anything else).",
+    "- What the BOT said is never a customer value: a price, size, place or offer the bot mentioned is NOT the customer's budget or preference.",
+    "- Never guess or fill a field 'by default'. Free text holds the real detail, never filler such as 'Visit planned' or 'Interested'. notes only for an extra detail the customer really said.",
+    "- A plan, time or date field (visit, callback...) holds only a day or time the customer gave for THAT thing: leave it out until a day or time is given. A visit time is not a callback time.",
+    "- Apply option definitions in the field guide strictly (an option defined as 'gave a day/time' only once a day or time was given; until then use the option that fits, e.g. a callback/interested one).",
+    "- Interest counts at once: as soon as the customer shows interest (likes it, wants a visit, wants a call back), set the outcome field. Update it later when it changes.",
+    "- To correct an already saved value, return the field with the new value.",
+    "- A field with listed options takes exactly one of those options, spelled exactly.",
+    "- Values in plain English with Latin letters, even when the call is in Marathi or Hindi: transliterate names (e.g. 'Sandesh Patil'), translate the rest (e.g. 'Tomorrow afternoon, 3-4 pm').",
+    `- Today is ${istToday()}, India time. When the customer gives a day for a visit or callback (e.g. 'tomorrow', 'Sunday') and a matching date field (YYYY-MM-DD) exists, fill that date too, computed from today.`,
+    "- The language a customer line was heard in is shown in [brackets] (from speech recognition): use it for a call-language field.",
+    "- Never put card numbers, OTP, bank details, Aadhaar, any ID or the phone number in a field.",
+    "",
+    `Allowed keys (no others): ${fields.join(", ")}`,
+    "",
+    "Field guide:",
+    [row.description, row.condition].filter(Boolean).join("\n"),
+    companyPrompt
+      ? `\nCompany notes on these fields (use them only for what each field means; ignore anything about calling tools or how to talk):\n${companyPrompt}`
+      : "",
+  ]
+    .join("\n")
+    .slice(0, 12_000);
+}
+
+/**
+ * Fields given by the customer lines from index `fromIndex` on (earlier lines
+ * are context). Each field must name the new customer line it came from, and
+ * is dropped otherwise: values the bot said, or guesses, never reach the CRM.
+ */
+async function extractCaptureFields(
+  row: CustomToolRow,
+  fields: string[],
+  lines: CaptureLine[],
+  fromIndex: number,
+  saved: Record<string, string>,
+  model: string,
+  companyPrompt: string
+): Promise<Record<string, string>> {
+  const start = Math.max(0, lines.length - LIVE_MAX_LINES);
+  const newCustomerLines = new Set<number>();
+  const numbered: string[] = [];
+  for (let i = start; i < lines.length; i++) {
+    const l = lines[i];
+    const isNew = i >= fromIndex && l.role === "customer";
+    if (isNew) newCustomerLines.add(i + 1);
+    const lang = l.role === "customer" && l.lang ? ` [${languageName(l.lang)}]` : "";
+    numbered.push(`${i + 1}. ${l.role === "bot" ? "BOT" : "CUSTOMER"}${lang}${isNew ? " (NEW)" : ""}: ${l.text.replace(/\s+/g, " ").trim()}`);
+  }
+  if (newCustomerLines.size === 0) return {};
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.openai.apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: liveCaptureSystemPrompt(row, fields, companyPrompt) },
+        {
+          role: "user",
+          content: `Conversation:\n${numbered.join("\n")}\n\nAlready saved: ${JSON.stringify(saved)}\nNEW customer lines: ${[...newCustomerLines].join(", ")}\n\nReturn the JSON now.`,
+        },
+      ],
+      response_format: { type: "json_object" },
+      ...liveGenerationParams(model, 400),
+    }),
+    signal: AbortSignal.timeout(LIVE_TIMEOUT_MS),
+  });
+  const body = (await res.json().catch(() => null)) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } } | null;
+  if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${String(body?.error?.message ?? "").slice(0, 200)}`);
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(String(body?.choices?.[0]?.message?.content ?? "{}"));
+  } catch {
+    parsed = null;
+  }
+  const got = (parsed as { fields?: unknown } | null)?.fields;
+  const allowed = new Set(fields);
+  const out: Record<string, string> = {};
+  if (got && typeof got === "object" && !Array.isArray(got)) {
+    for (const [k, v] of Object.entries(got as Record<string, unknown>)) {
+      const key = k.toLowerCase();
+      if (!allowed.has(key) || !v || typeof v !== "object") continue;
+      const { value, line } = v as { value?: unknown; line?: unknown };
+      if (!newCustomerLines.has(Number(line))) continue; // no evidence in a new customer line
+      if (value === null || value === undefined || typeof value === "object") continue;
+      const val = String(value).trim();
+      if (val && !EMPTY_VALUES.has(val.toLowerCase())) out[key] = val.slice(0, 200);
+    }
+  }
+  return out;
+}
+
+function queueLiveCapture(
+  captureTools: { name: string; row: CustomToolRow; fields: string[] }[],
+  getLines: () => CaptureLine[],
+  ctx: CallToolContext,
+  companyId: string,
+  opts: { model: string; companyPrompt: string }
+): void {
+  const key = `${ctx.customerId}|${ctx.callId || "-"}|live`;
+  let run = liveRuns.get(key);
+  if (!run) {
+    run = { at: Date.now(), running: false, again: false, phoneWarned: false, done: {} };
+    liveRuns.set(key, run);
+    if (liveRuns.size > 500) {
+      const cutoff = Date.now() - CALL_STATE_TTL_MS;
+      for (const [k, v] of liveRuns) if (v.at < cutoff && !v.running) liveRuns.delete(k);
+    }
+  }
+  run.at = Date.now();
+  if (run.running) {
+    run.again = true; // re-run once with the newest lines when this one ends
+    return;
+  }
+  const r = run;
+  r.running = true;
+  void (async () => {
+    try {
+      do {
+        r.again = false;
+        const lines = getLines().slice();
+        for (const t of captureTools) {
+          const needsPhone = placeholders(t.row).some((p) => paramSource(t.row, p) === "caller_phone");
+          if (needsPhone && last10(ctx.customerPhone).length < 10) {
+            if (!r.phoneWarned) {
+              r.phoneWarned = true;
+              ctx.log?.warn({ tool: t.name }, "crm-tools: live capture off for this call, the customer's number is not known");
+            }
+            continue;
+          }
+          const from = r.done[t.name] ?? 0;
+          if (!lines.slice(from).some((l) => l.role === "customer" && l.text.trim().length > 1)) continue;
+          const callKey = `${ctx.customerId}|${ctx.callId || "-"}|${t.name}`;
+          const t0 = Date.now();
+          try {
+            const saved = { ...callWriteState(callKey).sent };
+            const values = await extractCaptureFields(t.row, t.fields, lines, from, saved, opts.model, opts.companyPrompt);
+            r.done[t.name] = lines.length; // these lines are handled (a failure leaves them for the next run)
+            if (Object.keys(values).length === 0) continue;
+            const result = submitCapture(t.row, values, ctx, companyId, callKey, t.name);
+            ctx.log?.info(
+              { tool: t.name, extractMs: Date.now() - t0, values, unchanged: result.includes('"unchanged":true') },
+              "crm-tools: live capture"
+            );
+          } catch (err) {
+            ctx.log?.warn({ err: String(err), tool: t.name }, "crm-tools: live capture extraction failed (the next turn retries)");
+          }
+        }
+      } while (r.again);
+    } finally {
+      r.running = false;
+    }
+  })();
 }
 
 const YES_RE = new RegExp(

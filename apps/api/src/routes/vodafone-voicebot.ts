@@ -79,6 +79,7 @@ import {
 } from "../services/voice-language-infer";
 import type { CallEvent, OutboundFrame } from "../types/telephony-provider";
 import { startVodafoneCallLog, endVodafoneCallLog, noteVodafoneCallLanguage } from "../services/vodafone-call-log";
+import { loadCallToolset, type CaptureLine } from "../services/crm-tools/toolset";
 import {
   createSession,
   removeSession,
@@ -167,6 +168,28 @@ interface VodafoneCallState {
   customerPhone: string | null;
   processing: boolean;
   mediaFrameCount: number;
+  /** What was said on the call (bot + customer), for CRM live capture. */
+  conversation: CaptureLine[];
+}
+
+/**
+ * CRM live capture: after each caller line, the tenant's SAVE tools are filled
+ * from the conversation in the background (services/crm-tools). Never awaited,
+ * never throws: the turn goes on exactly as without it.
+ */
+function triggerLiveCapture(app: FastifyInstance, streamId: string, state: VodafoneCallState): void {
+  const { session } = state;
+  void loadCallToolset(session.customerId)
+    .then((toolset) => {
+      if (!toolset?.hasLiveCapture) return;
+      toolset.captureFromConversation(() => state.conversation, {
+        customerId: session.customerId,
+        customerPhone: state.customerPhone,
+        callId: session.callSid || streamId,
+        log: app.log,
+      });
+    })
+    .catch((err) => app.log.warn({ err, streamId }, "vodafone-voicebot: live capture could not start"));
 }
 
 const calls = new Map<string, VodafoneCallState>();
@@ -899,6 +922,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
     mediaFrameCount: 0,
     agentPinned,
     customerPhone: customerNumber,
+    conversation: [],
   };
   // Ignore the caller until the opening line / campaign script has finished
   // playing. Without this, a "Hello" said on picking up (while the agent and
@@ -955,6 +979,7 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
     campaignGreetingText ||
     session.greetingText ||
     resolveDefaultGreeting(session.defaultLanguageCode ?? "en-IN", ttsConfig.voiceGender);
+  state.conversation.push({ role: "bot", text: greeting });
   if (campaignGreetingText) {
     // runAskPipeline loads history from chat_messages: without this, the
     // lead's first reply ("yes, confirmed") reaches the LLM with no idea
@@ -1237,6 +1262,9 @@ async function processUtterance(app: FastifyInstance, streamId: string): Promise
       { streamId, transcript, sttMs, sttLanguageCode: stt.language_code, sttLanguageHint },
       "vodafone-voicebot: transcript ready"
     );
+    // CRM live capture starts now, in parallel with the answer (never awaited).
+    state.conversation.push({ role: "customer", text: transcript, lang: stt.language_code ?? null });
+    triggerLiveCapture(app, streamId, state);
 
     const languageResult = await handleLanguageSwitchFlow(app, streamId, state, transcript, stt.language_code);
     if (languageResult.action === "handled") return;
@@ -1391,6 +1419,7 @@ async function answerUtteranceBatch(
       callId: session.callSid || streamId,
       languageCode: session.currentLanguageCode || session.defaultLanguageCode,
       log: app.log,
+      liveCapture: true,
       onToolHold: async (holdText) => {
         // Batch mode speaks the answer only at the end, so say the hold line now.
         const pcm = await synthesizeSpeechToPcm8k(holdText, state.ttsConfig);
@@ -1400,6 +1429,7 @@ async function answerUtteranceBatch(
     },
   });
   noteRoutedAgent(app, streamId, state, askResult.agent_id);
+  if (askResult.answer.trim()) state.conversation.push({ role: "bot", text: askResult.answer.trim() });
   app.log.info(
     { streamId, askMs: askResult.response_time_ms, agentId: session.agentId, voice: `${state.ttsConfig.provider}/${state.ttsConfig.speaker ?? "default"}`, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (batch)"
@@ -1531,6 +1561,7 @@ async function answerUtteranceStreaming(
       callId: session.callSid || streamId,
       languageCode: session.currentLanguageCode || session.defaultLanguageCode,
       log: app.log,
+      liveCapture: true,
       onToolHold: async (holdText) => {
         // Nothing has been streamed yet this turn (the pipeline checks), so the
         // hold line is the first thing the caller hears, then the answer follows.
@@ -1541,6 +1572,7 @@ async function answerUtteranceStreaming(
     },
   });
   noteRoutedAgent(app, streamId, state, askResult.agent_id);
+  if (askResult.answer.trim()) state.conversation.push({ role: "bot", text: askResult.answer.trim() });
   app.log.info(
     { streamId, askMs: askResult.response_time_ms, agentId: session.agentId, voice: `${state.ttsConfig.provider}/${state.ttsConfig.speaker ?? "default"}`, pipelineTimings: askResult.pipeline_timings ?? null },
     "vodafone-voicebot: ask pipeline done (streaming)"
