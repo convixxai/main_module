@@ -453,17 +453,33 @@ function last10(phone: string | null | undefined): string {
   return String(phone ?? "").replace(/\D/g, "").slice(-10);
 }
 
-/** Custom parameter names a VI Streaming node may use to pass the lead's number. */
-const NUMBER_PARAM_RE = /^(msisdn|mobile|mobile_?no|phone|phone_?number|customer_?(number|phone|mobile)|lead_?(number|phone)|called_?number|b_?party)$/i;
+/**
+ * Custom parameter names a VI Streaming node may use to pass the lead's number.
+ * `cli`/`dni` included: on 2026-11-28 an OBD call's start event carried our own
+ * DNI as both cli and dni, so the Flow was given cli/dni custom parameters.
+ * Whichever of them is the tenant's own number is dropped by the caller.
+ */
+const NUMBER_PARAM_RE =
+  /^(msisdn|mobile|mobile_?no|phone|phone_?number|customer_?(number|phone|mobile)|lead_?(number|phone)|called_?number|calling_?number|caller_?(number|id)?|b_?party|a_?party|cli|dni|ani)$/i;
 
-/** 10-digit numbers found in the start event's custom parameters (likely lead numbers first). */
+/** A value that is a phone number as a whole (not a UUID or id that happens to hold 10 digits). */
+const PHONE_VALUE_RE = /^\+?\d{10,13}$/;
+
+/**
+ * 10-digit numbers found in the start event's custom parameters: named number
+ * parameters first, then any other parameter whose whole value is a phone number.
+ */
 function numbersFromCustomParams(params: Record<string, unknown> | undefined): string[] {
-  const out: string[] = [];
+  const named: string[] = [];
+  const other: string[] = [];
   for (const [k, v] of Object.entries(params ?? {})) {
-    const d = last10(String(v ?? ""));
-    if (d.length === 10 && NUMBER_PARAM_RE.test(k)) out.push(d);
+    const raw = String(v ?? "").replace(/[\s-]/g, "");
+    const d = last10(raw);
+    if (d.length !== 10) continue;
+    if (NUMBER_PARAM_RE.test(k)) named.push(d);
+    else if (PHONE_VALUE_RE.test(raw)) other.push(d);
   }
-  return out;
+  return [...new Set([...named, ...other])];
 }
 
 /** Every number that belongs to the tenant: its phone numbers, its VI dni, its Flow's active DNIs. */
@@ -587,6 +603,19 @@ async function routeVodafoneCall(
         `SELECT id, customer_id FROM outbound_campaigns
           WHERE id = $1 AND telephony_provider_id = 'vodafone' AND status != 'deleted'`,
         [param]
+      );
+      const row = r.rows[0];
+      if (row) byParam = { customerId: row.customer_id, campaignId: row.id, leadDigits: null, how: "campaign_id" };
+    } else if (param) {
+      // The Flow's campaign_id variable may hold VI's own campaign id (the
+      // createCampaign id, e.g. "KZGiXc/1yB0SFBno9GoAtg==", or its numeric
+      // ref id, e.g. 790679) instead of ours: match it against both.
+      const r = await pool.query(
+        `SELECT id, customer_id FROM outbound_campaigns
+          WHERE telephony_provider_id = 'vodafone' AND status != 'deleted'
+            AND (vi_campaign_id = $1 OR ($2::bigint IS NOT NULL AND vi_campaign_ref_id = $2::bigint))
+          ORDER BY updated_at DESC LIMIT 1`,
+        [param, /^\d{1,18}$/.test(param) ? param : null]
       );
       const row = r.rows[0];
       if (row) byParam = { customerId: row.customer_id, campaignId: row.id, leadDigits: null, how: "campaign_id" };
@@ -797,7 +826,29 @@ async function handleStart(app: FastifyInstance, ws: WebSocket, urlCustomerId: s
     ((telephony.metadata as Record<string, unknown> | undefined)?.vi_flow_id as string | undefined) ?? null,
     [campaign?.callerNumber]
   );
-  const customerNumber = matchedLeadDigits ?? pickCustomerNumber(event, ownNumbers);
+  let customerNumber = matchedLeadDigits ?? pickCustomerNumber(event, ownNumbers);
+  if (!customerNumber && campaign) {
+    // The campaign is known (campaign_id parameter) but VI gave no lead number
+    // (OBD start events can carry our DNI as both cli and dni). Use the
+    // campaign's lead only when exactly one is being dialed: never guess
+    // between several.
+    try {
+      const r = await pool.query(
+        `SELECT RIGHT(regexp_replace(phone_number, '\\D', '', 'g'), 10) AS d
+           FROM outbound_campaign_leads
+          WHERE campaign_id = $1 AND status IN ('pending', 'calling')
+          LIMIT 2`,
+        [campaign.id]
+      );
+      const d = r.rows.length === 1 ? String(r.rows[0].d ?? "") : "";
+      if (d.length === 10 && !ownNumbers.has(d)) {
+        customerNumber = d;
+        app.log.info({ streamId: event.streamId, campaignId: campaign.id }, "vodafone-voicebot: customer number taken from the campaign's only open lead");
+      }
+    } catch (err) {
+      app.log.warn({ err, campaignId: campaign.id }, "vodafone-voicebot: campaign lead lookup failed");
+    }
+  }
   app.log.info(
     {
       streamId: event.streamId,
